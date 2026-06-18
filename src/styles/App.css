@@ -1,0 +1,217 @@
+.App {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-app);
+}
+
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background: var(--bg-app);
+  color: var(--text-0);
+}
+
+.login-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  max-width: 400px;
+  padding: 40px;
+}
+
+.login-header {
+  text-align: center;
+}
+
+.login-header h1 {
+  margin: 10px 0 5px;
+  font-size: 24px;
+  color: var(--text-0);
+}
+
+.login-header p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.logo-placeholder {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto;
+  filter: drop-shadow(0 0 14px var(--accent-glow));
+  animation: float 3s ease-in-out infinite;
+  color: var(--accent);
+}
+
+.logo-placeholder svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  background: var(--bg-1);
+  padding: 30px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-soft);
+  width: 100%;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+}
+
+.login-form label {
+  font-size: 13px;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.login-form input {
+  padding: 12px 15px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: 15px;
+  transition: all 0.2s ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.login-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.login-form button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 12px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 15px;
+  transition: all 0.2s ease;
+  min-height: 44px;
+  width: 100%;
+}
+
+.login-form button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 15px var(--accent-glow);
+}
+
+.login-form button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.login-form button:disabled {
+  background: var(--bg-3);
+  color: var(--text-3);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.error-message {
+  background: color-mix(in oklch, var(--danger) 15%, var(--bg-1));
+  border: 1px solid color-mix(in oklch, var(--danger) 30%, transparent);
+  color: var(--danger);
+  padding: 12px;
+  border-radius: var(--radius);
+  width: 100%;
+  text-align: center;
+  font-size: 14px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+.fade-in { animation: fadeIn 0.6s ease-out; }
+.slide-up { animation: slideUp 0.5s ease-out forwards; }
+.shake { animation: shake 0.4s ease-in-out; }
+
+/* Spinner */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: #fff;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Sidebar */
+.sidebar {
+  width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 0;
+  border-right: 1px solid var(--line-soft);
+  z-index: 10;
+  background: var(--bg-1);
+}
+
+.sidebar-item {
+  margin-bottom: 20px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: grid;
+  place-items: center;
+}
+
+.sidebar-item:last-child {
+  margin-bottom: 0;
+}
+
+.sidebar-item:hover {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+
+.sidebar-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
