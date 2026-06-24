@@ -97,6 +97,10 @@ function toUint8Array(data: any) {
   return new Uint8Array(data || []);
 }
 
+function nextFrame() {
+  return new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
 class TelegramService {
   private client: TelegramClient | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -676,7 +680,20 @@ class TelegramService {
 
   private async saveBytesToFile(filePath: string, data: any) {
     const bytes = toUint8Array(data);
-    await invoke('save_download_file', { filePath, data: Array.from(bytes) });
+    const chunkSize = 512 * 1024;
+
+    await invoke('begin_download_file', { filePath });
+    try {
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+        const chunk = bytes.slice(offset, offset + chunkSize);
+        await invoke('append_download_file_chunk', { filePath, data: Array.from(chunk) });
+        await nextFrame();
+      }
+      await invoke('finish_download_file', { filePath });
+    } catch (error) {
+      await invoke('abort_download_file', { filePath }).catch(() => {});
+      throw error;
+    }
   }
 
   private async downloadUrlToFile(url: string, filePath: string, onProgress?: (percent: number) => void) {
@@ -696,7 +713,7 @@ class TelegramService {
   private async getDownloadWorkers() {
     try {
       const settings = await mediaCache.getCacheSettings();
-      return Math.max(1, Number(settings.downloadWorkers || 4));
+      return Math.min(4, Math.max(1, Number(settings.downloadWorkers || 4)));
     } catch {
       return this.getDownloadWorkersFallback();
     }
@@ -721,6 +738,8 @@ class TelegramService {
   }
 
   private async saveTelegramMessageToFile(message: any, filePath: string, workers: number, onProgress?: (percent: number) => void) {
+    let lastProgressPercent = -1;
+    let lastProgressAt = 0;
     const buffer = await this.client!.downloadMedia(message, {
       workers,
       progressCallback: (downloaded: any, total: any) => {
@@ -729,7 +748,12 @@ class TelegramService {
         const percent = totalNumber > 0
           ? Math.min(100, Math.round((toNumberValue(downloaded) / totalNumber) * 100))
           : 0;
-        onProgress?.(percent);
+        const now = Date.now();
+        if (percent !== lastProgressPercent && (percent === 100 || now - lastProgressAt > 250)) {
+          lastProgressPercent = percent;
+          lastProgressAt = now;
+          onProgress?.(percent);
+        }
       }
     });
 
@@ -865,6 +889,7 @@ class TelegramService {
           downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
           sendProgressUpdate(`Falhou: ${safeName}`);
         }
+        await nextFrame();
       }
 
       const finalStatus = this.activeDownloadAborted
@@ -945,6 +970,7 @@ class TelegramService {
       }
 
       this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount, currentFile: safeName, items: processedItems });
+      await nextFrame();
     }
 
     this.emitDownloadProgress({
@@ -1272,6 +1298,7 @@ class TelegramService {
         }
 
         this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'progress' });
+        await nextFrame();
       }
 
       this.emitSaveMultipleProgress({
@@ -1336,6 +1363,7 @@ class TelegramService {
         failedCount++;
         downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
+      await nextFrame();
     }
 
     this.emitSaveMultipleProgress({

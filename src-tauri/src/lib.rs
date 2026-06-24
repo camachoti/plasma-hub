@@ -4,6 +4,7 @@ mod twitter_native;
 mod youtube;
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
@@ -38,6 +39,45 @@ fn save_download_file(file_path: String, data: Vec<u8>) -> Result<(), String> {
     fs::rename(&partial_path, path).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn begin_download_file(file_path: String) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let partial_path = format!("{}.part", file_path);
+    let _ = fs::remove_file(&partial_path);
+    fs::File::create(&partial_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn append_download_file_chunk(file_path: String, data: Vec<u8>) -> Result<(), String> {
+    let partial_path = format!("{}.part", file_path);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&partial_path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn finish_download_file(file_path: String) -> Result<(), String> {
+    let partial_path = format!("{}.part", file_path);
+    fs::rename(&partial_path, Path::new(&file_path)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn abort_download_file(file_path: String) -> Result<(), String> {
+    let partial_path = format!("{}.part", file_path);
+    match fs::remove_file(&partial_path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -61,6 +101,10 @@ pub fn run() {
             path_exists,
             ensure_dir,
             save_download_file,
+            begin_download_file,
+            append_download_file_chunk,
+            finish_download_file,
+            abort_download_file,
             db::get_downloads,
             downloader::start_download,
             twitter_native::analyze_twitter_profile_native,
