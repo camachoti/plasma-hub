@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
+import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import bigInt from 'big-integer';
 
@@ -20,10 +22,84 @@ import {
 const apiId = Number(import.meta.env.VITE_API_ID || "0");
 const apiHash = import.meta.env.VITE_API_HASH || "";
 
+function toNumberValue(value: any) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (value && typeof value.toJSNumber === 'function') return value.toJSNumber();
+  if (value && typeof value.toString === 'function') return Number(value.toString());
+  return 0;
+}
+
+function sanitizeForFilename(value: any) {
+  return String(value || 'Desconhecido')
+    .replace(/[^\w.-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 160) || 'arquivo';
+}
+
+function joinPath(...parts: string[]) {
+  const filtered = parts.filter(Boolean);
+  if (!filtered.length) return '';
+  return filtered
+    .map((part, index) => {
+      if (index === 0) return part.replace(/\/+$/g, '');
+      return part.replace(/^\/+|\/+$/g, '');
+    })
+    .join('/');
+}
+
+function basename(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function getMediaFileExtension(message: any) {
+  if (message?.photo) return '.jpg';
+  if (message?.video) return '.mp4';
+
+  const fileExt = message?.file?.ext;
+  if (fileExt) return fileExt.startsWith('.') ? fileExt : `.${fileExt}`;
+
+  const mimeType = message?.document?.mimeType || '';
+  if (mimeType === 'video/webm') return '.webm';
+  if (mimeType === 'video/quicktime') return '.mov';
+  if (mimeType.startsWith('video/')) return '.mp4';
+  if (mimeType.startsWith('image/')) return '.jpg';
+  if (mimeType.startsWith('audio/')) return '.mp3';
+  return '.bin';
+}
+
+function getMessageDownloadFilename(message: any) {
+  let name = message?.file?.name || `media_${message?.id || 'file'}${getMediaFileExtension(message)}`;
+  if (name.endsWith('.bin')) {
+    const ext = getMediaFileExtension(message);
+    if (ext !== '.bin') name = `${name.slice(0, -4)}${ext}`;
+  }
+  return sanitizeForFilename(name);
+}
+
+function isDownloadableMedia(message: any) {
+  if (!message || message.out) return false;
+  if (message.photo || message.video) return true;
+  const mime = message.document?.mimeType || '';
+  return mime.startsWith('video/') || mime.startsWith('image/') || mime.startsWith('audio/');
+}
+
+function toUint8Array(data: any) {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  return new Uint8Array(data || []);
+}
+
 class TelegramService {
   private client: TelegramClient | null = null;
+  private connectPromise: Promise<void> | null = null;
   private session: StringSession;
   private mediaProgressCallbacks: Set<Function> = new Set();
+  private downloadProgressCallbacks: Set<Function> = new Set();
+  private saveMultipleProgressCallbacks: Set<Function> = new Set();
+  private activeDownloadAborted = false;
+  private saveMultipleAborted = false;
   private serviceWorkerMessageHandler: (event: MessageEvent) => void;
   public skipLogin: boolean = false;
 
@@ -51,6 +127,18 @@ class TelegramService {
         navigator.serviceWorker.startMessages();
       }
     }
+  }
+
+  resetSession() {
+    localStorage.removeItem('telegram_session');
+    if (this.client) {
+      Promise.resolve(this.client.disconnect()).catch(error => {
+        console.warn('[TelegramService] Failed to disconnect old client while resetting session:', error);
+      });
+    }
+    this.client = null;
+    this.session = new StringSession('');
+    this.session.setDC(4, "vesta.web.telegram.org", 443);
   }
 
   private streamIterators = new Map<string, { iter: AsyncIterator<any>, message: any, fileSize: number, mimeType: string, offset: number }>();
@@ -237,18 +325,29 @@ class TelegramService {
 
   async connect() {
     if (this.client && this.client.connected) return;
+    if (this.connectPromise) return this.connectPromise;
     
     if (!apiId || !apiHash) {
       console.warn("API_ID and API_HASH are required in .env");
       throw new Error("Credenciais do Telegram ausentes. Crie um arquivo .env com VITE_API_ID e VITE_API_HASH.");
     }
 
-    this.client = new TelegramClient(this.session, apiId, apiHash, {
-      connectionRetries: 5,
-      useWSS: true,
-    });
+    this.connectPromise = (async () => {
+      if (!this.client) {
+        this.client = new TelegramClient(this.session, apiId, apiHash, {
+          connectionRetries: 5,
+          useWSS: true,
+        });
+      }
 
-    await this.client.connect();
+      await this.client.connect();
+    })();
+
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
   }
 
   async checkAuth() {
@@ -308,8 +407,17 @@ class TelegramService {
 
   async getDialogs() {
     const fakeDialogs = twitterFakeDialogs();
-    if (this.skipLogin || !this.client) return { success: true, dialogs: fakeDialogs };
+    if (this.skipLogin) return { success: true, dialogs: fakeDialogs };
     try {
+      if (!this.client || !this.client.connected) {
+        const savedSession = localStorage.getItem('telegram_session');
+        if (!savedSession) return { success: true, dialogs: fakeDialogs };
+        await this.connect();
+      }
+
+      const isAuthorized = await this.client.checkAuthorization();
+      if (!isAuthorized) return { success: true, dialogs: fakeDialogs };
+
       const dialogs = await this.client.getDialogs();
       return {
         success: true,
@@ -406,6 +514,16 @@ class TelegramService {
       }
 
       // 2. Map formatted messages
+      const getSenderName = (m: any) => {
+        if (m.out) return null;
+        const sender = m.sender;
+        if (!sender) return null;
+        if (sender.firstName || sender.lastName) {
+          return [sender.firstName, sender.lastName].filter(Boolean).join(' ').trim();
+        }
+        return sender.title || sender.username || null;
+      };
+
       const formattedMessages = allValidMessages.map(m => {
         const isVideo = !!(m.media?.document?.mimeType && typeof m.media.document.mimeType === 'string' && m.media.document.mimeType.includes('video'));
         const isPhoto = !!(m.media?.photo || m.media?.className === 'MessageMediaPhoto');
@@ -418,12 +536,14 @@ class TelegramService {
           date: m.date,
           out: m.out,
           senderId: m.senderId?.toString(),
+          senderName: getSenderName(m),
           replyToMsgId: m.replyTo?.replyToMsgId,
           media: m.media ? true : false,
           text: m.message,
           hasMedia: m.media ? true : false,
           isPhoto,
           isVideo,
+          groupedId: m.groupedId ? m.groupedId.toString() : null,
           videoDuration,
           mediaSize,
           isDeleted: false
@@ -532,9 +652,284 @@ class TelegramService {
       return { success: false, topics: [] };
     }
   }
-  async startDownload(opts: any) { return { success: true }; }
-  async stopDownload() { return { success: true }; }
-  onDownloadProgress(cb: any) { return () => {}; }
+  private emitDownloadProgress(data: any) {
+    this.downloadProgressCallbacks.forEach(cb => cb(data));
+  }
+
+  private emitSaveMultipleProgress(data: any) {
+    this.saveMultipleProgressCallbacks.forEach(cb => cb(data));
+  }
+
+  private async pathExists(path: string) {
+    return invoke<boolean>('path_exists', { path });
+  }
+
+  private async ensureDir(path: string) {
+    await invoke('ensure_dir', { path });
+  }
+
+  private async saveBytesToFile(filePath: string, data: any) {
+    const bytes = toUint8Array(data);
+    await invoke('save_download_file', { filePath, data: Array.from(bytes) });
+  }
+
+  private async downloadUrlToFile(url: string, filePath: string, onProgress?: (percent: number) => void) {
+    const response = await tauriFetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    onProgress?.(20);
+    const buffer = await response.arrayBuffer();
+    onProgress?.(80);
+    await this.saveBytesToFile(filePath, buffer);
+    onProgress?.(100);
+  }
+
+  private getDownloadWorkersFallback() {
+    return 4;
+  }
+
+  private async getDownloadWorkers() {
+    try {
+      const settings = await mediaCache.getCacheSettings();
+      return Math.max(1, Number(settings.downloadWorkers || 4));
+    } catch {
+      return this.getDownloadWorkersFallback();
+    }
+  }
+
+  private async getSenderFolderName(message: any) {
+    let senderName = 'Desconhecido';
+    try {
+      const sender = await message.getSender?.();
+      if (sender?.firstName || sender?.lastName) {
+        senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ').trim();
+      } else if (sender?.title || sender?.username) {
+        senderName = sender.title || sender.username;
+      } else if (message.senderId) {
+        senderName = `ID_${message.senderId.toString()}`;
+      }
+    } catch (e) {
+      console.error('Error getting sender for splitting media:', e);
+      if (message.senderId) senderName = `ID_${message.senderId.toString()}`;
+    }
+    return sanitizeForFilename(senderName);
+  }
+
+  private async saveTelegramMessageToFile(message: any, filePath: string, workers: number, onProgress?: (percent: number) => void) {
+    const buffer = await this.client!.downloadMedia(message, {
+      workers,
+      progressCallback: (downloaded: any, total: any) => {
+        if (this.activeDownloadAborted || this.saveMultipleAborted) throw new Error('STOP_ABORTED');
+        const totalNumber = toNumberValue(total);
+        const percent = totalNumber > 0
+          ? Math.min(100, Math.round((toNumberValue(downloaded) / totalNumber) * 100))
+          : 0;
+        onProgress?.(percent);
+      }
+    });
+
+    if (!buffer) throw new Error('Download retornou vazio.');
+    await this.saveBytesToFile(filePath, buffer);
+  }
+
+  async startDownload({ chatId, folderPath, topic, splitByUser }: any) {
+    try {
+      this.activeDownloadAborted = false;
+      this.saveMultipleAborted = false;
+
+      const fakeChat = this.getTwitterFakeChat(chatId);
+      if (fakeChat) {
+        return this.startFakeChatDownload({ chatId, folderPath, fakeChat });
+      }
+
+      if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+
+      const entity = await this.client.getEntity(chatId);
+      const downloadFolder = topic?.title ? joinPath(folderPath, sanitizeForFilename(topic.title)) : folderPath;
+      await this.ensureDir(downloadFolder);
+
+      let downloadedCount = 0;
+      let skippedCount = 0;
+      let failedCount = 0;
+      let current = 0;
+      let totalMedia = 0;
+      const processedItems: any[] = [];
+      const workers = await this.getDownloadWorkers();
+
+      this.emitDownloadProgress({
+        chatId,
+        total: 0,
+        downloaded: 0,
+        currentFile: 'Contando mídias...',
+        topicTitle: topic?.title || null,
+        isScanning: true,
+        items: processedItems
+      });
+
+      try {
+        const countRes: any = await this.client.getMessages(entity, {
+          filter: new Api.InputMessagesFilterPhotoVideo(),
+          limit: 1,
+          replyTo: topic?.id || undefined
+        });
+        totalMedia = countRes?.total || 0;
+      } catch (err) {
+        console.error('Error fetching media count:', err);
+      }
+
+      if (this.activeDownloadAborted) return { success: true, aborted: true };
+
+      const sendProgressUpdate = (currentFile: string, partialDownloaded?: number) => {
+        this.emitDownloadProgress({
+          chatId,
+          total: totalMedia,
+          downloaded: Math.min(totalMedia || Number.MAX_SAFE_INTEGER, partialDownloaded ?? (downloadedCount + skippedCount)),
+          currentFile,
+          topicTitle: topic?.title || null,
+          isScanning: false,
+          items: processedItems
+        });
+      };
+
+      const messagesIter = this.client.iterMessages(entity, {
+        filter: new Api.InputMessagesFilterPhotoVideo(),
+        limit: undefined,
+        replyTo: topic?.id || undefined
+      });
+
+      for await (const message of messagesIter) {
+        if (this.activeDownloadAborted) break;
+        if (!isDownloadableMedia(message)) continue;
+
+        current++;
+        const safeName = getMessageDownloadFilename(message);
+        const itemSize = Number(message.document?.size || message.photo?.sizes?.slice(-1)?.[0]?.size || 0);
+        let currentFolder = downloadFolder;
+
+        if (splitByUser && !topic) {
+          currentFolder = joinPath(downloadFolder, await this.getSenderFolderName(message));
+          await this.ensureDir(currentFolder);
+        }
+
+        const filePath = joinPath(currentFolder, safeName);
+        if (await this.pathExists(filePath)) {
+          skippedCount++;
+          processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: itemSize });
+          if (skippedCount % 10 === 0 || current === totalMedia) {
+            sendProgressUpdate(`Ignorando arquivos já baixados... (${skippedCount} ignorados)`);
+          }
+          continue;
+        }
+
+        const item = { name: safeName, status: 'downloading', progress: 0, size: itemSize };
+        processedItems.push(item);
+        sendProgressUpdate(safeName);
+
+        try {
+          await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
+            if (this.activeDownloadAborted) throw new Error('STOP_ABORTED');
+            item.progress = percent;
+            sendProgressUpdate(`${safeName} (${percent}%)`, downloadedCount + skippedCount + (percent / 100));
+          });
+
+          if (this.activeDownloadAborted) break;
+          downloadedCount++;
+          item.status = 'completed';
+          item.progress = 100;
+          sendProgressUpdate(safeName);
+        } catch (err: any) {
+          if (err?.message === 'STOP_ABORTED' || this.activeDownloadAborted) break;
+          console.error(`Failed to download ${safeName}:`, err);
+          failedCount++;
+          item.status = 'failed';
+          sendProgressUpdate(`Falhou: ${safeName}`);
+        }
+      }
+
+      const finalStatus = this.activeDownloadAborted
+        ? `Parado: ${downloadedCount} baixados, ${skippedCount} ignorados`
+        : totalMedia === 0
+          ? 'Nenhuma mídia encontrada'
+          : `Concluído: ${downloadedCount} baixados, ${skippedCount} ignorados, ${failedCount} falharam`;
+
+      this.emitDownloadProgress({
+        chatId,
+        total: totalMedia,
+        downloaded: this.activeDownloadAborted ? Math.min(totalMedia, downloadedCount + skippedCount) : totalMedia,
+        currentFile: finalStatus,
+        topicTitle: topic?.title || null,
+        isScanning: false,
+        items: processedItems
+      });
+
+      return { success: true, downloadedCount, skippedCount, failedCount, total: totalMedia, aborted: this.activeDownloadAborted };
+    } catch (error: any) {
+      console.error('Download error:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  private async startFakeChatDownload({ chatId, folderPath, fakeChat }: any) {
+    const mediaMessages = fakeChat.messages.filter((message: TwitterFakeMessage) => message.url);
+    const total = mediaMessages.length;
+    let downloadedCount = 0;
+    let skippedCount = 0;
+    let failedCount = 0;
+    const processedItems: any[] = [];
+
+    await this.ensureDir(folderPath);
+    this.emitDownloadProgress({ chatId, total, downloaded: 0, currentFile: 'Iniciando...', isScanning: false, items: processedItems });
+
+    for (const message of mediaMessages) {
+      if (this.activeDownloadAborted) break;
+      const ext = message.isVideo ? '.mp4' : '.jpg';
+      const safeName = sanitizeForFilename(`media_${message.id}${ext}`);
+      const filePath = joinPath(folderPath, safeName);
+
+      if (await this.pathExists(filePath)) {
+        skippedCount++;
+        processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: message.mediaSize || 0 });
+        continue;
+      }
+
+      const item = { name: safeName, status: 'downloading', progress: 0, size: message.mediaSize || 0 };
+      processedItems.push(item);
+      try {
+        await this.downloadUrlToFile(message.url!, filePath, (percent) => {
+          item.progress = percent;
+          this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount + (percent / 100), currentFile: `${safeName} (${percent}%)`, items: processedItems });
+        });
+        downloadedCount++;
+        item.status = 'completed';
+        item.progress = 100;
+      } catch (err) {
+        console.error(`Failed to download ${safeName}:`, err);
+        failedCount++;
+        item.status = 'failed';
+      }
+
+      this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount, currentFile: safeName, items: processedItems });
+    }
+
+    this.emitDownloadProgress({
+      chatId,
+      total,
+      downloaded: this.activeDownloadAborted ? downloadedCount + skippedCount : total,
+      currentFile: this.activeDownloadAborted ? 'Cancelado pelo usuário' : 'Concluído!',
+      items: processedItems
+    });
+
+    return { success: true, downloadedCount, skippedCount, failedCount, total, aborted: this.activeDownloadAborted };
+  }
+
+  async stopDownload() {
+    this.activeDownloadAborted = true;
+    return { success: true };
+  }
+
+  onDownloadProgress(cb: any) {
+    this.downloadProgressCallbacks.add(cb);
+    return () => this.downloadProgressCallbacks.delete(cb);
+  }
   async getMessageMedia({ chatId, messageId }: any) {
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (fakeMessage) {
@@ -644,16 +1039,253 @@ class TelegramService {
     return () => this.mediaProgressCallbacks.delete(cb);
   }
   
-  onSaveMultipleProgress(cb: any) { return () => {}; }
+  onSaveMultipleProgress(cb: any) {
+    this.saveMultipleProgressCallbacks.add(cb);
+    return () => this.saveMultipleProgressCallbacks.delete(cb);
+  }
   onDeepLink(cb: any) { return () => {}; }
   onSendProgress(cb: any) { return () => {}; }
   
   async checkInvite(url: string) { return { success: false, chat: null, alreadyMember: false }; }
   openExternal(url: string) {}
-  async searchUserMedia(opts: any) { return { success: true, media: [] }; }
-  async selectFolder() { return { success: false, folderPath: '' }; }
-  async saveMultipleMediaFiles(opts: any) { return { success: true }; }
-  async stopSaveMultiple() { return { success: true }; }
+  async searchUserMedia({ chatId, userId, limit = 100 }: any) {
+    const fakeChat = this.getTwitterFakeChat(chatId);
+    if (fakeChat) {
+      return {
+        success: true,
+        media: fakeChat.messages
+          .filter(message => message.url && String(fakeChat.id) === String(userId))
+          .slice(-limit)
+          .map(message => ({
+            id: message.id,
+            isVideo: message.isVideo,
+            mediaSize: message.mediaSize ?? null,
+          })),
+      };
+    }
+
+    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+
+    const peerIdToString = (value: any): string => {
+      if (value == null) return '';
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
+        return String(value);
+      }
+      if (typeof value.toString === 'function' && value.toString !== Object.prototype.toString) {
+        const str = value.toString();
+        if (str && str !== '[object Object]') return str;
+      }
+      return String(value.userId ?? value.channelId ?? value.chatId ?? value.value ?? value.id ?? '');
+    };
+    const normalizePeerId = (value: any) => peerIdToString(value).replace(/[^\d-]/g, '');
+    const targetUserId = normalizePeerId(userId);
+
+    const mapMediaMessage = (m: any) => ({
+      id: m.id,
+      isVideo: !!(m.media?.document?.mimeType && typeof m.media.document.mimeType === 'string' && m.media.document.mimeType.includes('video')),
+      mediaSize: m.media?.document?.size ? Number(m.media.document.size) : (m.media?.photo?.sizes?.slice(-1)[0]?.size || null),
+    });
+
+    try {
+      const entity = await this.client.getEntity(chatId);
+      let fromUser: any = userId;
+      try {
+        fromUser = await this.client.getEntity(userId);
+      } catch {
+        // Numeric sender IDs still work as a fallback in some GramJS paths.
+      }
+
+      let messages: any[] = [];
+      try {
+        messages = await this.client.getMessages(entity, {
+          limit,
+          filter: new Api.InputMessagesFilterPhotoVideo(),
+          fromUser,
+        });
+      } catch (searchErr) {
+        console.warn('Telegram fromUser media search failed, falling back to scan:', searchErr);
+      }
+
+      let mediaMessages = (Array.isArray(messages) ? messages : []).filter((m: any) => m?.media);
+
+      if (mediaMessages.length === 0) {
+        const scanLimit = Math.max(limit * 10, 1000);
+        messages = await this.client.getMessages(entity, {
+          limit: scanLimit,
+          filter: new Api.InputMessagesFilterPhotoVideo(),
+        });
+        mediaMessages = (Array.isArray(messages) ? messages : [])
+          .filter((m: any) => {
+            const senderId = normalizePeerId(m.senderId ?? m.fromId);
+            return m?.media && senderId && senderId === targetUserId;
+          })
+          .slice(0, limit);
+      }
+
+      return {
+        success: true,
+        media: mediaMessages.map(mapMediaMessage),
+      };
+    } catch (e: any) {
+      console.error('Failed to search user media:', e);
+      return { success: false, error: e.message || 'Falha ao buscar mídias do usuário.' };
+    }
+  }
+  async selectFolder() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Selecionar pasta de destino',
+      });
+
+      if (!selected || Array.isArray(selected)) return { success: false, folderPath: '' };
+      return { success: true, folderPath: selected };
+    } catch (e: any) {
+      console.error('Failed to select folder:', e);
+      return { success: false, folderPath: '', error: e?.message || String(e) };
+    }
+  }
+  async saveMultipleMediaFiles({ chatId, messageIds, folderPath }: any) {
+    try {
+      this.saveMultipleAborted = false;
+      this.activeDownloadAborted = false;
+      await this.ensureDir(folderPath);
+
+      const fakeChat = this.getTwitterFakeChat(chatId);
+      if (fakeChat) {
+        return this.saveMultipleFakeMediaFiles({ chatId, messageIds, folderPath, fakeChat });
+      }
+
+      if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+
+      const entity = await this.client.getEntity(chatId);
+      const total = messageIds.length;
+      let downloadedCount = 0;
+      let failedCount = 0;
+      const workers = await this.getDownloadWorkers();
+
+      const batchResult = await this.client.getMessages(entity, { ids: messageIds });
+      const messages = Array.isArray(batchResult) ? batchResult : (batchResult ? [batchResult] : []);
+      const messageMap = new Map();
+      for (const msg of messages) {
+        if (msg?.id) messageMap.set(msg.id, msg);
+      }
+
+      for (let i = 0; i < messageIds.length; i++) {
+        if (this.saveMultipleAborted) break;
+
+        const messageId = messageIds[i];
+        const message = messageMap.get(messageId);
+        if (!message?.media) {
+          failedCount++;
+          continue;
+        }
+
+        const filename = getMessageDownloadFilename(message);
+        const filePath = joinPath(folderPath, filename);
+
+        if (await this.pathExists(filePath)) {
+          downloadedCount++;
+          this.emitSaveMultipleProgress({
+            chatId,
+            total,
+            downloaded: downloadedCount,
+            currentFile: `Ignorado (já existe): ${filename}`,
+            status: 'progress'
+          });
+          continue;
+        }
+
+        this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'downloading' });
+
+        try {
+          await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
+            if (this.saveMultipleAborted) throw new Error('STOP_ABORTED');
+            this.emitSaveMultipleProgress({
+              chatId,
+              total,
+              downloaded: downloadedCount + (percent / 100),
+              currentFile: `${filename} (${percent}%)`,
+              status: 'progress'
+            });
+          });
+
+          if (this.saveMultipleAborted) break;
+          downloadedCount++;
+        } catch (err: any) {
+          if (err?.message === 'STOP_ABORTED' || this.saveMultipleAborted) break;
+          console.error(`Error downloading media for message ${messageId}:`, err);
+          failedCount++;
+        }
+
+        this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'progress' });
+      }
+
+      this.emitSaveMultipleProgress({
+        chatId,
+        total,
+        downloaded: downloadedCount,
+        currentFile: this.saveMultipleAborted ? 'Cancelado pelo usuário' : 'Concluído!',
+        status: 'completed'
+      });
+
+      return { success: true, downloadedCount, failedCount, aborted: this.saveMultipleAborted };
+    } catch (error: any) {
+      console.error('Error in saveMultipleMediaFiles:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  private async saveMultipleFakeMediaFiles({ chatId, messageIds, folderPath, fakeChat }: any) {
+    const total = messageIds.length;
+    let downloadedCount = 0;
+    let failedCount = 0;
+    const messageMap = new Map(fakeChat.messages.map((message: TwitterFakeMessage) => [message.id, message]));
+
+    for (const messageId of messageIds) {
+      if (this.saveMultipleAborted) break;
+      const message = messageMap.get(messageId);
+      if (!message?.url) {
+        failedCount++;
+        continue;
+      }
+
+      const filename = sanitizeForFilename(`media_${message.id}${message.isVideo ? '.mp4' : '.jpg'}`);
+      const filePath = joinPath(folderPath, filename);
+
+      if (await this.pathExists(filePath)) {
+        downloadedCount++;
+        this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: `Ignorado (já existe): ${filename}`, status: 'progress' });
+        continue;
+      }
+
+      try {
+        await this.downloadUrlToFile(message.url, filePath, (percent) => {
+          this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount + (percent / 100), currentFile: `${filename} (${percent}%)`, status: 'progress' });
+        });
+        downloadedCount++;
+      } catch (err) {
+        console.error(`Error downloading fake media for message ${messageId}:`, err);
+        failedCount++;
+      }
+    }
+
+    this.emitSaveMultipleProgress({
+      chatId,
+      total,
+      downloaded: downloadedCount,
+      currentFile: this.saveMultipleAborted ? 'Cancelado pelo usuário' : 'Concluído!',
+      status: 'completed'
+    });
+
+    return { success: true, downloadedCount, failedCount, aborted: this.saveMultipleAborted };
+  }
+
+  async stopSaveMultiple() {
+    this.saveMultipleAborted = true;
+    return { success: true };
+  }
   async selectFile() { return { success: false, filePath: '', fileName: '' }; }
   async sendMedia(opts: any) { return { success: true }; }
   async sendMessage(opts: any) { return { success: true }; }
@@ -662,19 +1294,57 @@ class TelegramService {
   async sendReaction(opts: any) { return { success: true }; }
   getPathForFile(file: any) { return ''; }
   async joinChat(chatId: any) { return { success: true }; }
-  async saveMessageMediaFile({ chatId, messageId }: any) {
+  async saveMessageMediaFile({ chatId, messageId, downloadMeta = {}, saveAs = false }: any) {
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (!this.client && !fakeMessage) return { success: false };
+    let message: any = null;
+    let suggestedName = `media_${messageId}`;
+
+    if (fakeMessage) {
+      suggestedName = sanitizeForFilename(`media_${messageId}${fakeMessage.isVideo ? '.mp4' : '.jpg'}`);
+    } else if (saveAs) {
+      try {
+        const entity = await this.client!.getEntity(chatId);
+        const messages = await this.client!.getMessages(entity, { ids: [messageId] });
+        message = Array.isArray(messages) ? messages[0] : messages;
+        if (message) suggestedName = getMessageDownloadFilename(message);
+      } catch (e) {
+        console.error('Failed to load media before Save As:', e);
+      }
+    }
+
+    let saveAsPath = '';
+    if (saveAs) {
+      const selectedPath = await save({
+        title: 'Salvar mídia como',
+        defaultPath: suggestedName,
+      });
+      if (!selectedPath) return { success: false, canceled: true };
+      saveAsPath = selectedPath;
+      suggestedName = basename(selectedPath);
+    }
+
     const id = `${chatId}_${messageId}`;
+    let thumbnailUrl = fakeMessage?.thumbnailUrl || null;
+    if (!thumbnailUrl) {
+      try {
+        const thumbRes = await this.getMessageMedia({ chatId, messageId });
+        if (thumbRes?.success && thumbRes.filePath) thumbnailUrl = thumbRes.filePath;
+      } catch {
+        // Thumbnail is best-effort; downloads should continue without it.
+      }
+    }
     
     downloadService.addDownload({
       id,
       chatId,
       messageId,
-      fileName: `media_${messageId}`,
+      fileName: suggestedName,
       progress: 0,
       status: 'downloading',
-      platform: 'telegram'
+      platform: 'telegram',
+      thumbnailUrl: thumbnailUrl || undefined,
+      ...downloadMeta,
     });
 
     try {
@@ -683,6 +1353,34 @@ class TelegramService {
           downloadService.updateDownload(id, { progress: data.progress });
         }
       });
+
+      if (saveAs && saveAsPath) {
+        if (fakeMessage) {
+          if (!fakeMessage.url) throw new Error('Mídia sem URL.');
+          await this.downloadUrlToFile(fakeMessage.url, saveAsPath, (progress) => {
+            downloadService.updateDownload(id, { progress });
+            this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
+          });
+        } else {
+          if (!message) {
+            const entity = await this.client!.getEntity(chatId);
+            const messages = await this.client!.getMessages(entity, { ids: [messageId] });
+            message = Array.isArray(messages) ? messages[0] : messages;
+          }
+          if (!message?.media) throw new Error('Mídia não encontrada.');
+          await this.saveTelegramMessageToFile(message, saveAsPath, await this.getDownloadWorkers(), (progress) => {
+            downloadService.updateDownload(id, { progress });
+            this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
+          });
+        }
+        unsub();
+        downloadService.updateDownload(id, {
+          status: 'completed',
+          progress: 100,
+          fileName: basename(saveAsPath),
+        });
+        return { success: true, filePath: saveAsPath };
+      }
 
       const res = await this.getMessageMediaFile({ chatId, messageId });
       unsub();

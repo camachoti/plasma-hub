@@ -141,3 +141,68 @@ export function createTwitterProfileChat(profile: any) {
   window.dispatchEvent(new CustomEvent(TWITTER_FAKE_CHAT_EVENT, { detail: { chatId } }));
   return { success: true, chatId, mediaCount: mediaItems.length };
 }
+
+export function updateTwitterProfileChat(profile: any) {
+  const username = String(profile?.username || '').replace(/^@/, '');
+  const chatId = `twitter_profile_${username.toLowerCase()}`;
+  if (!username || !isTwitterFakeChatId(chatId)) {
+    return { success: false, error: 'Perfil do Twitter/X inválido.' };
+  }
+
+  const chats = readTwitterFakeChats();
+  const chatIndex = chats.findIndex(chat => chat.id === chatId);
+  if (chatIndex < 0) {
+    return { success: false, error: 'Chat importado do Twitter/X não encontrado.' };
+  }
+
+  const mediaItems: TwitterProfileMediaItemInput[] = Array.isArray(profile.mediaItems) && profile.mediaItems.length > 0
+    ? profile.mediaItems.filter((item: TwitterProfileMediaItemInput) => item?.url)
+    : (Array.isArray(profile.mediaUrls) ? profile.mediaUrls.filter(Boolean).map((url: string) => ({
+        url,
+        thumbnailUrl: url.includes('video.twimg.com/') ? profile.thumbnailUrl || null : url,
+        isVideo: /\.mp4(?:[?#]|$)/i.test(url) || url.includes('video.twimg.com/'),
+      })) : []);
+
+  const chat = chats[chatIndex];
+  const existingUrls = new Set(chat.messages.map(message => message.url).filter(Boolean));
+  const newItems = mediaItems.filter(item => item.url && !existingUrls.has(item.url));
+
+  if (newItems.length === 0) {
+    chats[chatIndex] = {
+      ...chat,
+      title: profile.displayName || chat.title,
+      avatarUrl: profile.avatarUrl || chat.avatarUrl || null,
+      thumbnailUrl: profile.thumbnailUrl || chat.thumbnailUrl || null,
+      originalUrl: profile.originalUrl || chat.originalUrl,
+    };
+    writeTwitterFakeChats(chats);
+    return { success: true, chatId, addedCount: 0 };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const nextId = Math.max(0, ...chat.messages.map(message => Number(message.id) || 0)) + 1;
+  const newMessages = newItems.map((item, index) => {
+    const isVideo = Boolean(item.isVideo) || /\.mp4(?:[?#]|$)/i.test(item.url) || item.url.includes('video.twimg.com/');
+    return {
+      id: nextId + index,
+      url: item.url,
+      thumbnailUrl: item.thumbnailUrl || (!isVideo ? item.url : null),
+      isVideo,
+      date: now + index,
+      text: `${isVideo ? 'Vídeo' : 'Imagem'} nova · https://x.com/${username}`,
+      mediaSize: null,
+    };
+  });
+
+  chats[chatIndex] = {
+    ...chat,
+    title: profile.displayName || chat.title,
+    avatarUrl: profile.avatarUrl || chat.avatarUrl || null,
+    thumbnailUrl: profile.thumbnailUrl || chat.thumbnailUrl || null,
+    originalUrl: profile.originalUrl || chat.originalUrl,
+    messages: [...chat.messages, ...newMessages],
+  };
+  writeTwitterFakeChats(chats);
+  window.dispatchEvent(new CustomEvent(TWITTER_FAKE_CHAT_EVENT, { detail: { chatId } }));
+  return { success: true, chatId, addedCount: newItems.length };
+}

@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
@@ -8,6 +9,9 @@ import { telegramService } from './TelegramService';
 import { Settings } from './Settings';
 import { Virtuoso } from 'react-virtuoso';
 import appIcon from '../../../build/icon.png';
+import { useAppearance } from '../appearance/AppearanceStore';
+import { updateTwitterProfileChat } from './TwitterFakeChatStore';
+import { getStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '😢', '🎉', '🙏', '👌', '💯', '🤣', '🤩', '🤮', '💩', '🖕', '😈'];
 
@@ -30,12 +34,6 @@ const hashColor = (str: string | undefined | null): PlasmaColor => {
   return PLASMA_COLORS[Math.abs(h) % PLASMA_COLORS.length];
 };
 
-const PALETTES = ['abyssal', 'ion', 'ember', 'bloom', 'forest', 'light'] as const;
-type Palette = typeof PALETTES[number];
-
-const DENSITIES = ['compact', 'cozy', 'roomy'] as const;
-type Density = typeof DENSITIES[number];
-
 interface Chat {
   id: string;
   title: string;
@@ -47,6 +45,7 @@ interface Chat {
   about?: string;
   participantsCount?: number;
   hasTopics?: boolean;
+  isFakeTwitter?: boolean;
   lastMessageText?: string;
   lastMessageDate?: number;
   unreadCount?: number;
@@ -288,9 +287,10 @@ const ListContainer = React.forwardRef<HTMLDivElement, any>(({ style, children, 
 
 interface DashboardProps {
   skipLogin?: boolean;
+  onTelegramLoginRequest?: () => void;
 }
 
-export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
+export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTelegramLoginRequest }) => {
   const PAGE_SIZE = 50;
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
@@ -312,6 +312,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [updatingTwitterMessages, setUpdatingTwitterMessages] = useState(false);
   const [forumTopics, setForumTopics] = useState<ForumTopic[]>([]);
   const [loadingTopics, setLoadingTopics] = useState(false);
   const [selectedTopicId, setSelectedTopicId] = useState<string>('all');
@@ -354,8 +355,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
   const [newTopicTitle, setNewTopicTitle] = useState('');
   const [newTopicColor, setNewTopicColor] = useState(7322096);
 
-  const [palette, setPalette] = useState<Palette>('abyssal');
-  const [density, setDensity] = useState<Density>('cozy');
+  const { palette, density } = useAppearance();
   const [infoOpen, setInfoOpen] = useState(false);
   const [emojiPickerMsgId, setEmojiPickerMsgId] = useState<number | null>(null);
   const [emojiPickerPos, setEmojiPickerPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -390,10 +390,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
   );
 
   const getChatKind = (chat: Chat) => {
+    if (chat.isFakeTwitter || (typeof chat.id === 'string' && chat.id.startsWith('twitter_profile_'))) return 'twitter';
     if (chat.isGroup) return 'grupo';
     if (chat.isChannel) return 'canal';
     return 'conversa';
   };
+
+  const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
+
+  const getDownloadMeta = (msg: Message, senderName?: string | null) => ({
+    chatTitle: selectedChat?.title,
+    chatKind: selectedChat ? getChatKind(selectedChat) : undefined,
+    topicTitle: viewingTopic && viewingTopic.id !== 0 ? viewingTopic.title : undefined,
+    senderName: senderName || (msg.out ? 'Você' : msg.senderName || undefined),
+    senderId: msg.senderId,
+  });
+
+  const normalizePeerId = (value: unknown) => String(value ?? '').replace(/[^\d-]/g, '');
 
   const formatMessageTime = (timestamp: number) => {
     const d = new Date(timestamp * 1000);
@@ -517,7 +530,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
 
   useEffect(() => {
     fetchDialogs();
-    telegramService.onDownloadProgress((data) => {
+    const unsubscribeProgress = telegramService.onDownloadProgress((data) => {
       setProgress({ total: data.total, downloaded: data.downloaded, currentFile: data.currentFile, topicTitle: data.topicTitle, isScanning: data.isScanning, items: data.items });
     });
     
@@ -532,6 +545,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
     });
 
     return () => {
+      unsubscribeProgress();
       unsubscribeBulk();
     };
   }, []);
@@ -829,7 +843,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
   const triggerUserMediaSearch = async (userId: string) => {
     if (!selectedChat) return;
     setSearchMediaLoading(true);
-    setSearchMediaResults([]);
+    const localMediaResults = messages
+      .filter(msg => msg.hasMedia && normalizePeerId(msg.senderId) === normalizePeerId(userId))
+      .map(msg => ({
+        id: msg.id,
+        isVideo: msg.isVideo,
+        mediaSize: msg.mediaSize ?? null,
+      }));
+    setSearchMediaResults(localMediaResults);
     try {
       const res = await telegramService.searchUserMedia({
         chatId: selectedChat.id,
@@ -837,7 +858,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
         limit: 100
       });
       if (res.success && res.media) {
-        setSearchMediaResults(res.media);
+        const merged = [...res.media, ...localMediaResults];
+        const seen = new Set<number>();
+        setSearchMediaResults(merged.filter(item => {
+          if (seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        }));
       } else {
         console.error('Failed to search user media:', res.error);
       }
@@ -872,6 +899,42 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
       console.error('Error during bulk download:', err);
       setBulkDownloadActive(false);
       setBulkProgress(null);
+    }
+  };
+
+  const handleUpdateTwitterMessages = async () => {
+    if (!selectedChat || updatingTwitterMessages) return;
+
+    setUpdatingTwitterMessages(true);
+    setIsMenuOpen(false);
+    setError('');
+
+    try {
+      const username = selectedChat.id.replace(/^twitter_profile_/, '');
+      const profile = await invoke('analyze_twitter_profile_native', {
+        url: `https://x.com/${username}`,
+        cookies: getStoredTwitterCookies().trim() || null,
+      });
+      const res = updateTwitterProfileChat(profile);
+      if (!res.success) {
+        setError(res.error || 'Não foi possível atualizar mensagens do Twitter/X.');
+        return;
+      }
+
+      await fetchDialogs();
+      await loadMessages(selectedChat.id, 0, undefined, { silent: true });
+      fetchSharedMedia(selectedChat.id);
+      setConfirmModal({
+        title: res.addedCount > 0 ? 'Mensagens atualizadas' : 'Nada novo por aqui',
+        body: res.addedCount > 0
+          ? `${res.addedCount} ${res.addedCount === 1 ? 'nova mídia foi adicionada' : 'novas mídias foram adicionadas'} ao chat.`
+          : 'Nenhuma mídia nova foi encontrada nesse perfil.',
+        onConfirm: () => setConfirmModal(null),
+      });
+    } catch (err: any) {
+      setError(err?.message || 'Falha ao atualizar mensagens do Twitter/X.');
+    } finally {
+      setUpdatingTwitterMessages(false);
     }
   };
 
@@ -1127,7 +1190,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
 
   return (
     <>
-      <div className="app" data-palette={palette} data-density={density}>
+      <div className={`app ${selectedChat ? 'has-selected-chat' : ''}`} data-palette={palette} data-density={density}>
 
         {/* ── List ─────────────────────────────────────────────────── */}
         <div className="list">
@@ -1182,6 +1245,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
           )}
 
           <div className="chats">
+            {skipLogin && (
+              <div
+                className="chat-row telegram-login-row"
+                onClick={() => {
+                  setError('');
+                  onTelegramLoginRequest?.();
+                }}
+              >
+                <div className="chat-avatar telegram-login-avatar">
+                  <IconLogOut />
+                </div>
+                <div className="telegram-login-copy">
+                  <div className="chat-name">
+                    <span className="name-text">Logar no Telegram</span>
+                  </div>
+                  <div className="chat-preview">
+                    Conectar sua conta para carregar chats reais
+                  </div>
+                </div>
+              </div>
+            )}
             {filteredChats.map(chat => {
               const color = hashColor(chat.id);
               const hasUnread = (chat.unreadCount ?? 0) > 0;
@@ -1230,7 +1314,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                 </div>
               );
             })}
-            {!filteredChats.length && !loading && (
+            {!filteredChats.length && !loading && !skipLogin && (
               <div className="messages-empty">Nenhum chat encontrado.</div>
             )}
           </div>
@@ -1252,20 +1336,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
               {isSettingsMenuOpen && (
                 <div className="dropdown-menu" style={{ bottom: 'calc(100% + 8px)', top: 'auto', right: 0 }} onClick={e => e.stopPropagation()}>
                   <div className="dropdown-item" onClick={() => { setIsSettingsOpen(true); setIsSettingsMenuOpen(false); }}>
-                    <IconSettings /> Configurações de Cache
-                  </div>
-                  <div className="dropdown-divider" />
-                  <div style={{ padding: '6px 12px 4px', fontSize: 11, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Paleta</div>
-                  <div className="palette-picker">
-                    {PALETTES.map(p => (
-                      <button key={p} className={`palette-dot ${p} ${palette === p ? 'active' : ''}`} onClick={() => setPalette(p)} title={p} />
-                    ))}
-                  </div>
-                  <div style={{ padding: '2px 12px 4px', fontSize: 11, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Densidade</div>
-                  <div className="density-row">
-                    {DENSITIES.map(d => (
-                      <button key={d} className={`density-btn ${density === d ? 'active' : ''}`} onClick={() => setDensity(d)}>{d}</button>
-                    ))}
+                    <IconSettings /> Configurações Gerais
                   </div>
                 </div>
               )}
@@ -1297,6 +1368,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
               {/* Header */}
               <div className="convo-header">
                 <div className="who">
+                  <button
+                    className="icon-btn mobile-chat-back"
+                    onClick={() => {
+                      setSelectedChat(null);
+                      setViewingTopic(null);
+                      setInfoOpen(false);
+                      setIsSelectionMode(false);
+                      setSelectedMessageIds([]);
+                    }}
+                    title="Voltar para chats"
+                  >
+                    <IconBack />
+                  </button>
                   {selectedChat.hasTopics && viewingTopic && (
                     <button className="icon-btn" onClick={handleBackToTopics} title="Voltar para tópicos">
                       <IconBack />
@@ -1364,6 +1448,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                     </button>
                     {isMenuOpen && (
                       <div className="dropdown-menu" onClick={e => e.stopPropagation()}>
+                        {isTwitterChat(selectedChat) && (
+                          <div
+                            className="dropdown-item"
+                            onClick={handleUpdateTwitterMessages}
+                            style={updatingTwitterMessages ? { opacity: 0.6, pointerEvents: 'none' } : undefined}
+                          >
+                            <IconMagic />
+                            <span>{updatingTwitterMessages ? 'Atualizando...' : 'Atualizar mensagens'}</span>
+                          </div>
+                        )}
                         <div className="dropdown-item" onClick={() => { setIsDownloadModalOpen(v => !v); setIsMenuOpen(false); }}>
                           <IconMagic />
                           <span>Mass Download</span>
@@ -1643,7 +1737,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                         const dayBreak = isNewMessageDay(msg, prev);
                         const color = msg.out ? 'cyan' : hashColor(msg.senderId || msg.id.toString());
                         const displayName = msg.out ? 'Você' : (msg.senderName || (msg.senderId ? `ID ${msg.senderId.slice(-6)}` : 'Desconhecido'));
-                        const initials = msg.out ? 'EU' : displayName.slice(0, 2).toUpperCase();
 
                         return (
                           <div key={item.id} style={{ paddingBottom: 'var(--msg-gap)' }}>
@@ -1678,7 +1771,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                                     }
                                   }}
                                 >
-                                  {initials}
+                                  <ChatAvatar chatId={msg.senderId || ''} title={displayName} />
                                 </div>
                               )}
                               <div className="msg-body">
@@ -1760,6 +1853,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                                             mediaSize={albumMsg.mediaSize}
                                             palette={palette}
                                             density={density}
+                                            downloadMeta={getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName)}
                                             onClickOverride={isSelectionMode ? () => {
                                               setSelectedMessageIds(prevIds =>
                                                 prevIds.includes(albumMsg.id)
@@ -1791,6 +1885,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                                           mediaSize={msg.mediaSize}
                                           palette={palette}
                                           density={density}
+                                          downloadMeta={getDownloadMeta(msg, displayName)}
                                           onClickOverride={isSelectionMode ? () => {
                                             setSelectedMessageIds(prevIds =>
                                               prevIds.includes(msg.id)
@@ -1862,7 +1957,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                                       if (item.messages) {
                                         for (const albumMsg of item.messages) {
                                           try {
-                                            await telegramService.saveMessageMediaFile({ chatId: selectedChat.id, messageId: albumMsg.id });
+                                            await telegramService.saveMessageMediaFile({
+                                              chatId: selectedChat.id,
+                                              messageId: albumMsg.id,
+                                              downloadMeta: getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName),
+                                            });
                                           } catch (err) {
                                             console.error(err);
                                           }
@@ -1873,7 +1972,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                                 ) : msg.hasMedia ? (
                                   <button
                                     type="button" className="icon-btn" title="Salvar"
-                                    onClick={(e) => { e.stopPropagation(); telegramService.saveMessageMediaFile({ chatId: selectedChat.id, messageId: msg.id }); }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      telegramService.saveMessageMediaFile({
+                                        chatId: selectedChat.id,
+                                        messageId: msg.id,
+                                        downloadMeta: getDownloadMeta(msg, displayName),
+                                      });
+                                    }}
                                   >⤓</button>
                                 ) : msg.text ? (
                                   <button
@@ -2106,6 +2212,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                           isVideo={m.isVideo}
                           palette={palette}
                           density={density}
+                          downloadMeta={getDownloadMeta(m as Message)}
                         />
                       </div>
                     ))}
@@ -2302,9 +2409,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
           density={density}
           items={[
             {
-              label: 'Salvar imagem',
+              label: 'Salvar como...',
               icon: <IconDownload />,
-              onClick: () => telegramService.saveMessageMediaFile({ chatId: selectedChat.id, messageId: imgContextMenu.msg.id }),
+              onClick: () => telegramService.saveMessageMediaFile({
+                chatId: selectedChat.id,
+                messageId: imgContextMenu.msg.id,
+                saveAs: true,
+                downloadMeta: getDownloadMeta(
+                  imgContextMenu.msg,
+                  imgContextMenu.msg.out ? 'Você' : imgContextMenu.msg.senderName || undefined
+                ),
+              }),
             },
             { separator: true },
             {
@@ -2371,10 +2486,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                   <span>Procurando fotos e vídeos...</span>
                 </div>
               ) : searchMediaResults.length === 0 ? (
-                <div className="search-media-empty-state">
-                  <div className="empty-icon">📷</div>
-                  <span>Nenhuma foto ou vídeo encontrado para este usuário no grupo.</span>
-                </div>
+                null
               ) : (
                 <div className="search-media-grid">
                   {searchMediaResults.map(item => (
@@ -2386,6 +2498,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false }) => {
                         mediaSize={item.mediaSize}
                         palette={palette}
                         density={density}
+                        downloadMeta={getDownloadMeta(item as Message)}
                       />
                     </div>
                   ))}

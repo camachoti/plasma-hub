@@ -5,6 +5,7 @@ import { Downloads } from "./features/telegram/Downloads";
 import { Settings as TelegramSettings } from "./features/telegram/Settings";
 import { telegramService } from "./features/telegram/TelegramService";
 import { TwitterLibrary } from "./features/twitter/TwitterLibrary";
+import { useAppearance } from "./features/appearance/AppearanceStore";
 import appIcon from "../build/icon.png";
 import "./styles/App.css";
 
@@ -12,6 +13,8 @@ function App() {
   const [activeTab, setActiveTab] = useState("telegram");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [skipLogin, setSkipLogin] = useState(() => localStorage.getItem("skip_login") === "true");
+  const { palette, density } = useAppearance();
+  telegramService.skipLogin = skipLogin;
 
   // Logger hook
   useEffect(() => {
@@ -99,20 +102,29 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     const checkLoginStatus = async () => {
       if (skipLogin) return;
-      setIsLoading(true);
+      const savedSession = localStorage.getItem("telegram_session");
+      if (!savedSession) {
+        setIsLoggedIn(false);
+        setIsLoading(false);
+        return;
+      }
       try {
         const res = await telegramService.checkAuth();
-        setIsLoggedIn(res.isAuthorized);
+        if (!cancelled && localStorage.getItem("telegram_session") === savedSession) {
+          setIsLoggedIn(res.isAuthorized);
+        }
       } catch (e) {
         console.error("Failed to check auth status", e);
-        setIsLoggedIn(false);
-      } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoggedIn(false);
       }
     };
     checkLoginStatus();
+    return () => {
+      cancelled = true;
+    };
   }, [skipLogin]);
 
   const handleSendCode = async () => {
@@ -170,30 +182,40 @@ function App() {
     setError("");
   };
 
+  const handleTelegramLoginRequest = () => {
+    telegramService.resetSession();
+    localStorage.removeItem("skip_login");
+    setSkipLogin(false);
+    setIsLoggedIn(false);
+    setPhoneCodeHash(null);
+    setCode("");
+    setIsLoading(false);
+    setError("");
+  };
+
   if (!isLoggedIn && !skipLogin) {
     return (
-      <div className="App" style={{ height: "100vh", width: "100vw", display: "flex", alignItems: "center", justifyContent: "center", background: "radial-gradient(circle at 50% -20%, var(--bg-3), var(--bg-0))", color: "var(--text-0)" }}>
-        <div className="login-container fade-in" style={{ backgroundColor: "var(--bg-panel)", padding: "40px", borderRadius: "16px", boxShadow: "0 8px 32px rgba(0,0,0,0.2)", width: "320px", textAlign: "center", maxWidth: "90vw" }}>
-          <div className="login-header" style={{ marginBottom: "32px" }}>
-            <div className="logo-placeholder" style={{ marginBottom: "16px" }}>
-              <img src={appIcon} width="72" height="72" alt="Plasma Hub" style={{ borderRadius: "16px" }} />
+      <div className="login-screen" data-palette={palette} data-density={density}>
+        <div className="login-card fade-in">
+          <div className="login-header">
+            <div className="logo-placeholder">
+              <img src={appIcon} width="72" height="72" alt="Plasma Hub" />
             </div>
-            <h1 style={{ fontSize: "24px", margin: "0 0 8px 0" }}>Plasma Hub</h1>
-            <p style={{ color: "var(--text-muted)", margin: 0 }}>Entre com o seu Telegram</p>
+            <h1>Plasma Hub</h1>
+            <p>Entre com o seu Telegram</p>
           </div>
           
-          {error && <div className="error-message shake" style={{ backgroundColor: "var(--accent-primary)", color: "white", padding: "12px", borderRadius: "8px", marginBottom: "20px" }}>{error}</div>}
+          {error && <div className="error-message shake">{error}</div>}
           
           {!phoneCodeHash ? (
-            <div className="login-form slide-up" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <label style={{ textAlign: "left", fontSize: "14px", color: "var(--text-muted)" }}>País e Número de Telefone</label>
-              <div style={{ display: "flex", gap: "8px" }}>
+            <div className="login-form slide-up">
+              <label>País e Número de Telefone</label>
+              <div className="login-phone-row">
                 <select 
                   value={countryCode}
                   onChange={e => setCountryCode(e.target.value)}
                   disabled={isLoading}
                   className="login-input"
-                  style={{ width: "95px" }}
                 >
                   <option value="+55">🇧🇷 +55</option>
                   <option value="+1">🇺🇸 +1</option>
@@ -219,7 +241,6 @@ function App() {
                   autoFocus
                   autoComplete="off"
                   className="login-input"
-                  style={{ flex: 1, minWidth: 0 }}
                 />
               </div>
               <button 
@@ -230,42 +251,27 @@ function App() {
                 {isLoading ? "Enviando..." : "Enviar Código"}
               </button>
               
-              <div style={{ display: "flex", justifyContent: "center", gap: "12px", marginTop: "8px", flexWrap: "wrap" }}>
+              <div className="login-links">
                 <button
                   onClick={() => {
                     localStorage.removeItem("telegram_session");
                     localStorage.removeItem("skip_login");
                     window.location.reload();
                   }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "var(--text-3)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                    textDecoration: "underline"
-                  }}
                 >
                   Limpar Cache e Reiniciar
                 </button>
                 <button
                   onClick={handleEnterWithoutLogin}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "var(--accent)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                    textDecoration: "underline"
-                  }}
+                  className="accent"
                 >
                   Entrar sem login
                 </button>
               </div>
             </div>
           ) : (
-            <div className="login-form slide-up" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <label style={{ textAlign: "left", fontSize: "14px", color: "var(--text-muted)" }}>Código recebido no Telegram</label>
+            <div className="login-form slide-up">
+              <label>Código recebido no Telegram</label>
               <input 
                 type="text" 
                 inputMode="numeric"
@@ -275,8 +281,7 @@ function App() {
                 onKeyDown={e => { if (e.key === "Enter" && code && !isLoading) handleSignIn(); }}
                 disabled={isLoading}
                 autoFocus
-                className="login-input"
-                style={{ letterSpacing: "4px", textAlign: "center" }}
+                className="login-input login-code-input"
               />
               <button 
                 onClick={handleSignIn} 
@@ -293,7 +298,7 @@ function App() {
   }
 
   return (
-    <div className="app-container">
+    <div className="app-container" data-palette={palette} data-density={density}>
       {/* Sidebar */}
       <div className="sidebar">
         <button 
@@ -329,7 +334,7 @@ function App() {
       <div className="main-content" style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         {activeTab === "telegram" && (
           <div style={{ width: "100%", height: "100%" }}>
-            <Dashboard skipLogin={skipLogin} />
+            <Dashboard skipLogin={skipLogin} onTelegramLoginRequest={handleTelegramLoginRequest} />
           </div>
         )}
         {activeTab === "downloads" && (

@@ -5,25 +5,25 @@
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* Palette: Ion (default) */
-  --bg-0: oklch(0.18 0.018 250);
-  --bg-1: oklch(0.21 0.020 250);
-  --bg-2: oklch(0.24 0.022 250);
-  --bg-3: oklch(0.28 0.024 250);
-  --bg-hover: oklch(0.31 0.025 250 / 0.55);
-  --bg-active: oklch(0.34 0.030 250 / 0.65);
-  --line: oklch(0.32 0.022 250 / 0.6);
-  --line-soft: oklch(0.30 0.020 250 / 0.35);
+  /* Palette: Phosphor (default) */
+  --bg-0: #1f2310; /* deepgreen */
+  --bg-1: #343330; /* stone */
+  --bg-2: #3e3d3a; /* slate */
+  --bg-3: #656461; /* elephant */
+  --bg-hover: rgba(62, 61, 58, 0.55);
+  --bg-active: rgba(101, 100, 97, 0.65);
+  --line: rgba(255, 255, 255, 0.12);
+  --line-soft: rgba(255, 255, 255, 0.06);
 
-  --text-0: oklch(0.97 0.005 250);
-  --text-1: oklch(0.82 0.012 250);
-  --text-2: oklch(0.62 0.018 250);
-  --text-3: oklch(0.48 0.018 250);
+  --text-0: #f7f5f1; /* ghost */
+  --text-1: #eeeae3; /* vellum */
+  --text-2: #c9c5bf; /* pewter */
+  --text-3: #bcadaf; /* sand */
 
-  --accent: oklch(0.80 0.16 220);
-  --accent-soft: oklch(0.80 0.16 220 / 0.18);
-  --accent-text: oklch(0.18 0.018 250);
-  --accent-glow: oklch(0.80 0.16 220 / 0.45);
+  --accent: #c4e456; /* acid */
+  --accent-soft: rgba(196, 228, 86, 0.18);
+  --accent-text: #1f2310;
+  --accent-glow: rgba(196, 228, 86, 0.45);
 
   --danger: oklch(0.70 0.18 20);
   --warn: oklch(0.78 0.16 75);
@@ -129,22 +129,24 @@ input, textarea { font-family: inherit; font-size: inherit; color: inherit; back
 select {
   min-height: 38px;
   padding: 10px 40px 10px 16px;
-  border: 1px solid #2a2f3d;
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
   outline: none;
-  background-color: #151821;
-  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-color: var(--bg-2);
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23849396' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
   background-repeat: no-repeat;
   background-position: right 14px center;
   background-size: 16px;
-  color: #f8fafc;
+  color: var(--text-0);
   font: inherit;
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
 }
 select:focus {
-  border-color: #4b6bfb;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
 }
 select:disabled {
   opacity: 0.7;
@@ -152,8 +154,8 @@ select:disabled {
 }
 select option,
 select optgroup {
-  background-color: #151821;
-  color: #f8fafc;
+  background-color: var(--bg-2);
+  color: var(--text-0);
 }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -444,6 +446,27 @@ select optgroup {
   font-variant-numeric: tabular-nums;
 }
 .chat-row.unread .chat-badge { background: var(--accent); color: var(--accent-text); box-shadow: 0 0 14px var(--accent-glow); }
+.telegram-login-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+  border: 1px solid color-mix(in oklch, var(--accent) 35%, var(--line-soft));
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+.telegram-login-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.telegram-login-row .chat-name { color: var(--accent); font-weight: 600; }
+.telegram-login-row .chat-preview { color: var(--text-2); }
+.telegram-login-avatar {
+  flex: 0 0 40px;
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 18%, var(--bg-2));
+}
+.telegram-login-avatar svg { width: 19px; height: 19px; }
 .list-pin-divider {
   display: flex; align-items: center; gap: 8px;
   padding: 14px 12px 6px;
@@ -489,6 +512,7 @@ select optgroup {
 .convo-header .who-name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); }
 .convo-header .who-sub { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .convo-header-actions { display: flex; gap: 2px; align-items: center; position: relative; }
+.mobile-chat-back { display: none; }
 
 /* Timeline */
 .timeline {
@@ -909,6 +933,55 @@ select optgroup {
   :root { --list-w: 240px; --rail-w: 56px; }
   .msg-row { padding: var(--msg-pad-y) 14px; }
   .composer-wrap { padding: 0 14px 12px; }
+}
+@media (max-width: 640px) {
+  :root { --list-w: 100%; --rail-w: 52px; }
+  .app {
+    grid-template-columns: 100% 100%;
+    overflow: hidden;
+  }
+  .app.has-selected-chat .list {
+    display: none;
+  }
+  .app.has-selected-chat .convo {
+    grid-column: 1;
+  }
+  .app:not(.has-selected-chat) .convo {
+    display: none;
+  }
+  .list,
+  .convo {
+    width: 100%;
+    min-width: 0;
+  }
+  .mobile-chat-back {
+    display: grid;
+    flex-shrink: 0;
+  }
+  .convo-header .who {
+    gap: 8px;
+  }
+  .convo-header .who-avatar {
+    width: 34px;
+    height: 34px;
+  }
+  .convo-header .who-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg-row {
+    gap: 8px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .msg-avatar {
+    width: 30px;
+    height: 30px;
+  }
+  .msg-body {
+    max-width: 88%;
+  }
 }
 
 /* Reply preview inside bubble */

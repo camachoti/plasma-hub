@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { WarningCircle, DownloadSimple, Link, Spinner, ChatCircle, MagnifyingGlass } from '@phosphor-icons/react';
+import { WarningCircle, DownloadSimple, Link, Spinner, ChatCircle, MagnifyingGlass, TwitterLogo } from '@phosphor-icons/react';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
 import { downloadService, type DownloadItem } from '../downloader/DownloadService';
 import type { MediaInfo } from '../downloader/types';
 import { createTwitterProfileChat } from '../telegram/TwitterFakeChatStore';
+import { getStoredTwitterCookies, onTwitterSettingsChanged } from './TwitterSettingsStore';
 import '../../styles/TwitterLibrary.css';
-
-const TWITTER_COOKIES_STORAGE_KEY = 'plasma_twitter_optional_cookies';
 
 interface TwitterProfileInfo {
   platform: 'twitter';
@@ -42,13 +41,7 @@ function getTwitterProfileUsername(input: string): string | null {
 
 export function TwitterLibrary() {
   const [url, setUrl] = useState('');
-  const [cookies, setCookies] = useState(() => {
-    try {
-      return localStorage.getItem(TWITTER_COOKIES_STORAGE_KEY) ?? '';
-    } catch {
-      return '';
-    }
-  });
+  const [cookies, setCookies] = useState(getStoredTwitterCookies);
   const [media, setMedia] = useState<MediaInfo | null>(null);
   const [profile, setProfile] = useState<TwitterProfileInfo | null>(null);
   const [selectedFormat, setSelectedFormat] = useState('');
@@ -66,17 +59,7 @@ export function TwitterLibrary() {
     return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    try {
-      if (cookies.trim()) {
-        localStorage.setItem(TWITTER_COOKIES_STORAGE_KEY, cookies);
-      } else {
-        localStorage.removeItem(TWITTER_COOKIES_STORAGE_KEY);
-      }
-    } catch {
-      // Ignore storage errors; cookies still work for the current session.
-    }
-  }, [cookies]);
+  useEffect(() => onTwitterSettingsChanged(() => setCookies(getStoredTwitterCookies())), []);
 
   async function handleAnalyze() {
     const cleanUrl = url.trim();
@@ -198,126 +181,129 @@ export function TwitterLibrary() {
   const selected = media?.formats.video.find(format => format.id === selectedFormat);
   const canDownload = Boolean(media && selected?.url);
   const canDownloadProfile = Boolean(profile && profile.mediaUrls.length > 0);
+  const runningCount = downloads.filter(item => item.status === 'downloading').length;
 
   return (
     <div className="twitter-library twitter-library-single">
       <main className="twitter-main">
         <header className="twitter-topbar">
-          <div>
-            <p>Twitter / X</p>
+          <div className="twitter-title-block">
+            <span className="twitter-topbar-icon">
+              <TwitterLogo size={18} weight="fill" />
+            </span>
+            <h1>Twitter / X</h1>
+            <span>{downloads.length} downloads</span>
           </div>
         </header>
 
-        <section className="twitter-panel twitter-tweet-tool">
-          <label htmlFor="twitter-url">URL do tweet/status</label>
-          <div className="twitter-url-row">
-            <div className="twitter-input-row">
-              <Link size={18} />
-              <input
-                id="twitter-url"
-                value={url}
-                onChange={event => setUrl(event.target.value)}
-                onKeyDown={event => event.key === 'Enter' && handleAnalyze()}
-                placeholder="https://x.com/usuario/status/123456789"
-              />
+        <div className="twitter-content">
+          <section className="twitter-panel twitter-tweet-tool">
+            <div className="twitter-tool-header">
+              <label htmlFor="twitter-url">URL do tweet/status</label>
+              {cookies.trim() && (
+                <span className="twitter-cookies-saved">Cookies configurados</span>
+              )}
             </div>
-            <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()}>
-              {analyzing ? <Spinner className="spin" size={18} /> : <MagnifyingGlass size={18} />}
-              <span>{analyzing ? 'Analisando' : 'Analisar'}</span>
-            </button>
-          </div>
-          <label htmlFor="twitter-cookies">Cookies opcionais</label>
-          <textarea
-            id="twitter-cookies"
-            value={cookies}
-            onChange={event => setCookies(event.target.value)}
-            className="twitter-cookies-input"
-            placeholder="Cookie: auth_token=...; ct0=... ou cole o conteudo/caminho do cookies.txt"
-            spellCheck={false}
-          />
-          {error && (
-            <div className="twitter-error">
-              <WarningCircle size={17} />
-              <span>{error}</span>
+            <div className="twitter-url-row">
+              <div className="twitter-input-row">
+                <Link size={18} />
+                <input
+                  id="twitter-url"
+                  value={url}
+                  onChange={event => setUrl(event.target.value)}
+                  onKeyDown={event => event.key === 'Enter' && handleAnalyze()}
+                  placeholder="https://x.com/usuario/status/123456789"
+                />
+              </div>
+              <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()}>
+                {analyzing ? <Spinner className="spin" size={18} /> : <MagnifyingGlass size={18} />}
+                <span>{analyzing ? 'Analisando' : 'Analisar'}</span>
+              </button>
             </div>
-          )}
-        </section>
-
-        {media && (
-          <section className="twitter-preview">
-            {media.thumbnailUrl && (
-              <img src={media.thumbnailUrl} alt="" className="twitter-preview-thumb" />
+            {error && (
+              <div className="twitter-error">
+                <WarningCircle size={17} />
+                <span>{error}</span>
+              </div>
             )}
-            <div className="twitter-preview-info">
-              <p>{media.author} {media.duration !== '—' ? `· ${media.duration}` : ''}</p>
-              <h3>{media.title}</h3>
-              <div className="twitter-format-row">
-                <select value={selectedFormat} onChange={event => setSelectedFormat(event.target.value)}>
-                  {media.formats.video.map(format => (
-                    <option key={format.id} value={format.id} disabled={!format.url}>
-                      {format.label} {format.size !== '—' ? `(${format.size})` : ''}
-                    </option>
-                  ))}
-                </select>
-                <button className="twitter-primary-btn" onClick={handleDownload} disabled={!canDownload || downloading}>
-                  {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
-                  <span>{downloading ? 'Baixando' : 'Baixar'}</span>
-                </button>
-              </div>
-            </div>
           </section>
-        )}
 
-        {profile && (
-          <section className="twitter-preview">
-            {(profile.thumbnailUrl || profile.avatarUrl) && (
-              <img
-                src={profile.thumbnailUrl || profile.avatarUrl}
-                alt=""
-                className={`twitter-preview-thumb ${profile.thumbnailUrl ? '' : 'twitter-profile-avatar'}`}
-              />
-            )}
-            <div className="twitter-preview-info">
-              <p>@{profile.username}</p>
-              <h3>{profile.displayName || `Perfil @${profile.username}`}</h3>
-              <div className="twitter-profile-stats">
-                <strong>{profile.mediaCount}</strong>
-                <span>{profile.mediaCount === 1 ? 'mídia encontrada' : 'mídias encontradas'}</span>
-              </div>
-              <div className="twitter-format-row">
-                <button className="twitter-primary-btn" onClick={handleProfileDownload} disabled={!canDownloadProfile || downloading}>
-                  {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
-                  <span>{downloading ? 'Baixando' : 'Baixar mídias'}</span>
-                </button>
-                <button className="twitter-secondary-btn" onClick={handleCreateProfileChat} disabled={!canDownloadProfile || creatingChat}>
-                  {creatingChat ? <Spinner className="spin" size={18} /> : <ChatCircle size={18} />}
-                  <span>{creatingChat ? 'Criando' : 'Criar chat'}</span>
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
-        <section className="twitter-activity">
-          <div className="twitter-activity-header">
-            <div>
-              <p>Downloads</p>
-              <h3>Histórico desta sessão</h3>
-            </div>
-          </div>
-          <div className="twitter-feed">
-            {downloads.length === 0 ? (
-              <div className="twitter-feed-empty">Nenhum download do Twitter/X nesta sessão.</div>
-            ) : (
-              downloads.map(item => (
-                <div className={`twitter-feed-item ${item.status === 'failed' ? 'error' : item.status === 'completed' ? 'success' : 'info'}`} key={item.id}>
-                  <span>{Math.round(item.progress)}%</span>
-                  <p>{item.fileName} · {item.status}{item.error ? ` · ${item.error}` : ''}</p>
+          {media && (
+            <section className="twitter-preview">
+              {media.thumbnailUrl && (
+                <img src={media.thumbnailUrl} alt="" className="twitter-preview-thumb" />
+              )}
+              <div className="twitter-preview-info">
+                <p>{media.author} {media.duration !== '—' ? `· ${media.duration}` : ''}</p>
+                <h3>{media.title}</h3>
+                <div className="twitter-format-row">
+                  <select value={selectedFormat} onChange={event => setSelectedFormat(event.target.value)}>
+                    {media.formats.video.map(format => (
+                      <option key={format.id} value={format.id} disabled={!format.url}>
+                        {format.label} {format.size !== '—' ? `(${format.size})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="twitter-primary-btn" onClick={handleDownload} disabled={!canDownload || downloading}>
+                    {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
+                    <span>{downloading ? 'Baixando' : 'Baixar'}</span>
+                  </button>
                 </div>
-              ))
-            )}
-          </div>
-        </section>
+              </div>
+            </section>
+          )}
+
+          {profile && (
+            <section className="twitter-preview">
+              {(profile.thumbnailUrl || profile.avatarUrl) && (
+                <img
+                  src={profile.thumbnailUrl || profile.avatarUrl}
+                  alt=""
+                  className={`twitter-preview-thumb ${profile.thumbnailUrl ? '' : 'twitter-profile-avatar'}`}
+                />
+              )}
+              <div className="twitter-preview-info">
+                <p>@{profile.username}</p>
+                <h3>{profile.displayName || `Perfil @${profile.username}`}</h3>
+                <div className="twitter-profile-stats">
+                  <strong>{profile.mediaCount}</strong>
+                  <span>{profile.mediaCount === 1 ? 'mídia encontrada' : 'mídias encontradas'}</span>
+                </div>
+                <div className="twitter-format-row">
+                  <button className="twitter-primary-btn" onClick={handleProfileDownload} disabled={!canDownloadProfile || downloading}>
+                    {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
+                    <span>{downloading ? 'Baixando' : 'Baixar mídias'}</span>
+                  </button>
+                  <button className="twitter-secondary-btn" onClick={handleCreateProfileChat} disabled={!canDownloadProfile || creatingChat}>
+                    {creatingChat ? <Spinner className="spin" size={18} /> : <ChatCircle size={18} />}
+                    <span>{creatingChat ? 'Criando' : 'Criar chat'}</span>
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          <section className="twitter-activity">
+            <div className="twitter-activity-header">
+              <h3>
+                Downloads
+                {runningCount > 0 && <span className="twitter-running-badge">{runningCount} RUNNING</span>}
+              </h3>
+            </div>
+            <div className="twitter-feed">
+              {downloads.length === 0 ? (
+                <div className="twitter-feed-empty">Nenhum download do Twitter/X nesta sessão.</div>
+              ) : (
+                downloads.map(item => (
+                  <div className={`twitter-feed-item ${item.status === 'failed' ? 'error' : item.status === 'completed' ? 'success' : 'info'}`} key={item.id}>
+                    <span>{Math.round(item.progress)}%</span>
+                    <p>{item.fileName} · {item.status}{item.error ? ` · ${item.error}` : ''}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
       </main>
     </div>
   );

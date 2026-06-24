@@ -8,6 +8,12 @@ export interface DownloadItem {
   error?: string;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
+  sourceLabel?: string;
+  chatTitle?: string;
+  chatKind?: string;
+  topicTitle?: string;
+  senderName?: string;
+  senderId?: string | null;
 }
 
 class DownloadService {

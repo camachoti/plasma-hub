@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen } from '@phosphor-icons/react';
+import { CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo } from '@phosphor-icons/react';
 import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -74,38 +74,75 @@ export const Downloads: React.FC = () => {
     }
   };
 
+  const platformLabel = (platform?: DownloadItem['platform']) => {
+    if (!platform) return null;
+    const labels: Record<string, string> = {
+      telegram: 'Telegram',
+      youtube: 'YouTube',
+      tiktok: 'TikTok',
+      instagram: 'Instagram',
+      twitter: 'Twitter/X',
+      reddit: 'Reddit',
+      web: 'Web',
+    };
+    return labels[platform] || platform;
+  };
+
+  const downloadMetaItems = (item: DownloadItem) => [
+    platformLabel(item.platform),
+    item.chatTitle ? `${item.chatKind === 'grupo' ? 'Grupo' : item.chatKind === 'canal' ? 'Canal' : item.chatKind === 'twitter' ? 'Twitter' : 'Chat'}: ${item.chatTitle}` : null,
+    item.topicTitle ? `Tópico: ${item.topicTitle}` : null,
+    item.senderName ? `Usuário: ${item.senderName}` : null,
+  ].filter(Boolean);
+
+  const runningCount = downloads.filter(d => d.status === 'downloading').length;
+
   return (
     <div className="downloads-container">
-      <div className="quick-import-card">
-        <div className="quick-import-header">
-          <Link size={16} /> Quick Import
+      <header className="downloads-topbar">
+        <div className="downloads-title-block">
+          <h1>Downloads</h1>
+          <span>{downloads.length} itens</span>
         </div>
-        
-        <div className="downloader-input-group">
-          <input 
-            type="text" 
-            placeholder="Paste YouTube, Reddit, or Twitter URL here..." 
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
-          />
-          <button 
-            className="analyze-btn" 
-            onClick={handleAnalyze} 
-            disabled={analyzing || !url.trim()}
-          >
-            {analyzing ? <Spinner className="spin" size={18} /> : (
-              <>Download <CloudArrowDown size={18} /></>
-            )}
-          </button>
-        </div>
-        
-        <div className="supported-tags">
-          <span className="supported-label">SUPPORTED:</span>
-          <span><span className="bullet">•</span> YouTube</span>
-          <span><span className="bullet">•</span> Reddit</span>
-          <span><span className="bullet">•</span> Twitter (X)</span>
-        </div>
+        <button className="folder-action-btn" onClick={() => handleOpenFolder()} title="Abrir pasta de downloads">
+          <FolderOpen size={16} /> Pasta
+        </button>
+      </header>
+
+      <div className="downloads-content">
+        <section className="quick-import-card">
+          <div className="quick-import-header">
+            <div className="quick-import-title">
+              <Link size={16} /> Quick Import
+            </div>
+
+            <div className="supported-tags">
+              <span className="supported-label">SUPPORTED:</span>
+              <span className="supported-icon" title="YouTube" aria-label="YouTube"><YoutubeLogo size={18} weight="fill" /></span>
+              <span className="supported-icon" title="Reddit" aria-label="Reddit"><RedditLogo size={18} weight="fill" /></span>
+              <span className="supported-icon" title="Twitter/X" aria-label="Twitter/X"><TwitterLogo size={18} weight="fill" /></span>
+              <span className="supported-icon" title="Instagram" aria-label="Instagram"><InstagramLogo size={18} weight="fill" /></span>
+            </div>
+          </div>
+
+          <div className="downloader-input-group">
+            <input
+              type="text"
+              placeholder="Paste YouTube, Reddit, or Twitter URL here..."
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
+            />
+            <button
+              className="analyze-btn"
+              onClick={handleAnalyze}
+              disabled={analyzing || !url.trim()}
+            >
+              {analyzing ? <Spinner className="spin" size={18} /> : (
+                <>Download <CloudArrowDown size={18} /></>
+              )}
+            </button>
+          </div>
 
         {error && <div className="error-message">{error}</div>}
 
@@ -145,80 +182,78 @@ export const Downloads: React.FC = () => {
             </div>
           </div>
         )}
-      </div>
+        </section>
 
-      <div className="downloads-section-header">
-        <h2 className="downloads-section-title">
-          Active Downloads 
-          {downloads.filter(d => d.status === 'downloading').length > 0 && (
-            <span className="running-badge">{downloads.filter(d => d.status === 'downloading').length} RUNNING</span>
-          )}
-        </h2>
-        <div className="header-actions">
-          <button className="text-action-btn" onClick={() => handleOpenFolder()} title="Abrir pasta de downloads">
-            <FolderOpen size={14} /> Pasta
-          </button>
+        <div className="downloads-section-header">
+          <h2 className="downloads-section-title">
+            Active Downloads
+            {runningCount > 0 && (
+              <span className="running-badge">{runningCount} RUNNING</span>
+            )}
+          </h2>
         </div>
-      </div>
 
-      {downloads.length === 0 ? (
-        <div className="empty-state">
-          <HardDrive size={64} />
-          <p>Nenhum download em andamento.</p>
-        </div>
-      ) : (
-        <div className="downloads-list">
-          {downloads.map(item => (
-            <div 
-              key={item.id} 
-              className={`download-item ${item.status === 'completed' ? 'clickable' : ''}`}
-              onClick={item.status === 'completed' ? () => handleOpenFolder(item) : undefined}
-            >
-              <div className="download-icon-wrapper">
-                {item.thumbnailUrl ? (
-                  <div className="download-thumbnail-container">
-                    <img src={item.thumbnailUrl} alt="Thumbnail" className="download-thumbnail-img" />
-                    <div className={`download-status-overlay ${item.status}`}>
-                      {item.status === 'downloading' && <FileArrowDown size={14} />}
-                      {item.status === 'completed' && <CheckCircle size={14} />}
-                      {item.status === 'failed' && <WarningCircle size={14} />}
+        {downloads.length === 0 ? (
+          <div className="empty-state">
+            <HardDrive size={52} />
+            <p>Nenhum download em andamento.</p>
+          </div>
+        ) : (
+          <div className="downloads-list">
+            {downloads.map(item => (
+              <div
+                key={item.id}
+                className={`download-item ${item.status === 'completed' ? 'clickable' : ''}`}
+                onClick={item.status === 'completed' ? () => handleOpenFolder(item) : undefined}
+              >
+                <div className="download-icon-wrapper">
+                  {item.thumbnailUrl ? (
+                    <div className="download-thumbnail-container">
+                      <img src={item.thumbnailUrl} alt="Thumbnail" className="download-thumbnail-img" />
+                      <div className={`download-status-overlay ${item.status}`}>
+                        {item.status === 'downloading' && <FileArrowDown size={14} />}
+                        {item.status === 'completed' && <CheckCircle size={14} />}
+                        {item.status === 'failed' && <WarningCircle size={14} />}
+                      </div>
                     </div>
+                  ) : (
+                    <div className={`download-icon ${item.status}`}>
+                      {item.status === 'downloading' && <FileArrowDown size={20} />}
+                      {item.status === 'completed' && <CheckCircle size={20} />}
+                      {item.status === 'failed' && <WarningCircle size={20} />}
+                    </div>
+                  )}
+                </div>
+
+                <div className="download-details">
+                  <div className="download-name-row">
+                    <h3 className="download-name" title={item.fileName}>{item.fileName}</h3>
+                    <span className={`download-percentage status-${item.status}`}>
+                      {item.status === 'downloading' ? `${Math.round(item.progress)}%` :
+                       item.status === 'completed' ? '100%' : 'Error'}
+                    </span>
                   </div>
-                ) : (
-                  <div className={`download-icon ${item.status}`}>
-                    {item.status === 'downloading' && <FileArrowDown size={20} />}
-                    {item.status === 'completed' && <CheckCircle size={20} />}
-                    {item.status === 'failed' && <WarningCircle size={20} />}
+
+                  <div className={`progress-bar-container ${item.status}`}>
+                    <div
+                      className="progress-bar-fill"
+                      style={{ width: `${item.status === 'completed' ? 100 : item.status === 'failed' ? 100 : item.progress}%` }}
+                    />
                   </div>
-                )}
-              </div>
-              
-              <div className="download-details">
-                <div className="download-name-row">
-                  <h3 className="download-name" title={item.fileName}>{item.fileName}</h3>
-                  <span className={`download-percentage status-${item.status}`}>
-                    {item.status === 'downloading' ? `${Math.round(item.progress)}%` : 
-                     item.status === 'completed' ? '100%' : 'Error'}
-                  </span>
-                </div>
-                
-                <div className={`progress-bar-container ${item.status}`}>
-                  <div 
-                    className="progress-bar-fill" 
-                    style={{ width: `${item.status === 'completed' ? 100 : item.status === 'failed' ? 100 : item.progress}%` }} 
-                  />
-                </div>
-                
-                <div className="download-stats">
-                  {item.platform && <span className="stat-item">{item.platform}</span>}
-                  {item.status === 'completed' && <span className="stat-item success-text">Finalizado</span>}
-                  {item.error && <span className="stat-item error-text">{item.error}</span>}
+
+                  <div className="download-stats">
+                    {downloadMetaItems(item).map(meta => (
+                      <span key={meta} className="stat-item">{meta}</span>
+                    ))}
+                    {item.status === 'completed' && <span className="stat-item success-text">Finalizado</span>}
+                    {item.error && <span className="stat-item error-text">{item.error}</span>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

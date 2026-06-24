@@ -15,6 +15,7 @@ interface Props {
   density?: string;
   onClickOverride?: () => void;
   albumMedias?: Array<{ id: number; isVideo: boolean; videoDuration?: number | null; messageDate?: number; mediaSize?: number | null }>;
+  downloadMeta?: Record<string, any>;
 }
 
 interface ContextMenuState {
@@ -76,7 +77,7 @@ const MessageMediaMini: React.FC<{ chatId: string; messageId: number; isVideo: b
   );
 };
 
-export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, palette, density, onClickOverride, albumMedias }) => {
+export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, palette, density, onClickOverride, albumMedias, downloadMeta }) => {
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isOpen, setIsOpen] = useState(false);
@@ -277,14 +278,14 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     }
   };
 
-  const handleSaveMedia = async () => {
+  const handleSaveMedia = async (saveAs = false) => {
     if (savingMedia) return;
 
     setSavingMedia(true);
     setMediaStage('downloading');
 
     try {
-      await telegramService.saveMessageMediaFile({ chatId, messageId: activeMessageId });
+      await telegramService.saveMessageMediaFile({ chatId, messageId: activeMessageId, downloadMeta, saveAs });
     } catch (e) {
       console.error(e);
     } finally {
@@ -306,7 +307,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     {
       label: 'Salvar como...',
       icon: <IconDownload />,
-      onClick: handleSaveMedia,
+      onClick: () => handleSaveMedia(true),
       disabled: savingMedia,
     },
   ];
@@ -356,10 +357,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
                 setInlineBuffering(false);
                 logVideoEvent('inline playing', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
               }}
-              onWaiting={event => {
-                setInlineBuffering(true);
-                logVideoEvent('inline waiting', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-              }}
+              onWaiting={event => logVideoEvent('inline waiting', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
               onStalled={event => logVideoEvent('inline stalled', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
               onError={event => logVideoEvent('inline error', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
               onTimeUpdate={handleTimeUpdate}
@@ -465,12 +463,17 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
         )}
 
         {isOpen && createPortal(
-          <div className="media-lightbox" onClick={() => setIsOpen(false)}>
+          <div
+            className="media-lightbox"
+            data-palette={palette}
+            data-density={density}
+            onClick={() => setIsOpen(false)}
+          >
             <div className="media-lightbox-toolbar" onClick={event => event.stopPropagation()}>
               <button
                 type="button"
                 className="btn-icon"
-                onClick={handleSaveMedia}
+                onClick={() => handleSaveMedia(false)}
                 disabled={savingMedia}
                 title={savingMedia ? 'Salvando...' : 'Download'}
                 aria-label="Salvar mídia"
@@ -514,11 +517,8 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
                       setLightboxBuffering(false);
                       logVideoEvent('lightbox playing', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl });
                     }}
-                    onWaiting={event => {
-                      setLightboxBuffering(true);
-                      logVideoEvent('lightbox waiting', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl });
-                    }}
-                    onSeeking={() => setLightboxBuffering(true)}
+                    onWaiting={event => logVideoEvent('lightbox waiting', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl })}
+                    onSeeking={event => logVideoEvent('lightbox seeking', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl })}
                     onSeeked={() => setLightboxBuffering(false)}
                     onStalled={event => logVideoEvent('lightbox stalled', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl })}
                     onError={event => logVideoEvent('lightbox error', event.currentTarget, { chatId, messageId: activeMessageId, src: activeStreamUrl })}

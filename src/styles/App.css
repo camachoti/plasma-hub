@@ -1,37 +1,54 @@
-.App {
+.App,
+.login-screen {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 100vw;
   min-height: 100vh;
-  background: var(--bg-app);
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: var(--font-sans);
 }
 
 .app-container {
   display: flex;
   height: 100vh;
   width: 100vw;
-  background: var(--bg-app);
+  background: var(--bg-0);
   color: var(--text-0);
+  font-family: var(--font-sans);
 }
 
+.login-screen {
+  padding: 24px;
+}
+
+.login-card,
 .login-container {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
   width: 100%;
-  max-width: 400px;
-  padding: 40px;
+  max-width: 360px;
+  padding: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  box-shadow: 0 20px 50px rgba(0,0,0,0.36);
 }
 
 .login-header {
   text-align: center;
+  margin-bottom: 22px;
 }
 
 .login-header h1 {
-  margin: 10px 0 5px;
-  font-size: 24px;
+  margin: 12px 0 4px;
+  font-size: 22px;
+  line-height: 1.15;
+  font-weight: 750;
   color: var(--text-0);
+  letter-spacing: 0;
 }
 
 .login-header p {
@@ -44,85 +61,123 @@
   width: 72px;
   height: 72px;
   margin: 0 auto;
-  filter: drop-shadow(0 0 14px var(--accent-glow));
-  animation: float 3s ease-in-out infinite;
   color: var(--accent);
 }
 
-.logo-placeholder svg {
+.logo-placeholder svg,
+.logo-placeholder img {
   width: 100%;
   height: 100%;
   display: block;
+  border-radius: var(--radius);
 }
 
 .login-form {
   display: flex;
   flex-direction: column;
-  gap: 15px;
-  background: var(--bg-1);
-  padding: 30px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--line-soft);
+  gap: 14px;
   width: 100%;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.15);
 }
 
 .login-form label {
-  font-size: 13px;
-  color: var(--text-1);
-  font-weight: 500;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-3);
+  font-weight: 650;
 }
 
-.login-form input {
-  padding: 12px 15px;
-  border-radius: var(--radius);
+.login-phone-row {
+  display: grid;
+  grid-template-columns: 98px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.login-form input,
+.login-form select,
+.login-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--bg-2);
   color: var(--text-0);
-  font-size: 15px;
-  transition: all 0.2s ease;
-  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
   box-sizing: border-box;
 }
 
-.login-form input:focus {
+.login-form input:focus,
+.login-form select:focus,
+.login-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-glow);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
 }
 
-.login-form button {
+.login-code-input {
+  text-align: center;
+  letter-spacing: 4px;
+}
+
+.login-form > button,
+.login-button {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 12px;
+  min-height: 40px;
+  padding: 0 16px;
   background: var(--accent);
   color: var(--accent-text);
-  border: none;
-  border-radius: var(--radius);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-weight: 600;
-  font-size: 15px;
-  transition: all 0.2s ease;
-  min-height: 44px;
+  font-weight: 700;
+  font-size: 13px;
+  transition: background .14s ease, box-shadow .14s ease;
   width: 100%;
 }
 
-.login-form button:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 5px 15px var(--accent-glow);
+.login-form > button:hover:not(:disabled),
+.login-button:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 88%, white);
+  box-shadow: 0 0 18px color-mix(in oklch, var(--accent-glow) 55%, transparent);
 }
 
-.login-form button:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.login-form button:disabled {
+.login-form > button:disabled,
+.login-button:disabled {
   background: var(--bg-3);
   color: var(--text-3);
   cursor: not-allowed;
-  transform: none;
   box-shadow: none;
+}
+
+.login-links {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.login-links button {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  box-shadow: none;
+}
+
+.login-links button.accent {
+  color: var(--accent);
 }
 
 .error-message {
@@ -130,7 +185,7 @@
   border: 1px solid color-mix(in oklch, var(--danger) 30%, transparent);
   color: var(--danger);
   padding: 12px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   width: 100%;
   text-align: center;
   font-size: 14px;
@@ -179,25 +234,27 @@
 
 /* Sidebar */
 .sidebar {
-  width: 64px;
+  width: var(--rail-w);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 16px 0;
+  padding: 12px 0;
   border-right: 1px solid var(--line-soft);
   z-index: 10;
-  background: var(--bg-1);
+  background: var(--bg-0);
 }
 
 .sidebar-item {
-  margin-bottom: 20px;
-  padding: 10px;
-  border-radius: var(--radius-md);
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  padding: 0;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--bg-2);
+  color: var(--text-2);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background .16s ease, color .16s ease, border-radius .16s ease, box-shadow .16s ease;
   display: grid;
   place-items: center;
 }
@@ -207,11 +264,14 @@
 }
 
 .sidebar-item:hover {
-  background: var(--bg-2);
-  color: var(--text-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-0);
 }
 
 .sidebar-item.active {
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: 0 0 12px color-mix(in oklch, var(--accent-glow) 55%, transparent);
 }
