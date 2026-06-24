@@ -6,6 +6,7 @@ export interface DownloadItem {
   progress: number;
   status: 'downloading' | 'completed' | 'failed';
   error?: string;
+  filePath?: string;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
   sourceLabel?: string;

@@ -62,6 +62,12 @@ export const Downloads: React.FC = () => {
 
   const handleOpenFolder = async (item?: DownloadItem) => {
     try {
+      if (item?.filePath) {
+        const parentDir = item.filePath.split(/[\\/]/).slice(0, -1).join('/') || item.filePath;
+        await revealItemInDir(item.filePath).catch(() => openPath(parentDir));
+        return;
+      }
+
       const dir = await downloadDir();
       if (item) {
         const fullPath = await join(dir, item.fileName);

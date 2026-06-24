@@ -37,6 +37,12 @@ function sanitizeForFilename(value: any) {
     .slice(0, 160) || 'arquivo';
 }
 
+function sanitizeForFolderName(value: any) {
+  return String(value || 'Desconhecido')
+    .replace(/[^\w-]/g, '_')
+    .slice(0, 160) || 'Desconhecido';
+}
+
 function joinPath(...parts: string[]) {
   const filtered = parts.filter(Boolean);
   if (!filtered.length) return '';
@@ -711,7 +717,7 @@ class TelegramService {
       console.error('Error getting sender for splitting media:', e);
       if (message.senderId) senderName = `ID_${message.senderId.toString()}`;
     }
-    return sanitizeForFilename(senderName);
+    return sanitizeForFolderName(senderName);
   }
 
   private async saveTelegramMessageToFile(message: any, filePath: string, workers: number, onProgress?: (percent: number) => void) {
@@ -744,7 +750,7 @@ class TelegramService {
       if (!this.client) return { success: false, error: 'Telegram não conectado.' };
 
       const entity = await this.client.getEntity(chatId);
-      const downloadFolder = topic?.title ? joinPath(folderPath, sanitizeForFilename(topic.title)) : folderPath;
+      const downloadFolder = topic?.title ? joinPath(folderPath, sanitizeForFolderName(topic.title)) : folderPath;
       await this.ensureDir(downloadFolder);
 
       let downloadedCount = 0;
@@ -752,6 +758,7 @@ class TelegramService {
       let failedCount = 0;
       let current = 0;
       let totalMedia = 0;
+      const runId = Date.now();
       const processedItems: any[] = [];
       const workers = await this.getDownloadWorkers();
 
@@ -811,6 +818,7 @@ class TelegramService {
         }
 
         const filePath = joinPath(currentFolder, safeName);
+        const downloadId = `telegram_mass_${chatId}_${message.id}_${runId}`;
         if (await this.pathExists(filePath)) {
           skippedCount++;
           processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: itemSize });
@@ -822,12 +830,24 @@ class TelegramService {
 
         const item = { name: safeName, status: 'downloading', progress: 0, size: itemSize };
         processedItems.push(item);
+        downloadService.addDownload({
+          id: downloadId,
+          chatId,
+          messageId: message.id,
+          fileName: safeName,
+          filePath,
+          progress: 0,
+          status: 'downloading',
+          platform: 'telegram',
+          topicTitle: topic?.title || undefined,
+        });
         sendProgressUpdate(safeName);
 
         try {
           await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
             if (this.activeDownloadAborted) throw new Error('STOP_ABORTED');
             item.progress = percent;
+            downloadService.updateDownload(downloadId, { progress: percent });
             sendProgressUpdate(`${safeName} (${percent}%)`, downloadedCount + skippedCount + (percent / 100));
           });
 
@@ -835,12 +855,14 @@ class TelegramService {
           downloadedCount++;
           item.status = 'completed';
           item.progress = 100;
+          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
           sendProgressUpdate(safeName);
         } catch (err: any) {
           if (err?.message === 'STOP_ABORTED' || this.activeDownloadAborted) break;
           console.error(`Failed to download ${safeName}:`, err);
           failedCount++;
           item.status = 'failed';
+          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
           sendProgressUpdate(`Falhou: ${safeName}`);
         }
       }
@@ -874,6 +896,7 @@ class TelegramService {
     let downloadedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    const runId = Date.now();
     const processedItems: any[] = [];
 
     await this.ensureDir(folderPath);
@@ -884,6 +907,7 @@ class TelegramService {
       const ext = message.isVideo ? '.mp4' : '.jpg';
       const safeName = sanitizeForFilename(`media_${message.id}${ext}`);
       const filePath = joinPath(folderPath, safeName);
+      const downloadId = `telegram_mass_${chatId}_${message.id}_${runId}`;
 
       if (await this.pathExists(filePath)) {
         skippedCount++;
@@ -893,18 +917,31 @@ class TelegramService {
 
       const item = { name: safeName, status: 'downloading', progress: 0, size: message.mediaSize || 0 };
       processedItems.push(item);
+      downloadService.addDownload({
+        id: downloadId,
+        chatId,
+        messageId: message.id,
+        fileName: safeName,
+        filePath,
+        progress: 0,
+        status: 'downloading',
+        platform: 'telegram',
+      });
       try {
         await this.downloadUrlToFile(message.url!, filePath, (percent) => {
           item.progress = percent;
+          downloadService.updateDownload(downloadId, { progress: percent });
           this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount + (percent / 100), currentFile: `${safeName} (${percent}%)`, items: processedItems });
         });
         downloadedCount++;
         item.status = 'completed';
         item.progress = 100;
+        downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
       } catch (err) {
         console.error(`Failed to download ${safeName}:`, err);
         failedCount++;
         item.status = 'failed';
+        downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
 
       this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount, currentFile: safeName, items: processedItems });
@@ -1163,6 +1200,7 @@ class TelegramService {
       const total = messageIds.length;
       let downloadedCount = 0;
       let failedCount = 0;
+      const runId = Date.now();
       const workers = await this.getDownloadWorkers();
 
       const batchResult = await this.client.getMessages(entity, { ids: messageIds });
@@ -1184,6 +1222,7 @@ class TelegramService {
 
         const filename = getMessageDownloadFilename(message);
         const filePath = joinPath(folderPath, filename);
+        const downloadId = `telegram_bulk_${chatId}_${messageId}_${runId}`;
 
         if (await this.pathExists(filePath)) {
           downloadedCount++;
@@ -1197,11 +1236,22 @@ class TelegramService {
           continue;
         }
 
+        downloadService.addDownload({
+          id: downloadId,
+          chatId,
+          messageId,
+          fileName: filename,
+          filePath,
+          progress: 0,
+          status: 'downloading',
+          platform: 'telegram',
+        });
         this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'downloading' });
 
         try {
           await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
             if (this.saveMultipleAborted) throw new Error('STOP_ABORTED');
+            downloadService.updateDownload(downloadId, { progress: percent });
             this.emitSaveMultipleProgress({
               chatId,
               total,
@@ -1213,10 +1263,12 @@ class TelegramService {
 
           if (this.saveMultipleAborted) break;
           downloadedCount++;
+          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
         } catch (err: any) {
           if (err?.message === 'STOP_ABORTED' || this.saveMultipleAborted) break;
           console.error(`Error downloading media for message ${messageId}:`, err);
           failedCount++;
+          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
         }
 
         this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'progress' });
@@ -1241,6 +1293,7 @@ class TelegramService {
     const total = messageIds.length;
     let downloadedCount = 0;
     let failedCount = 0;
+    const runId = Date.now();
     const messageMap = new Map(fakeChat.messages.map((message: TwitterFakeMessage) => [message.id, message]));
 
     for (const messageId of messageIds) {
@@ -1253,6 +1306,7 @@ class TelegramService {
 
       const filename = sanitizeForFilename(`media_${message.id}${message.isVideo ? '.mp4' : '.jpg'}`);
       const filePath = joinPath(folderPath, filename);
+      const downloadId = `telegram_bulk_${chatId}_${messageId}_${runId}`;
 
       if (await this.pathExists(filePath)) {
         downloadedCount++;
@@ -1261,13 +1315,26 @@ class TelegramService {
       }
 
       try {
+        downloadService.addDownload({
+          id: downloadId,
+          chatId,
+          messageId,
+          fileName: filename,
+          filePath,
+          progress: 0,
+          status: 'downloading',
+          platform: 'telegram',
+        });
         await this.downloadUrlToFile(message.url, filePath, (percent) => {
+          downloadService.updateDownload(downloadId, { progress: percent });
           this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount + (percent / 100), currentFile: `${filename} (${percent}%)`, status: 'progress' });
         });
         downloadedCount++;
+        downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
       } catch (err) {
         console.error(`Error downloading fake media for message ${messageId}:`, err);
         failedCount++;
+        downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
     }
 
