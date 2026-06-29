@@ -26,6 +26,17 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libc++1",
+          "libc++abi1",
+          "libunwind-18"
+        ]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

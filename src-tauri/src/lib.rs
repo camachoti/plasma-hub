@@ -1,5 +1,6 @@
 mod db;
 mod downloader;
+mod tdlib_native;
 mod twitter_native;
 mod youtube;
 
@@ -93,6 +94,8 @@ pub fn run() {
                 active_downloads: Arc::new(Mutex::new(Vec::new())),
             });
 
+            app.manage(tdlib_native::TdlibManager::default());
+
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -105,6 +108,15 @@ pub fn run() {
             append_download_file_chunk,
             finish_download_file,
             abort_download_file,
+            tdlib_native::tdlib_init,
+            tdlib_native::tdlib_status,
+            tdlib_native::tdlib_set_phone,
+            tdlib_native::tdlib_check_code,
+            tdlib_native::tdlib_check_password,
+            tdlib_native::tdlib_get_me,
+            tdlib_native::tdlib_download_message_media,
+            tdlib_native::tdlib_start_mass_download,
+            tdlib_native::tdlib_stop_download,
             db::get_downloads,
             downloader::start_download,
             twitter_native::analyze_twitter_profile_native,

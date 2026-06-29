@@ -68,6 +68,12 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const [clearing, setClearing] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearTwitter, setClearTwitter] = useState(() => localStorage.getItem("clear_twitter_groups_on_clear_cache") === "true");
+  const [tdlibState, setTdlibState] = useState('not_initialized');
+  const [tdlibMessage, setTdlibMessage] = useState('');
+  const [tdlibPhone, setTdlibPhone] = useState('');
+  const [tdlibCode, setTdlibCode] = useState('');
+  const [tdlibPassword, setTdlibPassword] = useState('');
+  const [tdlibBusy, setTdlibBusy] = useState(false);
 
   useEffect(() => { loadData(); }, []);
 
@@ -78,6 +84,12 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
         telegramService.getCacheStats(),
         telegramService.getCacheSettings(),
       ]);
+      telegramService.tdlibStatus()
+        .then((res: any) => {
+          setTdlibState(res?.state || 'not_initialized');
+          if (res?.error) setTdlibMessage(res.error);
+        })
+        .catch(() => {});
       if (statsRes.success) {
         setStats({ totalSize: statsRes.totalSize, messageCount: statsRes.messageCount, mediaCount: statsRes.mediaCount, avatarCount: statsRes.avatarCount });
       }
@@ -90,6 +102,39 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runTdlibAction = async (action: () => Promise<any>, successMessage: string) => {
+    setTdlibBusy(true);
+    setTdlibMessage('');
+    try {
+      const res = await action();
+      setTdlibState(res?.state || (res?.ready ? 'ready' : tdlibState));
+      setTdlibMessage(res?.error || successMessage);
+      return res;
+    } catch (error: any) {
+      setTdlibMessage(error?.message || String(error));
+      return null;
+    } finally {
+      setTdlibBusy(false);
+    }
+  };
+
+  const handleTdlibInit = () => runTdlibAction(() => telegramService.tdlibInit(), 'TDLib inicializado.');
+  const handleTdlibPhone = () => runTdlibAction(() => telegramService.tdlibSetPhone(tdlibPhone), 'Telefone enviado.');
+  const handleTdlibCode = () => runTdlibAction(() => telegramService.tdlibCheckCode(tdlibCode), 'Código validado.');
+  const handleTdlibPassword = () => runTdlibAction(() => telegramService.tdlibCheckPassword(tdlibPassword), 'Senha validada.');
+  const handleTdlibTest = async () => {
+    setTdlibBusy(true);
+    setTdlibMessage('');
+    try {
+      const res: any = await telegramService.tdlibGetMe();
+      setTdlibMessage(res?.success ? `TDLib conectado como ${[res.first_name, res.last_name].filter(Boolean).join(' ') || res.id}` : (res?.error || 'TDLib não conectado.'));
+    } catch (error: any) {
+      setTdlibMessage(error?.message || String(error));
+    } finally {
+      setTdlibBusy(false);
     }
   };
 
@@ -169,23 +214,77 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
         ) : (
           <div className="settings-body">
             {activeTab === 'general' && (
-              <div className="settings-section">
-                <h3>Twitter/X</h3>
-                <div className="settings-field settings-field-stack">
-                  <label htmlFor="twitter-cookies">Cookies opcionais</label>
-                  <textarea
-                    id="twitter-cookies"
-                    value={twitterCookies}
-                    onChange={e => setTwitterCookies(e.target.value)}
-                    className="settings-textarea"
-                    placeholder="Cookie: auth_token=...; ct0=... ou cole o conteudo/caminho do cookies.txt"
-                    spellCheck={false}
-                  />
+              <>
+                <div className="settings-section">
+                  <h3>Twitter/X</h3>
+                  <div className="settings-field settings-field-stack">
+                    <label htmlFor="twitter-cookies">Cookies opcionais</label>
+                    <textarea
+                      id="twitter-cookies"
+                      value={twitterCookies}
+                      onChange={e => setTwitterCookies(e.target.value)}
+                      className="settings-textarea"
+                      placeholder="Cookie: auth_token=...; ct0=... ou cole o conteudo/caminho do cookies.txt"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <p className="settings-hint">
+                    Esses cookies são usados na análise e download de tweets ou perfis quando o Twitter/X exige sessão.
+                  </p>
                 </div>
-                <p className="settings-hint">
-                  Esses cookies são usados na análise e download de tweets ou perfis quando o Twitter/X exige sessão.
-                </p>
-              </div>
+
+                <div className="settings-section">
+                  <h3>Telegram nativo</h3>
+                  <div className="settings-field">
+                    <label>Status TDLib</label>
+                    <span className="settings-hint" style={{ margin: 0 }}>{tdlibState}</span>
+                  </div>
+                  <div className="settings-field">
+                    <label>Telefone</label>
+                    <input
+                      type="tel"
+                      value={tdlibPhone}
+                      onChange={e => setTdlibPhone(e.target.value)}
+                      placeholder="+55..."
+                    />
+                  </div>
+                  <div className="settings-field">
+                    <label>Código</label>
+                    <input
+                      value={tdlibCode}
+                      onChange={e => setTdlibCode(e.target.value)}
+                      placeholder="12345"
+                    />
+                  </div>
+                  <div className="settings-field">
+                    <label>Senha 2FA</label>
+                    <input
+                      type="password"
+                      value={tdlibPassword}
+                      onChange={e => setTdlibPassword(e.target.value)}
+                      placeholder="Opcional"
+                    />
+                  </div>
+                  <div className="settings-actions" style={{ justifyContent: 'flex-start', paddingTop: 8 }}>
+                    <button className="settings-save-btn" type="button" onClick={handleTdlibInit} disabled={tdlibBusy}>
+                      Inicializar
+                    </button>
+                    <button className="settings-save-btn" type="button" onClick={handleTdlibPhone} disabled={tdlibBusy || !tdlibPhone}>
+                      Enviar telefone
+                    </button>
+                    <button className="settings-save-btn" type="button" onClick={handleTdlibCode} disabled={tdlibBusy || !tdlibCode}>
+                      Validar código
+                    </button>
+                    <button className="settings-save-btn" type="button" onClick={handleTdlibPassword} disabled={tdlibBusy || !tdlibPassword}>
+                      Validar senha
+                    </button>
+                    <button className="settings-save-btn" type="button" onClick={handleTdlibTest} disabled={tdlibBusy}>
+                      Testar
+                    </button>
+                  </div>
+                  {tdlibMessage && <p className="settings-hint">{tdlibMessage}</p>}
+                </div>
+              </>
             )}
 
             {activeTab === 'visual' && (

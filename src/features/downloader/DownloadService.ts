@@ -7,6 +7,7 @@ export interface DownloadItem {
   status: 'downloading' | 'completed' | 'failed';
   error?: string;
   filePath?: string;
+  fileSize?: number;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
   sourceLabel?: string;
@@ -15,6 +16,14 @@ export interface DownloadItem {
   topicTitle?: string;
   senderName?: string;
   senderId?: string | null;
+  batchId?: string;
+  batchTitle?: string;
+  batchKind?: 'mass' | 'bulk' | 'single';
+  batchTotal?: number;
+  batchDownloaded?: number;
+  batchCompleted?: number;
+  batchSkipped?: number;
+  batchFailed?: number;
 }
 
 class DownloadService {

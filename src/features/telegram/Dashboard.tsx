@@ -531,7 +531,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     fetchDialogs();
     const unsubscribeProgress = telegramService.onDownloadProgress((data) => {
+      setDownloading(true);
       setProgress({ total: data.total, downloaded: data.downloaded, currentFile: data.currentFile, topicTitle: data.topicTitle, isScanning: data.isScanning, items: data.items });
+      const currentFile = String(data.currentFile || '');
+      if (currentFile.startsWith('Concluído') || currentFile.startsWith('Concluido') || currentFile.startsWith('Parado') || currentFile === 'Concluído!') {
+        setTimeout(() => {
+          setDownloading(false);
+          setStopping(false);
+        }, 300);
+      }
     });
     
     const unsubscribeBulk = telegramService.onSaveMultipleProgress((data) => {
@@ -826,12 +834,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleStartDownload = async () => {
     if (!selectedChat || !folderPath) return;
     const selectedTopic = forumTopics.find(topic => String(topic.id) === selectedTopicId) || null;
-    setDownloading(true); setStopping(false); setProgress(null);
+    setDownloading(true); setStopping(false); setProgress({
+      total: 0,
+      downloaded: 0,
+      currentFile: 'Iniciando download...',
+      topicTitle: selectedTopic?.title || null,
+      isScanning: true,
+      items: []
+    });
     try {
       const res = await telegramService.startDownload({
         chatId: selectedChat.id, folderPath,
         topic: selectedTopic ? { id: selectedTopic.id, title: selectedTopic.title, topMessageId: selectedTopic.topMessageId } : null,
-        splitByUser: !selectedChat.hasTopics ? splitByUser : false
+        splitByUser: !selectedChat.hasTopics ? splitByUser : false,
+        chatMeta: {
+          title: selectedChat.title,
+          kind: getChatKind(selectedChat),
+        }
       });
       if (!res.success) setError(res.error || 'Failed to start download');
     } catch (e: any) { setError(e.message || 'Unknown error'); }

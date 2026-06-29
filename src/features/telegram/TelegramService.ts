@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import bigInt from 'big-integer';
@@ -372,6 +373,70 @@ class TelegramService {
     }
   }
 
+  async tdlibInit() {
+    if (!apiId || !apiHash) {
+      return { success: false, ready: false, state: 'error', error: 'Credenciais do Telegram ausentes.' };
+    }
+
+    return invoke('tdlib_init', { apiId, apiHash });
+  }
+
+  async tdlibStatus() {
+    return invoke('tdlib_status');
+  }
+
+  async tdlibSetPhone(phoneNumber: string) {
+    let cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
+    if (!cleanPhone.startsWith('+')) {
+      cleanPhone = '+' + cleanPhone;
+    }
+
+    return invoke('tdlib_set_phone', { phoneNumber: cleanPhone });
+  }
+
+  async tdlibCheckCode(code: string) {
+    return invoke('tdlib_check_code', { code });
+  }
+
+  async tdlibCheckPassword(password: string) {
+    return invoke('tdlib_check_password', { password });
+  }
+
+  async tdlibGetMe() {
+    return invoke('tdlib_get_me');
+  }
+
+  async tdlibDownloadMessageMedia({ chatId, messageId, folderPath }: any) {
+    return invoke('tdlib_download_message_media', {
+      chatId: toNumberValue(chatId),
+      messageId: toNumberValue(messageId),
+      folderPath,
+    });
+  }
+
+  async tdlibStartMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: any) {
+    return invoke('tdlib_start_mass_download', {
+      request: {
+        chatId: toNumberValue(chatId),
+        folderPath,
+        topicId: topicId == null ? null : toNumberValue(topicId),
+        splitByUser,
+      },
+    });
+  }
+
+  async tdlibStopDownload() {
+    return invoke('tdlib_stop_download');
+  }
+
+  onTdlibAuthState(cb: (state: string) => void) {
+    return listen<string>('tdlib-auth-state', event => cb(event.payload));
+  }
+
+  onTdlibDownloadProgress(cb: (data: any) => void) {
+    return listen<any>('tdlib-download-progress', event => cb(event.payload));
+  }
+
   async sendCode(phoneNumber: string) {
     try {
       await this.connect();
@@ -696,6 +761,17 @@ class TelegramService {
     }
   }
 
+  private async appendBytesToFile(filePath: string, data: any) {
+    const bytes = toUint8Array(data);
+    const chunkSize = 256 * 1024;
+
+    for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+      const chunk = bytes.slice(offset, offset + chunkSize);
+      await invoke('append_download_file_chunk', { filePath, data: Array.from(chunk) });
+      await nextFrame();
+    }
+  }
+
   private async downloadUrlToFile(url: string, filePath: string, onProgress?: (percent: number) => void) {
     const response = await tauriFetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -740,13 +816,25 @@ class TelegramService {
   private async saveTelegramMessageToFile(message: any, filePath: string, workers: number, onProgress?: (percent: number) => void) {
     let lastProgressPercent = -1;
     let lastProgressAt = 0;
-    const buffer = await this.client!.downloadMedia(message, {
-      workers,
-      progressCallback: (downloaded: any, total: any) => {
+    const rawSize = message.document?.size || message.media?.document?.size || message.photo?.sizes?.slice(-1)?.[0]?.size || 0;
+    const totalBytes = toNumberValue(rawSize);
+    let downloadedBytes = 0;
+
+    await invoke('begin_download_file', { filePath });
+    try {
+      const iter = this.client!.iterDownload({
+        file: message.media,
+        requestSize: 512 * 1024,
+      });
+
+      for await (const chunk of iter) {
         if (this.activeDownloadAborted || this.saveMultipleAborted) throw new Error('STOP_ABORTED');
-        const totalNumber = toNumberValue(total);
-        const percent = totalNumber > 0
-          ? Math.min(100, Math.round((toNumberValue(downloaded) / totalNumber) * 100))
+        const bytes = toUint8Array(chunk);
+        await this.appendBytesToFile(filePath, bytes);
+        downloadedBytes += bytes.byteLength;
+
+        const percent = totalBytes > 0
+          ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
           : 0;
         const now = Date.now();
         if (percent !== lastProgressPercent && (percent === 100 || now - lastProgressAt > 250)) {
@@ -755,21 +843,136 @@ class TelegramService {
           onProgress?.(percent);
         }
       }
-    });
-
-    if (!buffer) throw new Error('Download retornou vazio.');
-    await this.saveBytesToFile(filePath, buffer);
+      await invoke('finish_download_file', { filePath });
+    } catch (error) {
+      await invoke('abort_download_file', { filePath }).catch(() => {});
+      throw error;
+    }
   }
 
-  async startDownload({ chatId, folderPath, topic, splitByUser }: any) {
+  private async tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, chatMeta }: any) {
+    const numericChatId = toNumberValue(chatId);
+    if (!Number.isFinite(numericChatId) || numericChatId === 0) return null;
+
+    try {
+      const initStatus: any = await this.tdlibInit();
+      if (!initStatus?.ready) return null;
+
+      const runId = Date.now();
+      const batchId = `telegram_mass_${numericChatId}_${topic?.id || 'all'}_${runId}`;
+      const batchTitle = topic?.title
+        ? `${chatMeta?.title || 'Telegram'} · ${topic.title}`
+        : `${chatMeta?.title || 'Telegram'} · Mass Download`;
+      const nativeFolderPath = topic?.title ? joinPath(folderPath, sanitizeForFolderName(topic.title)) : folderPath;
+      const knownDownloadIds = new Map<string, string>();
+      const unsubscribe = await this.onTdlibDownloadProgress((data: any) => {
+        const items = Array.isArray(data.items) ? data.items : [];
+        const batchMeta = {
+          batchTotal: data.total || 0,
+          batchDownloaded: data.downloaded || 0,
+          batchCompleted: items.filter((item: any) => item?.status === 'completed').length,
+          batchSkipped: items.filter((item: any) => item?.status === 'skipped').length,
+          batchFailed: items.filter((item: any) => item?.status === 'failed' || item?.status === 'stopped').length,
+        };
+
+        for (const item of items) {
+          if (!item?.filePath) continue;
+          const key = item.filePath;
+          const thumbnailUrl = item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : undefined;
+          const existingId = knownDownloadIds.get(key);
+          const status = item.status === 'completed'
+            ? 'completed'
+            : item.status === 'failed' || item.status === 'stopped'
+              ? 'failed'
+              : 'downloading';
+          const error = item.status === 'stopped' ? 'Cancelado pelo usuário' : undefined;
+
+          if (!existingId && item.status !== 'skipped') {
+            const downloadId = `telegram_tdlib_${numericChatId}_${runId}_${knownDownloadIds.size}`;
+            knownDownloadIds.set(key, downloadId);
+            downloadService.addDownload({
+              id: downloadId,
+              chatId,
+              fileName: item.name,
+              filePath: item.filePath,
+              fileSize: item.size || undefined,
+              progress: item.progress || 0,
+              status,
+              error,
+              platform: 'telegram',
+              thumbnailUrl,
+              chatTitle: chatMeta?.title,
+              chatKind: chatMeta?.kind,
+              topicTitle: topic?.title || undefined,
+              sourceLabel: topic?.title ? `${chatMeta?.title || 'Telegram'} / ${topic.title}` : chatMeta?.title,
+              batchId,
+              batchTitle,
+              batchKind: 'mass',
+              ...batchMeta,
+            });
+          } else if (existingId) {
+            const updates: any = {
+              progress: item.progress || 0,
+              status,
+              error,
+              ...batchMeta,
+            };
+            if (item.size > 0) updates.fileSize = item.size;
+            if (thumbnailUrl) updates.thumbnailUrl = thumbnailUrl;
+            downloadService.updateDownload(existingId, updates);
+          }
+        }
+
+        this.emitDownloadProgress({
+          chatId,
+          total: data.total || 0,
+          downloaded: data.downloaded || 0,
+          currentFile: data.currentFile || 'Baixando com TDLib...',
+          topicTitle: topic?.title || null,
+          isScanning: !!data.isScanning,
+          items,
+        });
+      });
+
+      try {
+        const result: any = await this.tdlibStartMassDownload({
+          chatId: numericChatId,
+          folderPath: nativeFolderPath,
+          topicId: topic?.id ?? null,
+          splitByUser: topic ? false : splitByUser,
+        });
+
+        if (!result?.success) return null;
+        return {
+          success: true,
+          downloadedCount: result.downloaded_count ?? result.downloadedCount ?? 0,
+          skippedCount: result.skipped_count ?? result.skippedCount ?? 0,
+          failedCount: result.failed_count ?? result.failedCount ?? 0,
+          total: result.total ?? 0,
+          aborted: !!result.aborted,
+          native: true,
+        };
+      } finally {
+        unsubscribe();
+      }
+    } catch (error) {
+      console.warn('[TelegramService] TDLib mass download unavailable, falling back to GramJS:', error);
+      return null;
+    }
+  }
+
+  async startDownload({ chatId, folderPath, topic, splitByUser, chatMeta }: any) {
     try {
       this.activeDownloadAborted = false;
       this.saveMultipleAborted = false;
 
       const fakeChat = this.getTwitterFakeChat(chatId);
       if (fakeChat) {
-        return this.startFakeChatDownload({ chatId, folderPath, fakeChat });
+        return this.startFakeChatDownload({ chatId, folderPath, fakeChat, chatMeta });
       }
+
+      const nativeResult = await this.tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, chatMeta });
+      if (nativeResult) return nativeResult;
 
       if (!this.client) return { success: false, error: 'Telegram não conectado.' };
 
@@ -783,7 +986,12 @@ class TelegramService {
       let current = 0;
       let totalMedia = 0;
       const runId = Date.now();
+      const batchId = `telegram_mass_${chatId}_${topic?.id || 'all'}_${runId}`;
+      const batchTitle = topic?.title
+        ? `${chatMeta?.title || 'Telegram'} · ${topic.title}`
+        : `${chatMeta?.title || 'Telegram'} · Mass Download`;
       const processedItems: any[] = [];
+      const batchDownloadIds = new Set<string>();
       const workers = await this.getDownloadWorkers();
 
       this.emitDownloadProgress({
@@ -820,6 +1028,17 @@ class TelegramService {
           items: processedItems
         });
       };
+      const batchMeta = (partialDownloaded?: number) => ({
+        batchTotal: totalMedia,
+        batchDownloaded: Math.min(totalMedia || Number.MAX_SAFE_INTEGER, partialDownloaded ?? (downloadedCount + skippedCount)),
+        batchCompleted: downloadedCount,
+        batchSkipped: skippedCount,
+        batchFailed: failedCount,
+      });
+      const updateBatchDownloads = (partialDownloaded?: number) => {
+        const updates = batchMeta(partialDownloaded);
+        batchDownloadIds.forEach(id => downloadService.updateDownload(id, updates));
+      };
 
       const messagesIter = this.client.iterMessages(entity, {
         filter: new Api.InputMessagesFilterPhotoVideo(),
@@ -846,10 +1065,19 @@ class TelegramService {
         if (await this.pathExists(filePath)) {
           skippedCount++;
           processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: itemSize });
+          updateBatchDownloads();
           if (skippedCount % 10 === 0 || current === totalMedia) {
             sendProgressUpdate(`Ignorando arquivos já baixados... (${skippedCount} ignorados)`);
           }
           continue;
+        }
+
+        let thumbnailUrl: string | undefined;
+        try {
+          const thumbRes: any = await this.getMessageMedia({ chatId, messageId: message.id });
+          if (thumbRes?.success && thumbRes.filePath) thumbnailUrl = thumbRes.filePath;
+        } catch {
+          // Thumbnail is best-effort; mass download should not wait on preview failures.
         }
 
         const item = { name: safeName, status: 'downloading', progress: 0, size: itemSize };
@@ -860,33 +1088,44 @@ class TelegramService {
           messageId: message.id,
           fileName: safeName,
           filePath,
+          fileSize: itemSize || undefined,
           progress: 0,
           status: 'downloading',
           platform: 'telegram',
+          thumbnailUrl,
+          chatTitle: chatMeta?.title,
+          chatKind: chatMeta?.kind,
           topicTitle: topic?.title || undefined,
+          sourceLabel: topic?.title ? `${chatMeta?.title || 'Telegram'} / ${topic.title}` : chatMeta?.title,
+          batchId,
+          batchTitle,
+          batchKind: 'mass',
+          ...batchMeta(),
         });
+        batchDownloadIds.add(downloadId);
         sendProgressUpdate(safeName);
 
         try {
           await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
             if (this.activeDownloadAborted) throw new Error('STOP_ABORTED');
             item.progress = percent;
-            downloadService.updateDownload(downloadId, { progress: percent });
-            sendProgressUpdate(`${safeName} (${percent}%)`, downloadedCount + skippedCount + (percent / 100));
+            const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
+            downloadService.updateDownload(downloadId, { progress: percent, ...batchMeta(partialDownloaded) });
+            sendProgressUpdate(`${safeName} (${percent}%)`, partialDownloaded);
           });
 
           if (this.activeDownloadAborted) break;
           downloadedCount++;
           item.status = 'completed';
           item.progress = 100;
-          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, ...batchMeta() });
           sendProgressUpdate(safeName);
         } catch (err: any) {
           if (err?.message === 'STOP_ABORTED' || this.activeDownloadAborted) break;
           console.error(`Failed to download ${safeName}:`, err);
           failedCount++;
           item.status = 'failed';
-          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
+          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err), ...batchMeta() });
           sendProgressUpdate(`Falhou: ${safeName}`);
         }
         await nextFrame();
@@ -915,14 +1154,28 @@ class TelegramService {
     }
   }
 
-  private async startFakeChatDownload({ chatId, folderPath, fakeChat }: any) {
+  private async startFakeChatDownload({ chatId, folderPath, fakeChat, chatMeta }: any) {
     const mediaMessages = fakeChat.messages.filter((message: TwitterFakeMessage) => message.url);
     const total = mediaMessages.length;
     let downloadedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
     const runId = Date.now();
+    const batchId = `telegram_mass_${chatId}_fake_${runId}`;
+    const batchTitle = `${chatMeta?.title || fakeChat.title || 'Twitter/X'} · Mass Download`;
     const processedItems: any[] = [];
+    const batchDownloadIds = new Set<string>();
+    const batchMeta = (partialDownloaded?: number) => ({
+      batchTotal: total,
+      batchDownloaded: Math.min(total || Number.MAX_SAFE_INTEGER, partialDownloaded ?? (downloadedCount + skippedCount)),
+      batchCompleted: downloadedCount,
+      batchSkipped: skippedCount,
+      batchFailed: failedCount,
+    });
+    const updateBatchDownloads = (partialDownloaded?: number) => {
+      const updates = batchMeta(partialDownloaded);
+      batchDownloadIds.forEach(id => downloadService.updateDownload(id, updates));
+    };
 
     await this.ensureDir(folderPath);
     this.emitDownloadProgress({ chatId, total, downloaded: 0, currentFile: 'Iniciando...', isScanning: false, items: processedItems });
@@ -937,6 +1190,7 @@ class TelegramService {
       if (await this.pathExists(filePath)) {
         skippedCount++;
         processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: message.mediaSize || 0 });
+        updateBatchDownloads();
         continue;
       }
 
@@ -948,25 +1202,36 @@ class TelegramService {
         messageId: message.id,
         fileName: safeName,
         filePath,
+        fileSize: message.mediaSize || undefined,
         progress: 0,
         status: 'downloading',
         platform: 'telegram',
+        thumbnailUrl: message.thumbnailUrl || fakeChat.thumbnailUrl || undefined,
+        chatTitle: chatMeta?.title || fakeChat.title,
+        chatKind: chatMeta?.kind || 'twitter',
+        sourceLabel: chatMeta?.title || fakeChat.title,
+        batchId,
+        batchTitle,
+        batchKind: 'mass',
+        ...batchMeta(),
       });
+      batchDownloadIds.add(downloadId);
       try {
         await this.downloadUrlToFile(message.url!, filePath, (percent) => {
           item.progress = percent;
-          downloadService.updateDownload(downloadId, { progress: percent });
-          this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount + (percent / 100), currentFile: `${safeName} (${percent}%)`, items: processedItems });
+          const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
+          downloadService.updateDownload(downloadId, { progress: percent, ...batchMeta(partialDownloaded) });
+          this.emitDownloadProgress({ chatId, total, downloaded: partialDownloaded, currentFile: `${safeName} (${percent}%)`, items: processedItems });
         });
         downloadedCount++;
         item.status = 'completed';
         item.progress = 100;
-        downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+        downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, ...batchMeta() });
       } catch (err) {
         console.error(`Failed to download ${safeName}:`, err);
         failedCount++;
         item.status = 'failed';
-        downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
+        downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err), ...batchMeta() });
       }
 
       this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount, currentFile: safeName, items: processedItems });
@@ -986,6 +1251,7 @@ class TelegramService {
 
   async stopDownload() {
     this.activeDownloadAborted = true;
+    await this.tdlibStopDownload().catch(() => {});
     return { success: true };
   }
 
