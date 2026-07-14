@@ -76,7 +76,8 @@ export class MediaCacheService {
           resolvedMimeType = await get<string>(`${key}_mime`) || 'application/octet-stream';
         }
 
-        const blob = new Blob([buffer], { type: resolvedMimeType });
+        const normalizedBuffer = this.toArrayBuffer(buffer);
+        const blob = new Blob([normalizedBuffer], { type: resolvedMimeType });
         const url = URL.createObjectURL(blob);
         
         // Save to memory cache for subsequent instant access
@@ -87,7 +88,7 @@ export class MediaCacheService {
           info.lastAccessed = Date.now();
         } else {
           // If missing in registry (e.g. legacy cached item), add it
-          const size = buffer.byteLength || buffer.length || 0;
+          const size = normalizedBuffer.byteLength;
           this.registry.set(key, {
             key,
             size,

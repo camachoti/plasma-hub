@@ -667,6 +667,10 @@ class TelegramService {
     const bytes = toUint8Array(data);
     const chunkSize = 512 * 1024;
 
+    if (bytes.byteLength === 0) {
+      throw new Error('Download sem bytes.');
+    }
+
     await invoke('begin_download_file', { filePath });
     try {
       for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
@@ -684,6 +688,8 @@ class TelegramService {
   private async appendBytesToFile(filePath: string, data: any) {
     const bytes = toUint8Array(data);
     const chunkSize = 256 * 1024;
+
+    if (bytes.byteLength === 0) return;
 
     for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
       const chunk = bytes.slice(offset, offset + chunkSize);
@@ -708,7 +714,7 @@ class TelegramService {
     return response.arrayBuffer();
   }
 
-  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string, fallbackUrl?: string) {
+  private async saveCachedMediaToPath(cacheKey: string, fallbackUrl: string | undefined, filePath: string) {
     let buffer = await mediaCache.getMediaBuffer(cacheKey);
     if ((!buffer || buffer.byteLength === 0) && fallbackUrl) {
       buffer = await this.bufferFromUrl(fallbackUrl);
@@ -717,10 +723,14 @@ class TelegramService {
       throw new Error('Mídia baixada sem bytes. Tente abrir a mídia e baixar novamente.');
     }
 
-    const downloadDir = await getDownloadDir();
-    const filePath = await joinSystemPath(downloadDir, sanitizeForFilename(fileName));
     await this.saveBytesToFile(filePath, buffer);
     return filePath;
+  }
+
+  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string, fallbackUrl?: string) {
+    const downloadDir = await getDownloadDir();
+    const filePath = await joinSystemPath(downloadDir, sanitizeForFilename(fileName));
+    return this.saveCachedMediaToPath(cacheKey, fallbackUrl, filePath);
   }
 
   private getDownloadWorkersFallback() {
@@ -783,6 +793,9 @@ class TelegramService {
           lastProgressAt = now;
           onProgress?.(percent);
         }
+      }
+      if (downloadedBytes === 0) {
+        throw new Error('Telegram não retornou bytes para esta mídia.');
       }
       await invoke('finish_download_file', { filePath });
     } catch (error) {
@@ -1824,10 +1837,17 @@ class TelegramService {
             message = Array.isArray(messages) ? messages[0] : messages;
           }
           if (!message?.media) throw new Error('Mídia não encontrada.');
-          await this.saveTelegramMessageToFile(message, saveAsPath, await this.getDownloadWorkers(), (progress) => {
-            downloadService.updateDownload(id, { progress });
-            this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
-          });
+          try {
+            await this.saveTelegramMessageToFile(message, saveAsPath, await this.getDownloadWorkers(), (progress) => {
+              downloadService.updateDownload(id, { progress });
+              this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
+            });
+          } catch (directError) {
+            console.warn('[TelegramService] Direct Save As failed, trying cached media fallback:', directError);
+            const res = await this.getMessageMediaFile({ chatId, messageId });
+            if (!res.success || !res.filePath) throw directError;
+            await this.saveCachedMediaToPath(`media_${chatId}_${messageId}_full`, res.filePath, saveAsPath);
+          }
         }
         unsub();
         downloadService.updateDownload(id, {

@@ -283,12 +283,18 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
 
     setSavingMedia(true);
     setMediaStage('downloading');
+    setMediaProgress(0);
 
     try {
-      await telegramService.saveMessageMediaFile({ chatId, messageId: activeMessageId, downloadMeta, saveAs });
+      const res = await telegramService.saveMessageMediaFile({ chatId, messageId: activeMessageId, downloadMeta, saveAs });
+      if (!res?.success && !res?.canceled) {
+        console.warn('[MessageMedia] Failed to save media', res);
+      }
     } catch (e) {
       console.error(e);
     } finally {
+      setMediaStage(null);
+      setMediaProgress(0);
       setSavingMedia(false);
     }
   };
@@ -473,7 +479,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
               <button
                 type="button"
                 className="btn-icon"
-                onClick={() => handleSaveMedia(false)}
+                onClick={() => handleSaveMedia(true)}
                 disabled={savingMedia}
                 title={savingMedia ? 'Salvando...' : 'Download'}
                 aria-label="Salvar mídia"
