@@ -13,10 +13,21 @@
 .app-container {
   display: flex;
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
   background: var(--bg-0);
   color: var(--text-0);
   font-family: var(--font-sans);
+  overflow: hidden;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+.app-container[data-runtime="android"] {
+  --android-statusbar-offset: max(env(safe-area-inset-top, 0px), 24px);
+  padding-top: var(--android-statusbar-offset);
 }
 
 .runtime-notice {
@@ -39,8 +50,22 @@
   pointer-events: none;
 }
 
+.app-container[data-runtime="android"] .main-content {
+  padding-top: 44px;
+}
+
+.app-container[data-runtime="android"] .runtime-notice {
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  max-width: none;
+  padding: 7px 10px;
+  font-size: 11px;
+  transform: none;
+}
+
 .login-screen {
-  padding: 24px;
+  padding: calc(24px + env(safe-area-inset-top, 0px)) calc(24px + env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) calc(24px + env(safe-area-inset-left, 0px));
 }
 
 .login-card,

@@ -123,7 +123,10 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
-#root { height: 100vh; }
+#root {
+  height: 100vh;
+  height: 100dvh;
+}
 button { font-family: inherit; font-size: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
 input, textarea { font-family: inherit; font-size: inherit; color: inherit; background: none; border: 0; outline: 0; }
 select {

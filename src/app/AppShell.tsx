@@ -3,6 +3,7 @@ import { Dashboard } from "../features/telegram/Dashboard";
 import { Downloads } from "../features/telegram/Downloads";
 import { Settings as TelegramSettings } from "../features/telegram/Settings";
 import { TwitterLibrary } from "../features/twitter/TwitterLibrary";
+import { runtimeCapabilities } from "../shared/platform/runtime";
 import { RuntimeCompatibilityNotice } from "./RuntimeCompatibilityNotice";
 
 export type AppTab = "telegram" | "downloads" | "twitter";
@@ -31,7 +32,12 @@ export function AppShell({
   onTelegramLoginRequest,
 }: AppShellProps) {
   return (
-    <div className="app-container" data-palette={palette} data-density={density}>
+    <div
+      className="app-container"
+      data-palette={palette}
+      data-density={density}
+      data-runtime={runtimeCapabilities.kind}
+    >
       <div className="sidebar">
         <button
           className={`sidebar-item ${activeTab === "telegram" ? "active" : ""}`}
