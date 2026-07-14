@@ -7,6 +7,7 @@ import bigInt from 'big-integer';
 
 import { downloadUrlInBrowser } from '../../shared/platform/browserDownload';
 import { openDialog as open, saveDialog as save } from '../../shared/platform/dialog';
+import { getDownloadDir, joinPath as joinSystemPath } from '../../shared/platform/files';
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { canUseServiceWorker } from '../../shared/platform/serviceWorker';
@@ -699,6 +700,16 @@ class TelegramService {
     onProgress?.(80);
     await this.saveBytesToFile(filePath, buffer);
     onProgress?.(100);
+  }
+
+  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string) {
+    const buffer = await mediaCache.getMediaBuffer(cacheKey);
+    if (!buffer) throw new Error('Mídia não encontrada no cache para salvar.');
+
+    const downloadDir = await getDownloadDir();
+    const filePath = await joinSystemPath(downloadDir, sanitizeForFilename(fileName));
+    await this.saveBytesToFile(filePath, buffer);
+    return filePath;
   }
 
   private getDownloadWorkersFallback() {
@@ -1736,7 +1747,7 @@ class TelegramService {
 
     if (fakeMessage) {
       suggestedName = sanitizeForFilename(`media_${messageId}${fakeMessage.isVideo ? '.mp4' : '.jpg'}`);
-    } else if (saveAs) {
+    } else {
       try {
         const entity = await this.client!.getEntity(chatId);
         const messages = await this.client!.getMessages(entity, { ids: [messageId] });
@@ -1820,13 +1831,31 @@ class TelegramService {
       unsub();
 
       if (res.success && res.filePath) {
+        let savedFilePath: string | undefined;
+        if (runtimeCapabilities.isAndroid) {
+          if (fakeMessage?.url) {
+            const downloadDir = await getDownloadDir();
+            savedFilePath = await joinSystemPath(downloadDir, suggestedName);
+            await this.downloadUrlToFile(fakeMessage.url, savedFilePath, (progress) => {
+              downloadService.updateDownload(id, { progress });
+              this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'saving' }));
+            });
+          } else {
+            savedFilePath = await this.saveCachedMediaToDownloads(`media_${chatId}_${messageId}_full`, suggestedName);
+          }
+        }
+
         downloadService.updateDownload(id, { 
           status: 'completed', 
           progress: 100, 
+          fileName: savedFilePath ? basename(savedFilePath) : suggestedName,
+          filePath: savedFilePath,
         });
 
-        downloadUrlInBrowser(res.filePath, `media_${messageId}`, '_blank');
-        return { success: true };
+        if (!runtimeCapabilities.isAndroid) {
+          downloadUrlInBrowser(res.filePath, suggestedName, '_blank');
+        }
+        return { success: true, filePath: savedFilePath };
       }
 
       downloadService.updateDownload(id, { 
