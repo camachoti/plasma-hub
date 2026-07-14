@@ -114,10 +114,11 @@ export class MediaCacheService {
    */
   async saveMedia(key: string, buffer: ArrayBuffer | Uint8Array | any, mimeType?: string): Promise<string> {
     await this.ensureRegistryLoaded();
+    const normalizedBuffer = this.toArrayBuffer(buffer);
 
     try {
       // Save to IndexedDB
-      await set(key, buffer);
+      await set(key, normalizedBuffer);
       if (mimeType) {
         await set(`${key}_mime`, mimeType);
       }
@@ -127,12 +128,12 @@ export class MediaCacheService {
 
     // Create Blob and save to Memory Cache
     const resolvedMime = mimeType || 'application/octet-stream';
-    const blob = new Blob([buffer], { type: resolvedMime });
+    const blob = new Blob([normalizedBuffer], { type: resolvedMime });
     const url = URL.createObjectURL(blob);
     this.memoryCache.set(key, url);
 
     // Update registry
-    const size = buffer.byteLength || buffer.length || 0;
+    const size = normalizedBuffer.byteLength;
     this.registry.set(key, {
       key,
       size,
@@ -156,18 +157,26 @@ export class MediaCacheService {
     try {
       const buffer = await get<ArrayBuffer | Uint8Array | any>(key);
       if (buffer) {
-        if (buffer instanceof ArrayBuffer) {
-          return buffer;
-        }
-        if (ArrayBuffer.isView(buffer)) {
-          return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-        }
-        return buffer;
+        return this.toArrayBuffer(buffer);
       }
     } catch (e) {
       console.warn("Failed to get media buffer from IndexedDB", e);
     }
     return null;
+  }
+
+  private toArrayBuffer(value: ArrayBuffer | Uint8Array | any): ArrayBuffer {
+    if (value instanceof ArrayBuffer) return value;
+    if (ArrayBuffer.isView(value)) {
+      return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    }
+    if (value?.buffer instanceof ArrayBuffer && typeof value.byteLength === 'number') {
+      return value.buffer.slice(value.byteOffset || 0, (value.byteOffset || 0) + value.byteLength);
+    }
+    if (Array.isArray(value)) {
+      return new Uint8Array(value).buffer;
+    }
+    return new Uint8Array(value || []).buffer;
   }
 
   // --- Message Cache ---

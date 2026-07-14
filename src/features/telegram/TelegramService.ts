@@ -702,9 +702,20 @@ class TelegramService {
     onProgress?.(100);
   }
 
-  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string) {
-    const buffer = await mediaCache.getMediaBuffer(cacheKey);
-    if (!buffer) throw new Error('Mídia não encontrada no cache para salvar.');
+  private async bufferFromUrl(url: string) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Falha ao ler mídia baixada (${response.status}).`);
+    return response.arrayBuffer();
+  }
+
+  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string, fallbackUrl?: string) {
+    let buffer = await mediaCache.getMediaBuffer(cacheKey);
+    if ((!buffer || buffer.byteLength === 0) && fallbackUrl) {
+      buffer = await this.bufferFromUrl(fallbackUrl);
+    }
+    if (!buffer || buffer.byteLength === 0) {
+      throw new Error('Mídia baixada sem bytes. Tente abrir a mídia e baixar novamente.');
+    }
 
     const downloadDir = await getDownloadDir();
     const filePath = await joinSystemPath(downloadDir, sanitizeForFilename(fileName));
@@ -1841,7 +1852,7 @@ class TelegramService {
               this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'saving' }));
             });
           } else {
-            savedFilePath = await this.saveCachedMediaToDownloads(`media_${chatId}_${messageId}_full`, suggestedName);
+            savedFilePath = await this.saveCachedMediaToDownloads(`media_${chatId}_${messageId}_full`, suggestedName, res.filePath);
           }
         }
 
