@@ -578,6 +578,10 @@ pub async fn download_twitter_native(
     filename: String,
     cookies: Option<String>,
 ) -> Result<(), String> {
+    if cfg!(target_os = "android") {
+        return Err("Download nativo do Twitter/X ainda não está disponível no Android.".to_string());
+    }
+
     let result = download_twitter_native_inner(&app_handle, &id, &url, &filename, cookies).await;
     if let Err(error) = &result {
         let _ = app_handle.emit(
@@ -599,6 +603,10 @@ pub async fn download_twitter_profile_native(
     media_urls: Vec<String>,
     cookies: Option<String>,
 ) -> Result<(), String> {
+    if cfg!(target_os = "android") {
+        return Err("Download de perfil do Twitter/X ainda não está disponível no Android.".to_string());
+    }
+
     let result =
         download_twitter_profile_native_inner(&app_handle, &id, &username, media_urls, cookies)
             .await;

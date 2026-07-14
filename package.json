@@ -1,5 +1,5 @@
 {
-  "name": "tauri-app",
+  "name": "plasma-hub",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -8,7 +8,14 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "pretauri": "scripts/check-tdlib-runtime.sh",
-    "tauri": "tauri"
+    "pretauri:dev": "scripts/check-tdlib-runtime.sh",
+    "pretauri:build": "scripts/check-tdlib-runtime.sh",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:android:init": "tauri android init",
+    "tauri:android:dev": "tauri android dev",
+    "tauri:android:build": "tauri android build"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

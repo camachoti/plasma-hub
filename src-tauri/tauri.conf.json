@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "Plasma Hub",
   "version": "0.1.0",
-  "identifier": "com.camacho.tauri-app",
+  "identifier": "com.camacho.plasmahub",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https: data: blob:; media-src 'self' asset: http://asset.localhost https: data: blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:* https: http:; font-src 'self' data:"
     }
   },
   "bundle": {

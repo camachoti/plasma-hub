@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
+name = "plasma-hub"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Plasma Hub desktop and Android app"
+authors = ["Camacho"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_app_lib"
+name = "plasma_hub_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -26,9 +26,9 @@ serde_json = "1"
 
 tokio = { version = "1.52.3", features = ["full"] }
 reqwest = { version = "0.13.4", features = ["stream", "json"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
 tauri-plugin-http = "2"
-rusty_ytdl = "0.7.4"
 regex = "1.12.4"
 tauri-plugin-dialog = "2"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 tdlib-rs = { version = "1.4.0", features = ["download-tdlib"] }

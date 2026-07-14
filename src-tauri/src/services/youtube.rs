@@ -1,28 +1,39 @@
+#[cfg(not(target_os = "android"))]
 use regex::Regex;
+#[cfg(not(target_os = "android"))]
 use serde::Serialize;
+#[cfg(not(target_os = "android"))]
 use std::fs;
+#[cfg(not(target_os = "android"))]
 use std::process::Stdio;
+#[cfg(not(target_os = "android"))]
 use tauri::{Emitter, Manager};
+#[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(not(target_os = "android"))]
 use tokio::process::Command;
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct DownloadProgressEvent {
     id: String,
     progress: f64,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct DownloadErrorEvent {
     id: String,
     error: String,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct DownloadDoneEvent {
     id: String,
 }
 
+#[cfg(not(target_os = "android"))]
 pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let app_dir = app_handle
         .path()
@@ -66,6 +77,7 @@ pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::Pa
 }
 
 #[tauri::command]
+#[cfg(not(target_os = "android"))]
 pub async fn get_youtube_stream_url(
     app_handle: tauri::AppHandle,
     url: String,
@@ -111,6 +123,17 @@ pub async fn get_youtube_stream_url(
 }
 
 #[tauri::command]
+#[cfg(target_os = "android")]
+pub async fn get_youtube_stream_url(
+    _app_handle: tauri::AppHandle,
+    _url: String,
+    _format_id: String,
+) -> Result<String, String> {
+    Err("YouTube via yt-dlp ainda não está disponível no Android.".to_string())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "android"))]
 pub async fn download_youtube_native(
     app_handle: tauri::AppHandle,
     id: String,
@@ -181,4 +204,16 @@ pub async fn download_youtube_native(
         );
         Err("Download falhou".to_string())
     }
+}
+
+#[tauri::command]
+#[cfg(target_os = "android")]
+pub async fn download_youtube_native(
+    _app_handle: tauri::AppHandle,
+    _id: String,
+    _url: String,
+    _format_id: String,
+    _filename: String,
+) -> Result<(), String> {
+    Err("Downloads do YouTube ainda não estão disponíveis no Android.".to_string())
 }

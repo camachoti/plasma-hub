@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand as invoke } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
@@ -12,6 +12,8 @@ import appIcon from '../../../build/icon.png';
 import { useAppearance } from '../appearance/AppearanceStore';
 import { updateTwitterProfileChat } from './TwitterFakeChatStore';
 import { getStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
+import { appStorage } from '../../shared/storage/appStorage';
+import { writeClipboardText } from '../../shared/platform/clipboard';
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '😢', '🎉', '🙏', '👌', '💯', '🤣', '🤩', '🤮', '💩', '🖕', '😈'];
 
@@ -87,6 +89,7 @@ interface Message {
   is_edited?: boolean;
   replyToMsgId?: number | null;
   groupedId?: string | null;
+  topicId?: number | null;
 }
 
 interface TimelineItem {
@@ -309,6 +312,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const topicListScrollRef = useRef<number>(0);
   const pendingJumpToMsgIdRef = useRef<number | null>(null);
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
+  const messagesLoadSeqRef = useRef(0);
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -320,6 +324,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const [folderPath, setFolderPath] = useState<string>('');
   const [splitByUser, setSplitByUser] = useState<boolean>(false);
+  const [splitByAlbum, setSplitByAlbum] = useState<boolean>(false);
+  const [albumSplitMode, setAlbumSplitMode] = useState<'separator' | 'comment'>('separator');
   const [isSelectionMode, setIsSelectionMode] = useState<boolean>(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<number[]>([]);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
@@ -612,7 +618,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         fetchForumTopics(selectedChat);
         fetchFullChat(selectedChat.id);
         fetchSharedMedia(selectedChat.id);
-        if (!selectedChat.hasTopics) loadMessages(selectedChat.id);
+        if (!selectedChat.hasTopics) loadMessages(selectedChat.id, 0, undefined, { refresh: true });
         else topicListScrollRef.current = 0;
       }
     } else {
@@ -650,6 +656,40 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    const unsubscribe = telegramService.onNewMessage(({ chatId, topicId, message }: any) => {
+      if (!selectedChat || String(chatId) !== String(selectedChat.id)) return;
+
+      const activeTopicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+      if (activeTopicId && Number(topicId || message.topicId || message.replyToMsgId || 0) !== Number(activeTopicId)) {
+        return;
+      }
+
+      setMessages(current => {
+        const byId = new Map<number, Message>();
+        current.forEach(item => byId.set(Number(item.id), item));
+        byId.set(Number(message.id), message);
+        return Array.from(byId.values()).sort((a, b) => Number(a.id) - Number(b.id));
+      });
+
+      setChats(current => current.map(chat => String(chat.id) === String(chatId)
+        ? {
+          ...chat,
+          lastMessageText: message.text || (message.hasMedia ? '' : chat.lastMessageText),
+          lastMessageDate: message.date,
+          lastMessageHasMedia: message.hasMedia,
+          lastMessageIsVideo: message.isVideo,
+          lastMessageIsPhoto: message.isPhoto,
+        }
+        : chat
+      ));
+
+      shouldScrollToBottomRef.current = true;
+    });
+
+    return () => unsubscribe();
+  }, [selectedChat?.id, viewingTopic?.id]);
 
   useEffect(() => {
     if (pendingJumpToMsgIdRef.current) {
@@ -699,12 +739,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       const res = await telegramService.getDialogs();
       if (res.success && res.dialogs) {
         setChats(res.dialogs);
-        const pendingFakeChatId = localStorage.getItem('plasma_twitter_pending_fake_chat');
+        const pendingFakeChatId = appStorage.get('plasma_twitter_pending_fake_chat');
         if (pendingFakeChatId) {
           const pendingChat = res.dialogs.find((chat: Chat) => chat.id === pendingFakeChatId);
           if (pendingChat) {
             setSelectedChat(pendingChat);
-            localStorage.removeItem('plasma_twitter_pending_fake_chat');
+            appStorage.remove('plasma_twitter_pending_fake_chat');
           }
         }
         // Preload avatars in background so the list feels instant
@@ -771,7 +811,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic(topic);
     setSelectedTopicId(String(topic.id));
-    loadMessages(selectedChat!.id, 0, topic.id);
+    loadMessages(selectedChat!.id, 0, topic.id, { refresh: true });
 
     if (topic.unreadCount > 0) {
       telegramService.readHistory(selectedChat!.id).catch(console.error);
@@ -793,13 +833,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic({ id: 0, title: 'Todos os tópicos', topMessageId: 0, unreadCount: 0, closed: false, pinned: false });
     setSelectedTopicId('all');
-    loadMessages(selectedChat!.id);
+    loadMessages(selectedChat!.id, 0, undefined, { refresh: true });
   };
 
-  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean } = {}) => {
+  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean } = {}) => {
+    const loadSeq = ++messagesLoadSeqRef.current;
     if (!options.silent) setLoadingMessages(true);
     try {
-      const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId });
+      if (options.refresh && !offsetId) {
+        const cached = await telegramService.getCachedMessages({ chatId, limit: PAGE_SIZE, topicId });
+        if (loadSeq !== messagesLoadSeqRef.current) return;
+        if (cached.success && cached.messages?.length) {
+          setMessages(cached.messages);
+          setHasMoreMessages(Boolean(cached.hasMore));
+          setOldestMessageId(cached.oldestMessageId ?? null);
+        }
+      }
+
+      const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId, refresh: options.refresh });
+      if (loadSeq !== messagesLoadSeqRef.current) return;
       if (res.success && res.messages) {
         setMessages(res.messages);
         setHasMoreMessages(Boolean(res.hasMore));
@@ -847,6 +899,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         chatId: selectedChat.id, folderPath,
         topic: selectedTopic ? { id: selectedTopic.id, title: selectedTopic.title, topMessageId: selectedTopic.topMessageId } : null,
         splitByUser: !selectedChat.hasTopics ? splitByUser : false,
+        splitByAlbum,
+        albumSplitMode,
         chatMeta: {
           title: selectedChat.title,
           kind: getChatKind(selectedChat),
@@ -1007,7 +1061,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       if (res.success) {
         shouldScrollToBottomRef.current = true;
         // Refresh messages silently in background
-        loadMessages(selectedChat.id, 0, topicId, { silent: true });
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true });
       } else {
         setError(res.error || 'Falha ao enviar');
         // Restore input text on error so user doesn't lose it
@@ -1506,67 +1560,104 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       <button className="icon-btn" onClick={() => setIsDownloadModalOpen(false)}>✕</button>
                     </div>
                     <div className="inline-panel-body">
-                      <div className="inline-folder">
-                        <div className="folder-selection">
-                          <input readOnly value={folderPath} placeholder="Selecionar pasta de destino..." />
-                          <button className="browse-btn" onClick={handleSelectFolder}>Procurar</button>
+                      <div className="mass-download-main-row">
+                        <div className="inline-folder">
+                          <div className="folder-selection">
+                            <input readOnly value={folderPath} placeholder="Selecionar pasta de destino..." />
+                            <button className="browse-btn" onClick={handleSelectFolder}>Procurar</button>
+                          </div>
                         </div>
-                      </div>
-                      {!selectedChat.hasTopics && (
-                        <div className="split-user-selection">
-                          <label className="switch-label">
-                            <input
-                              type="checkbox"
-                              checked={splitByUser}
-                              onChange={(e) => setSplitByUser(e.target.checked)}
-                              disabled={downloading}
-                            />
-                            <span className="switch-custom" />
-                            <span className="switch-text">Dividir mídias por usuário</span>
-                          </label>
-                        </div>
-                      )}
-                      {selectedChat.hasTopics && (
-                        <div className="topic-selection">
-                          <div className={`custom-select ${isTopicDropdownOpen ? 'open' : ''} ${loadingTopics || downloading ? 'disabled' : ''}`}>
-                            <button
-                              type="button"
-                              className="custom-select-trigger"
-                              onClick={e => { e.stopPropagation(); if (!loadingTopics && !downloading) setIsTopicDropdownOpen(v => !v); }}
-                              disabled={loadingTopics || downloading}
-                            >
-                              <span>
-                                {loadingTopics ? 'Carregando...' : selectedTopicId === 'all' ? 'Todos os tópicos' : forumTopics.find(t => String(t.id) === selectedTopicId)?.title || 'Todos os tópicos'}
-                              </span>
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
-                            </button>
-                            {isTopicDropdownOpen && (
-                              <div className="custom-select-options">
-                                <div className="custom-select-search" onClick={e => e.stopPropagation()}>
-                                  <input type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} autoFocus />
-                                </div>
-                                <button type="button" className={`custom-select-option ${selectedTopicId === 'all' ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId('all'); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
-                                  Todos os tópicos
-                                </button>
-                                {filteredTopics.map(topic => (
-                                  <button key={topic.id} type="button" className={`custom-select-option ${String(topic.id) === selectedTopicId ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId(String(topic.id)); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
-                                    {topic.pinned && <span className="option-pin">📌</span>}
-                                    {topic.title}
+                        {selectedChat.hasTopics && (
+                          <div className="topic-selection mass-download-topic-selection">
+                            <div className={`custom-select ${isTopicDropdownOpen ? 'open' : ''} ${loadingTopics || downloading ? 'disabled' : ''}`}>
+                              <button
+                                type="button"
+                                className="custom-select-trigger"
+                                onClick={e => { e.stopPropagation(); if (!loadingTopics && !downloading) setIsTopicDropdownOpen(v => !v); }}
+                                disabled={loadingTopics || downloading}
+                              >
+                                <span>
+                                  {loadingTopics ? 'Carregando...' : selectedTopicId === 'all' ? 'Todos os tópicos' : forumTopics.find(t => String(t.id) === selectedTopicId)?.title || 'Todos os tópicos'}
+                                </span>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                              </button>
+                              {isTopicDropdownOpen && (
+                                <div className="custom-select-options">
+                                  <div className="custom-select-search" onClick={e => e.stopPropagation()}>
+                                    <input type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} autoFocus />
+                                  </div>
+                                  <button type="button" className={`custom-select-option ${selectedTopicId === 'all' ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId('all'); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
+                                    Todos os tópicos
                                   </button>
-                                ))}
+                                  {filteredTopics.map(topic => (
+                                    <button key={topic.id} type="button" className={`custom-select-option ${String(topic.id) === selectedTopicId ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId(String(topic.id)); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
+                                      {topic.pinned && <span className="option-pin">📌</span>}
+                                      {topic.title}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        {downloading ? (
+                          <button className={`stop-btn ${stopping ? 'disabled' : ''}`} onClick={handleStopDownload} disabled={stopping}>
+                            {stopping ? '⏳ Parando...' : '⏹ Parar'}
+                          </button>
+                        ) : (
+                          <button className="start-btn" onClick={handleStartDownload} disabled={!folderPath || loadingTopics}>
+                            Iniciar
+                          </button>
+                        )}
+                      </div>
+
+                      {!selectedChat.hasTopics && (
+                        <div className="mass-download-options-row">
+                          <div className="split-user-selection">
+                            <label className="switch-label">
+                              <input
+                                type="checkbox"
+                                checked={splitByUser}
+                                onChange={(e) => setSplitByUser(e.target.checked)}
+                                disabled={downloading}
+                              />
+                              <span className="switch-custom" />
+                              <span className="switch-text">Dividir mídias por usuário</span>
+                            </label>
+                          </div>
+                          <div className="split-album-selection">
+                            <label className="switch-label">
+                              <input
+                                type="checkbox"
+                                checked={splitByAlbum}
+                                onChange={(e) => setSplitByAlbum(e.target.checked)}
+                                disabled={downloading}
+                              />
+                              <span className="switch-custom" />
+                              <span className="switch-text">Dividir mídias por álbum</span>
+                            </label>
+                            {splitByAlbum && (
+                              <div className="album-mode-toggle" role="group" aria-label="Modo de divisão por álbum">
+                                <button
+                                  type="button"
+                                  className={albumSplitMode === 'separator' ? 'active' : ''}
+                                  onClick={() => setAlbumSplitMode('separator')}
+                                  disabled={downloading}
+                                >
+                                  Separador
+                                </button>
+                                <button
+                                  type="button"
+                                  className={albumSplitMode === 'comment' ? 'active' : ''}
+                                  onClick={() => setAlbumSplitMode('comment')}
+                                  disabled={downloading}
+                                >
+                                  Comentário
+                                </button>
                               </div>
                             )}
                           </div>
                         </div>
-                      )}
-                      {downloading ? (
-                        <button className={`stop-btn ${stopping ? 'disabled' : ''}`} onClick={handleStopDownload} disabled={stopping}>
-                          {stopping ? '⏳ Parando...' : '⏹ Parar'}
-                        </button>
-                      ) : (
-                        <button className="start-btn" onClick={handleStartDownload} disabled={!folderPath || loadingTopics}>
-                          Iniciar
-                        </button>
                       )}
                     </div>
                     {progress && (
@@ -2003,7 +2094,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                 ) : msg.text ? (
                                   <button
                                     type="button" className="icon-btn" title="Copiar texto"
-                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(msg.text); }}
+                                    onClick={(e) => { e.stopPropagation(); writeClipboardText(msg.text); }}
                                   >⎘</button>
                                 ) : null}
                               </div>
@@ -2346,7 +2437,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             ...(msgContextMenu.message.text ? [{
               label: 'Copiar texto',
               icon: <IcoCopy />,
-              onClick: () => { navigator.clipboard.writeText(msgContextMenu.message.text); setMsgContextMenu(null); },
+              onClick: () => { writeClipboardText(msgContextMenu.message.text); setMsgContextMenu(null); },
             }] : []),
             ...(msgContextMenu.message.is_edited ? [{ separator: true as const }] : []),
             ...(msgContextMenu.message.is_edited ? [{

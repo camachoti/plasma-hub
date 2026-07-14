@@ -1,106 +1,44 @@
 // @ts-nocheck
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { open, save } from '@tauri-apps/plugin-dialog';
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { NewMessage } from 'telegram/events';
+import { convertFileSrc, invokeCommand as invoke } from '../../shared/platform/tauri';
 import bigInt from 'big-integer';
 
+import { downloadUrlInBrowser } from '../../shared/platform/browserDownload';
+import { openDialog as open, saveDialog as save } from '../../shared/platform/dialog';
+import { platformFetch as tauriFetch } from '../../shared/platform/http';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { canUseServiceWorker } from '../../shared/platform/serviceWorker';
+import { appStorage } from '../../shared/storage/appStorage';
 import { downloadService } from '../downloader/DownloadService';
 import { mediaCache } from './MediaCacheService';
 import {
-  findTwitterFakeMessage,
-  getTwitterFakeChat,
-  isTwitterFakeChatId,
+  basename,
+  formatTelegramMessage,
+  getMessageDownloadFilename,
+  getMessageGroupedId,
+  getMessageText,
+  isDownloadableMedia,
+  isLikelyAlbumSeparator,
+  joinPath,
+  messageCacheKey,
+  nextFrame,
+  sanitizeForAlbumFolderName,
+  sanitizeForFilename,
+  sanitizeForFolderName,
+  toNumberValue,
+  toUint8Array,
+} from './TelegramMessageUtils';
+import {
   readTwitterFakeChats,
   TWITTER_FAKE_CHAT_EVENT,
   twitterFakeDialogs,
   writeTwitterFakeChats,
-  type TwitterFakeMessage,
 } from './TwitterFakeChatStore';
-
-const apiId = Number(import.meta.env.VITE_API_ID || "0");
-const apiHash = import.meta.env.VITE_API_HASH || "";
-
-function toNumberValue(value: any) {
-  if (typeof value === 'number') return value;
-  if (typeof value === 'bigint') return Number(value);
-  if (value && typeof value.toJSNumber === 'function') return value.toJSNumber();
-  if (value && typeof value.toString === 'function') return Number(value.toString());
-  return 0;
-}
-
-function sanitizeForFilename(value: any) {
-  return String(value || 'Desconhecido')
-    .replace(/[^\w.-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 160) || 'arquivo';
-}
-
-function sanitizeForFolderName(value: any) {
-  return String(value || 'Desconhecido')
-    .replace(/[^\w-]/g, '_')
-    .slice(0, 160) || 'Desconhecido';
-}
-
-function joinPath(...parts: string[]) {
-  const filtered = parts.filter(Boolean);
-  if (!filtered.length) return '';
-  return filtered
-    .map((part, index) => {
-      if (index === 0) return part.replace(/\/+$/g, '');
-      return part.replace(/^\/+|\/+$/g, '');
-    })
-    .join('/');
-}
-
-function basename(path: string) {
-  return path.split(/[\\/]/).filter(Boolean).pop() || path;
-}
-
-function getMediaFileExtension(message: any) {
-  if (message?.photo) return '.jpg';
-  if (message?.video) return '.mp4';
-
-  const fileExt = message?.file?.ext;
-  if (fileExt) return fileExt.startsWith('.') ? fileExt : `.${fileExt}`;
-
-  const mimeType = message?.document?.mimeType || '';
-  if (mimeType === 'video/webm') return '.webm';
-  if (mimeType === 'video/quicktime') return '.mov';
-  if (mimeType.startsWith('video/')) return '.mp4';
-  if (mimeType.startsWith('image/')) return '.jpg';
-  if (mimeType.startsWith('audio/')) return '.mp3';
-  return '.bin';
-}
-
-function getMessageDownloadFilename(message: any) {
-  let name = message?.file?.name || `media_${message?.id || 'file'}${getMediaFileExtension(message)}`;
-  if (name.endsWith('.bin')) {
-    const ext = getMediaFileExtension(message);
-    if (ext !== '.bin') name = `${name.slice(0, -4)}${ext}`;
-  }
-  return sanitizeForFilename(name);
-}
-
-function isDownloadableMedia(message: any) {
-  if (!message || message.out) return false;
-  if (message.photo || message.video) return true;
-  const mime = message.document?.mimeType || '';
-  return mime.startsWith('video/') || mime.startsWith('image/') || mime.startsWith('audio/');
-}
-
-function toUint8Array(data: any) {
-  if (data instanceof Uint8Array) return data;
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  return new Uint8Array(data || []);
-}
-
-function nextFrame() {
-  return new Promise<void>(resolve => setTimeout(resolve, 0));
-}
+import { telegramApiCredentials } from './TelegramConfig';
+import { TelegramTdlibBridge } from './TelegramTdlibBridge';
+import { TelegramTwitterFakeBridge } from './TelegramTwitterFakeBridge';
 
 class TelegramService {
   private client: TelegramClient | null = null;
@@ -109,13 +47,20 @@ class TelegramService {
   private mediaProgressCallbacks: Set<Function> = new Set();
   private downloadProgressCallbacks: Set<Function> = new Set();
   private saveMultipleProgressCallbacks: Set<Function> = new Set();
+  private sendProgressCallbacks: Set<Function> = new Set();
+  private newMessageCallbacks: Set<Function> = new Set();
+  private newMessageHandlerRegistered = false;
   private activeDownloadAborted = false;
   private saveMultipleAborted = false;
   private serviceWorkerMessageHandler: (event: MessageEvent) => void;
+  private tdlibBridge = new TelegramTdlibBridge(() => telegramApiCredentials);
+  private twitterFakeBridge = new TelegramTwitterFakeBridge(data => {
+    this.mediaProgressCallbacks.forEach(cb => cb(data));
+  });
   public skipLogin: boolean = false;
 
   constructor() {
-    const savedSession = localStorage.getItem('telegram_session') || '';
+    const savedSession = appStorage.get('telegram_session') || '';
     this.session = new StringSession(savedSession);
     
     if (!savedSession) {
@@ -126,7 +71,7 @@ class TelegramService {
 
     this.serviceWorkerMessageHandler = this.handleServiceWorkerMessage.bind(this);
 
-    if ('serviceWorker' in navigator) {
+    if (canUseServiceWorker()) {
       const previousHandler = (window as any).__telegramServiceSwHandler;
       if (previousHandler) {
         navigator.serviceWorker.removeEventListener('message', previousHandler);
@@ -141,13 +86,15 @@ class TelegramService {
   }
 
   resetSession() {
-    localStorage.removeItem('telegram_session');
+    appStorage.remove('telegram_session');
     if (this.client) {
       Promise.resolve(this.client.disconnect()).catch(error => {
         console.warn('[TelegramService] Failed to disconnect old client while resetting session:', error);
       });
     }
     this.client = null;
+    this.connectPromise = null;
+    this.newMessageHandlerRegistered = false;
     this.session = new StringSession('');
     this.session.setDC(4, "vesta.web.telegram.org", 443);
   }
@@ -155,52 +102,19 @@ class TelegramService {
   private streamIterators = new Map<string, { iter: AsyncIterator<any>, message: any, fileSize: number, mimeType: string, offset: number }>();
 
   private isTwitterFakeChat(chatId: any) {
-    return isTwitterFakeChatId(chatId);
+    return this.twitterFakeBridge.isFakeChat(chatId);
   }
 
   private getTwitterFakeChat(chatId: any) {
-    return getTwitterFakeChat(chatId);
+    return this.twitterFakeBridge.getFakeChat(chatId);
   }
 
   private findTwitterFakeMessage(chatId: any, messageId: any) {
-    return findTwitterFakeMessage(chatId, messageId);
+    return this.twitterFakeBridge.findFakeMessage(chatId, messageId);
   }
 
-  private async downloadTwitterFakeMedia(chatId: any, messageId: any, message: TwitterFakeMessage) {
-    if (!message.url) return { success: false, error: 'Mídia sem URL.' };
-
-    try {
-      const cacheKey = `twitter_fake_${chatId}_${messageId}_full`;
-      const cachedUrl = await mediaCache.getMedia(cacheKey, message.isVideo ? 'video/mp4' : undefined);
-      if (cachedUrl) return { success: true, filePath: cachedUrl, streamUrl: cachedUrl };
-
-      this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress: 1, stage: 'downloading' }));
-      
-      console.log(`[TelegramService] Downloading Twitter/X media from: ${message.url}`);
-      const response = await tauriFetch(message.url, {
-        method: 'GET',
-        headers: {
-          'Referer': 'https://x.com/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Twitter/X media HTTP ${response.status}`);
-      }
-      
-      const buffer = await response.arrayBuffer();
-      // Force correct MIME type specifically for WebKit video player support
-      const contentType = message.isVideo ? 'video/mp4' : (response.headers.get('content-type') || 'image/jpeg');
-      
-      const filePath = await mediaCache.saveMedia(cacheKey, buffer, contentType);
-      this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress: 100, stage: 'ready' }));
-      return { success: true, filePath, streamUrl: filePath };
-    } catch (error: any) {
-      console.error("[TelegramService] Failed to download Twitter/X media:", error);
-      this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress: 0, stage: 'failed' }));
-      return { success: false, error: error.message || String(error) };
-    }
+  private async downloadTwitterFakeMedia(chatId: any, messageId: any, message: any) {
+    return this.twitterFakeBridge.downloadFakeMedia(chatId, messageId, message);
   }
 
   private async handleServiceWorkerMessage(event: MessageEvent) {
@@ -335,29 +249,69 @@ class TelegramService {
   }
 
   async connect() {
-    if (this.client && this.client.connected) return;
+    if (this.client && this.client.connected) {
+      this.setupNewMessageHandler();
+      return;
+    }
     if (this.connectPromise) return this.connectPromise;
     
-    if (!apiId || !apiHash) {
+    if (!telegramApiCredentials.apiId || !telegramApiCredentials.apiHash) {
       console.warn("API_ID and API_HASH are required in .env");
       throw new Error("Credenciais do Telegram ausentes. Crie um arquivo .env com VITE_API_ID e VITE_API_HASH.");
     }
 
     this.connectPromise = (async () => {
       if (!this.client) {
-        this.client = new TelegramClient(this.session, apiId, apiHash, {
+        this.client = new TelegramClient(this.session, telegramApiCredentials.apiId, telegramApiCredentials.apiHash, {
           connectionRetries: 5,
           useWSS: true,
         });
       }
 
       await this.client.connect();
+      this.setupNewMessageHandler();
     })();
 
     try {
       await this.connectPromise;
     } finally {
       this.connectPromise = null;
+    }
+  }
+
+  private setupNewMessageHandler() {
+    if (!this.client || this.newMessageHandlerRegistered) return;
+    this.newMessageHandlerRegistered = true;
+
+    this.client.addEventHandler(async (event: any) => {
+      try {
+        const rawMessage = event.message;
+        if (!rawMessage || rawMessage.action || rawMessage.className === 'MessageService') return;
+
+        const chatId = event.chatId?.toString?.() || rawMessage.chatId?.toString?.();
+        if (!chatId) return;
+
+        const message = formatTelegramMessage(rawMessage);
+        const topicId = message.topicId || undefined;
+        await this.mergeMessageIntoCache(chatId, message, topicId);
+        this.newMessageCallbacks.forEach(cb => cb({ chatId, topicId, message }));
+      } catch (error) {
+        console.warn('[TelegramService] Failed to handle new message update:', error);
+      }
+    }, new NewMessage({}));
+  }
+
+  private async mergeMessageIntoCache(chatId: string, message: any, topicId?: number) {
+    const keys = [messageCacheKey(chatId, topicId)];
+    if (topicId) keys.push(messageCacheKey(chatId));
+
+    for (const key of keys) {
+      const cached = await mediaCache.getMessages(key);
+      const byId = new Map<number, any>();
+      cached.forEach(item => byId.set(Number(item.id), item));
+      byId.set(Number(message.id), message);
+      const merged = Array.from(byId.values()).sort((a, b) => Number(a.id) - Number(b.id));
+      await mediaCache.saveMessages(key, merged);
     }
   }
 
@@ -374,67 +328,47 @@ class TelegramService {
   }
 
   async tdlibInit() {
-    if (!apiId || !apiHash) {
-      return { success: false, ready: false, state: 'error', error: 'Credenciais do Telegram ausentes.' };
-    }
-
-    return invoke('tdlib_init', { apiId, apiHash });
+    return this.tdlibBridge.init();
   }
 
   async tdlibStatus() {
-    return invoke('tdlib_status');
+    return this.tdlibBridge.status();
   }
 
   async tdlibSetPhone(phoneNumber: string) {
-    let cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
-    if (!cleanPhone.startsWith('+')) {
-      cleanPhone = '+' + cleanPhone;
-    }
-
-    return invoke('tdlib_set_phone', { phoneNumber: cleanPhone });
+    return this.tdlibBridge.setPhone(phoneNumber);
   }
 
   async tdlibCheckCode(code: string) {
-    return invoke('tdlib_check_code', { code });
+    return this.tdlibBridge.checkCode(code);
   }
 
   async tdlibCheckPassword(password: string) {
-    return invoke('tdlib_check_password', { password });
+    return this.tdlibBridge.checkPassword(password);
   }
 
   async tdlibGetMe() {
-    return invoke('tdlib_get_me');
+    return this.tdlibBridge.getMe();
   }
 
   async tdlibDownloadMessageMedia({ chatId, messageId, folderPath }: any) {
-    return invoke('tdlib_download_message_media', {
-      chatId: toNumberValue(chatId),
-      messageId: toNumberValue(messageId),
-      folderPath,
-    });
+    return this.tdlibBridge.downloadMessageMedia({ chatId, messageId, folderPath });
   }
 
   async tdlibStartMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: any) {
-    return invoke('tdlib_start_mass_download', {
-      request: {
-        chatId: toNumberValue(chatId),
-        folderPath,
-        topicId: topicId == null ? null : toNumberValue(topicId),
-        splitByUser,
-      },
-    });
+    return this.tdlibBridge.startMassDownload({ chatId, folderPath, topicId, splitByUser });
   }
 
   async tdlibStopDownload() {
-    return invoke('tdlib_stop_download');
+    return this.tdlibBridge.stopDownload();
   }
 
   onTdlibAuthState(cb: (state: string) => void) {
-    return listen<string>('tdlib-auth-state', event => cb(event.payload));
+    return this.tdlibBridge.onAuthState(cb);
   }
 
   onTdlibDownloadProgress(cb: (data: any) => void) {
-    return listen<any>('tdlib-download-progress', event => cb(event.payload));
+    return this.tdlibBridge.onDownloadProgress(cb);
   }
 
   async sendCode(phoneNumber: string) {
@@ -447,7 +381,7 @@ class TelegramService {
       }
       
       const result: any = await this.client!.sendCode(
-        { apiId, apiHash },
+        { apiId: telegramApiCredentials.apiId, apiHash: telegramApiCredentials.apiHash },
         cleanPhone
       );
 
@@ -472,7 +406,7 @@ class TelegramService {
       }));
       
       const savedSessionString = this.client!.session.save() as unknown as string;
-      localStorage.setItem('telegram_session', savedSessionString);
+      appStorage.set('telegram_session', savedSessionString);
       
       return { success: true };
     } catch (error: any) {
@@ -485,7 +419,7 @@ class TelegramService {
     if (this.skipLogin) return { success: true, dialogs: fakeDialogs };
     try {
       if (!this.client || !this.client.connected) {
-        const savedSession = localStorage.getItem('telegram_session');
+        const savedSession = appStorage.get('telegram_session');
         if (!savedSession) return { success: true, dialogs: fakeDialogs };
         await this.connect();
       }
@@ -521,7 +455,23 @@ class TelegramService {
     }
   }
 
-  async getMessages({ chatId, limit = 50, offsetId = 0, topicId = undefined }: any) {
+  async getCachedMessages({ chatId, limit = 50, topicId = undefined }: any) {
+    const fakeChat = this.getTwitterFakeChat(chatId);
+    if (fakeChat) return this.getMessages({ chatId, limit, topicId });
+
+    const cached = await mediaCache.getMessages(messageCacheKey(chatId, topicId));
+    const ordered = [...cached].sort((a, b) => Number(a.id) - Number(b.id));
+    const page = ordered.slice(-limit);
+    return {
+      success: true,
+      messages: page,
+      hasMore: ordered.length > page.length,
+      oldestMessageId: page[0]?.id ?? null,
+      fromCache: true,
+    };
+  }
+
+  async getMessages({ chatId, limit = 50, offsetId = 0, topicId = undefined, refresh = false }: any) {
     const fakeChat = this.getTwitterFakeChat(chatId);
     if (fakeChat) {
       const allMessages = fakeChat.messages.map(message => ({
@@ -561,10 +511,14 @@ class TelegramService {
       let lastMessageId = null;
       let hasMore = true;
 
-      // 1. Fetch Local Cached Messages
-      const localMessages = await mediaCache.getMessages(chatId);
+      const cacheKey = messageCacheKey(chatId, topicId);
+      const isFirstPage = !offsetId;
 
-      while (allValidMessages.length < 15) { // Fetch at least 15 valid messages for the UI
+      // 1. Fetch Local Cached Messages. Keep this separate per topic so stale
+      // topic history cannot be mistaken for the main chat timeline.
+      const localMessages = await mediaCache.getMessages(cacheKey);
+
+      while (allValidMessages.length < limit) {
         const batch = await this.client.getMessages(entity, {
           limit,
           offsetId: currentOffsetId,
@@ -589,41 +543,7 @@ class TelegramService {
       }
 
       // 2. Map formatted messages
-      const getSenderName = (m: any) => {
-        if (m.out) return null;
-        const sender = m.sender;
-        if (!sender) return null;
-        if (sender.firstName || sender.lastName) {
-          return [sender.firstName, sender.lastName].filter(Boolean).join(' ').trim();
-        }
-        return sender.title || sender.username || null;
-      };
-
-      const formattedMessages = allValidMessages.map(m => {
-        const isVideo = !!(m.media?.document?.mimeType && typeof m.media.document.mimeType === 'string' && m.media.document.mimeType.includes('video'));
-        const isPhoto = !!(m.media?.photo || m.media?.className === 'MessageMediaPhoto');
-        const videoDuration = isVideo ? m.media?.document?.attributes?.find((a: any) => a.className === 'DocumentAttributeVideo')?.duration : null;
-        const mediaSize = m.media?.document?.size || m.media?.photo?.sizes?.slice(-1)[0]?.size || null;
-        
-        return {
-          id: m.id,
-          message: m.message,
-          date: m.date,
-          out: m.out,
-          senderId: m.senderId?.toString(),
-          senderName: getSenderName(m),
-          replyToMsgId: m.replyTo?.replyToMsgId,
-          media: m.media ? true : false,
-          text: m.message,
-          hasMedia: m.media ? true : false,
-          isPhoto,
-          isVideo,
-          groupedId: m.groupedId ? m.groupedId.toString() : null,
-          videoDuration,
-          mediaSize,
-          isDeleted: false
-        };
-      });
+      const formattedMessages = allValidMessages.map(formatTelegramMessage);
 
       // 3. Anti-Delete Logic
       // Find the ID range of the fetched messages
@@ -637,27 +557,26 @@ class TelegramService {
           localMsg.id >= minId && localMsg.id <= maxId && !fetchedIds.has(localMsg.id)
         ).map(msg => ({ ...msg, isDeleted: true }));
 
-        // Merge and sort by ID descending (or as required by UI)
+        // Merge and sort chronologically for the virtualized timeline.
         formattedMessages.push(...deletedMessages);
-        formattedMessages.sort((a, b) => b.id - a.id); // GramJS returns highest ID first
+        formattedMessages.sort((a, b) => Number(a.id) - Number(b.id));
       }
 
       // 4. Save merged result to local cache
       // We merge with all existing local messages outside this range
-      const mergedLocal = [...localMessages];
+      const mergedById = new Map<number, any>();
+      localMessages.forEach(message => mergedById.set(Number(message.id), message));
       formattedMessages.forEach(fm => {
-        const idx = mergedLocal.findIndex(lm => lm.id === fm.id);
-        if (idx !== -1) mergedLocal[idx] = fm;
-        else mergedLocal.push(fm);
+        mergedById.set(Number(fm.id), fm);
       });
-      mergedLocal.sort((a, b) => b.id - a.id);
-      await mediaCache.saveMessages(chatId, mergedLocal);
+      const mergedLocal = Array.from(mergedById.values()).sort((a, b) => Number(a.id) - Number(b.id));
+      await mediaCache.saveMessages(cacheKey, mergedLocal);
 
       return {
         success: true,
         messages: formattedMessages,
         hasMore,
-        oldestMessageId: lastMessageId
+        oldestMessageId: formattedMessages[0]?.id ?? lastMessageId
       };
     } catch (e) {
       console.error("Failed to get messages:", e);
@@ -850,9 +769,11 @@ class TelegramService {
     }
   }
 
-  private async tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, chatMeta }: any) {
+  private async tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum, chatMeta }: any) {
+    if (!runtimeCapabilities.supportsTdlib) return null;
     const numericChatId = toNumberValue(chatId);
     if (!Number.isFinite(numericChatId) || numericChatId === 0) return null;
+    if (splitByAlbum) return null;
 
     try {
       const initStatus: any = await this.tdlibInit();
@@ -961,7 +882,7 @@ class TelegramService {
     }
   }
 
-  async startDownload({ chatId, folderPath, topic, splitByUser, chatMeta }: any) {
+  async startDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum = false, albumSplitMode = 'separator', chatMeta }: any) {
     try {
       this.activeDownloadAborted = false;
       this.saveMultipleAborted = false;
@@ -971,7 +892,7 @@ class TelegramService {
         return this.startFakeChatDownload({ chatId, folderPath, fakeChat, chatMeta });
       }
 
-      const nativeResult = await this.tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, chatMeta });
+      const nativeResult = await this.tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum, chatMeta });
       if (nativeResult) return nativeResult;
 
       if (!this.client) return { success: false, error: 'Telegram não conectado.' };
@@ -993,26 +914,89 @@ class TelegramService {
       const processedItems: any[] = [];
       const batchDownloadIds = new Set<string>();
       const workers = await this.getDownloadWorkers();
+      const shouldSplitByAlbum = !!splitByAlbum;
+      const splitAlbumByComment = shouldSplitByAlbum && albumSplitMode === 'comment';
+      const splitAlbumBySeparator = shouldSplitByAlbum && !splitAlbumByComment;
+      let albumIndex = splitAlbumBySeparator ? 1 : 0;
+      let currentAlbumFolder: string | null = splitAlbumBySeparator ? joinPath(downloadFolder, '001') : null;
+      let currentAlbumHasMedia = false;
+      let messagesForAlbumDownload: any[] | null = null;
+      const commentAlbumFolders = new Map<string, string>();
+      if (currentAlbumFolder) await this.ensureDir(currentAlbumFolder);
 
       this.emitDownloadProgress({
         chatId,
         total: 0,
         downloaded: 0,
-        currentFile: 'Contando mídias...',
+        currentFile: splitAlbumByComment ? 'Escaneando comentários de álbum...' : shouldSplitByAlbum ? 'Escaneando separadores de álbum...' : 'Contando mídias...',
         topicTitle: topic?.title || null,
         isScanning: true,
         items: processedItems
       });
 
-      try {
-        const countRes: any = await this.client.getMessages(entity, {
-          filter: new Api.InputMessagesFilterPhotoVideo(),
-          limit: 1,
+      if (shouldSplitByAlbum) {
+        messagesForAlbumDownload = [];
+        let scanned = 0;
+        const scanIter = this.client.iterMessages(entity, {
+          limit: undefined,
           replyTo: topic?.id || undefined
         });
-        totalMedia = countRes?.total || 0;
-      } catch (err) {
-        console.error('Error fetching media count:', err);
+
+        for await (const message of scanIter) {
+          if (this.activeDownloadAborted) break;
+          scanned++;
+          messagesForAlbumDownload.push(message);
+          if (isDownloadableMedia(message)) totalMedia++;
+          if (scanned % 100 === 0) {
+            this.emitDownloadProgress({
+              chatId,
+              total: totalMedia,
+              downloaded: 0,
+              currentFile: splitAlbumByComment
+                ? `Escaneando comentários... ${totalMedia} mídias`
+                : `Escaneando separadores... ${totalMedia} mídias`,
+              topicTitle: topic?.title || null,
+              isScanning: true,
+              items: processedItems
+            });
+            await nextFrame();
+          }
+        }
+
+        messagesForAlbumDownload.reverse();
+        if (splitAlbumByComment) {
+          const groupedAlbums = new Map<string, any[]>();
+          for (const message of messagesForAlbumDownload) {
+            if (!isDownloadableMedia(message)) continue;
+            const groupedId = getMessageGroupedId(message);
+            if (!groupedId) continue;
+            if (!groupedAlbums.has(groupedId)) groupedAlbums.set(groupedId, []);
+            groupedAlbums.get(groupedId)!.push(message);
+          }
+
+          let commentAlbumIndex = 1;
+          for (const [groupedId, albumMessages] of groupedAlbums) {
+            const comment = albumMessages.map(getMessageText).find(Boolean);
+            const folderName = comment
+              ? `${String(commentAlbumIndex).padStart(3, '0')} ${comment}`
+              : String(commentAlbumIndex).padStart(3, '0');
+            const folderPathForAlbum = joinPath(downloadFolder, sanitizeForAlbumFolderName(folderName));
+            commentAlbumFolders.set(groupedId, folderPathForAlbum);
+            await this.ensureDir(folderPathForAlbum);
+            commentAlbumIndex++;
+          }
+        }
+      } else {
+        try {
+          const countRes: any = await this.client.getMessages(entity, {
+            filter: new Api.InputMessagesFilterPhotoVideo(),
+            limit: 1,
+            replyTo: topic?.id || undefined
+          });
+          totalMedia = countRes?.total || 0;
+        } catch (err) {
+          console.error('Error fetching media count:', err);
+        }
       }
 
       if (this.activeDownloadAborted) return { success: true, aborted: true };
@@ -1040,7 +1024,7 @@ class TelegramService {
         batchDownloadIds.forEach(id => downloadService.updateDownload(id, updates));
       };
 
-      const messagesIter = this.client.iterMessages(entity, {
+      const messagesIter = messagesForAlbumDownload || this.client.iterMessages(entity, {
         filter: new Api.InputMessagesFilterPhotoVideo(),
         limit: undefined,
         replyTo: topic?.id || undefined
@@ -1048,6 +1032,20 @@ class TelegramService {
 
       for await (const message of messagesIter) {
         if (this.activeDownloadAborted) break;
+        if (splitAlbumBySeparator) {
+          const text = getMessageText(message);
+          if (isLikelyAlbumSeparator(message)) {
+            if (currentAlbumHasMedia) {
+              albumIndex++;
+              currentAlbumHasMedia = false;
+            }
+            const albumName = sanitizeForAlbumFolderName(String(albumIndex).padStart(3, '0'));
+            currentAlbumFolder = joinPath(downloadFolder, albumName);
+            await this.ensureDir(currentAlbumFolder);
+            sendProgressUpdate(`Álbum ${albumName}: ${text}`);
+            continue;
+          }
+        }
         if (!isDownloadableMedia(message)) continue;
 
         current++;
@@ -1055,7 +1053,17 @@ class TelegramService {
         const itemSize = Number(message.document?.size || message.photo?.sizes?.slice(-1)?.[0]?.size || 0);
         let currentFolder = downloadFolder;
 
-        if (splitByUser && !topic) {
+        if (splitAlbumByComment) {
+          const groupedId = getMessageGroupedId(message);
+          if (groupedId && commentAlbumFolders.has(groupedId)) {
+            currentFolder = commentAlbumFolders.get(groupedId)!;
+          } else if (currentAlbumFolder) {
+            currentFolder = currentAlbumFolder;
+          }
+        } else if (splitAlbumBySeparator && currentAlbumFolder) {
+          currentFolder = currentAlbumFolder;
+          currentAlbumHasMedia = true;
+        } else if (splitByUser && !topic) {
           currentFolder = joinPath(downloadFolder, await this.getSenderFolderName(message));
           await this.ensureDir(currentFolder);
         }
@@ -1373,7 +1381,19 @@ class TelegramService {
     return () => this.saveMultipleProgressCallbacks.delete(cb);
   }
   onDeepLink(cb: any) { return () => {}; }
-  onSendProgress(cb: any) { return () => {}; }
+  private emitSendProgress(data: any) {
+    this.sendProgressCallbacks.forEach(cb => cb(data));
+  }
+
+  onSendProgress(cb: any) {
+    this.sendProgressCallbacks.add(cb);
+    return () => this.sendProgressCallbacks.delete(cb);
+  }
+
+  onNewMessage(cb: any) {
+    this.newMessageCallbacks.add(cb);
+    return () => this.newMessageCallbacks.delete(cb);
+  }
   
   async checkInvite(url: string) { return { success: false, chat: null, alreadyMember: false }; }
   openExternal(url: string) {}
@@ -1647,9 +1667,62 @@ class TelegramService {
     this.saveMultipleAborted = true;
     return { success: true };
   }
-  async selectFile() { return { success: false, filePath: '', fileName: '' }; }
-  async sendMedia(opts: any) { return { success: true }; }
-  async sendMessage(opts: any) { return { success: true }; }
+  async selectFile() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+    });
+    if (!selected || Array.isArray(selected)) return { success: false, filePath: '', fileName: '' };
+    return { success: true, filePath: selected, fileName: basename(selected) };
+  }
+
+  async sendMedia({ chatId, filePath, caption = '', replyToId, topicId }: any) {
+    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+
+    try {
+      const entity = await this.client.getEntity(chatId);
+      let lastProgress = -1;
+      const replyTo = replyToId || topicId || undefined;
+      const message = await this.client.sendFile(entity, {
+        file: filePath,
+        caption: caption || '',
+        replyTo,
+        progressCallback: (uploaded: any, total: any) => {
+          const totalNumber = toNumberValue(total);
+          const progress = totalNumber > 0
+            ? Math.min(100, Math.round((toNumberValue(uploaded) / totalNumber) * 100))
+            : 0;
+          if (progress !== lastProgress) {
+            lastProgress = progress;
+            this.emitSendProgress({ chatId, progress });
+          }
+        },
+      });
+      this.emitSendProgress({ chatId, progress: 100 });
+      return { success: true, message };
+    } catch (error: any) {
+      console.error('Failed to send media:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async sendMessage({ chatId, text, replyToId, topicId }: any) {
+    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+    if (!String(text || '').trim()) return { success: false, error: 'Mensagem vazia.' };
+
+    try {
+      const entity = await this.client.getEntity(chatId);
+      const replyTo = replyToId || topicId || undefined;
+      const message = await this.client.sendMessage(entity, {
+        message: String(text),
+        replyTo,
+      });
+      return { success: true, message };
+    } catch (error: any) {
+      console.error('Failed to send message:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
   async createTopic(opts: any) { return { success: true }; }
   async getOriginalMessage(opts: any) { return { success: true, message: null }; }
   async sendReaction(opts: any) { return { success: true }; }
@@ -1752,13 +1825,7 @@ class TelegramService {
           progress: 100, 
         });
 
-        const a = document.createElement('a');
-        a.href = res.filePath;
-        a.download = `media_${messageId}`;
-        a.target = '_blank';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        downloadUrlInBrowser(res.filePath, `media_${messageId}`, '_blank');
         return { success: true };
       }
 

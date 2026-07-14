@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { WarningCircle, DownloadSimple, Link, Spinner, ChatCircle, MagnifyingGlass, TwitterLogo } from '@phosphor-icons/react';
+import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
 import { downloadService, type DownloadItem } from '../downloader/DownloadService';
 import type { MediaInfo } from '../downloader/types';
@@ -112,6 +112,10 @@ export function TwitterLibrary() {
 
   async function handleProfileDownload() {
     if (!profile || profile.mediaUrls.length === 0) return;
+    if (!runtimeCapabilities.supportsNativeTwitter) {
+      setError('Download nativo do Twitter/X ainda não está disponível no Android.');
+      return;
+    }
 
     const downloadId = `twitter_profile_${profile.username}_${Date.now()}`;
     const fileName = `plasma_twitter_${profile.username}`;

@@ -4,8 +4,7 @@ import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
 import type { MediaInfo } from '../downloader/types';
-import { downloadDir, join } from '@tauri-apps/api/path';
-import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+import { getDownloadDir, joinPath, openSystemPath, revealSystemItem } from '../../shared/platform/files';
 
 export const Downloads: React.FC = () => {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
@@ -65,16 +64,16 @@ export const Downloads: React.FC = () => {
     try {
       if (item?.filePath) {
         const parentDir = item.filePath.split(/[\\/]/).slice(0, -1).join('/') || item.filePath;
-        await revealItemInDir(item.filePath).catch(() => openPath(parentDir));
+        await revealSystemItem(item.filePath).catch(() => openSystemPath(parentDir));
         return;
       }
 
-      const dir = await downloadDir();
+      const dir = await getDownloadDir();
       if (item) {
-        const fullPath = await join(dir, item.fileName);
-        await revealItemInDir(fullPath).catch(() => openPath(dir));
+        const fullPath = await joinPath(dir, item.fileName);
+        await revealSystemItem(fullPath).catch(() => openSystemPath(dir));
       } else {
-        await openPath(dir);
+        await openSystemPath(dir);
       }
     } catch (e) {
       console.error('Failed to open folder:', e);

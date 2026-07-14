@@ -427,8 +427,62 @@ input.login-input:disabled {
 }
 .inline-panel-title { display: flex; align-items: center; gap: 10px; }
 .inline-panel-title h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text-0); }
-.inline-panel-body { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.inline-folder { flex: 1 1 260px; }
+.inline-panel-body { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.mass-download-main-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+}
+.mass-download-main-row .start-btn,
+.mass-download-main-row .stop-btn {
+  flex: 0 0 auto;
+}
+.mass-download-topic-selection {
+  flex: 0 1 220px;
+  min-width: 180px;
+}
+.mass-download-topic-selection .custom-select {
+  width: 100%;
+}
+.mass-download-options-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.inline-folder { flex: 1 1 auto; min-width: 240px; }
+.split-album-selection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.album-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  border: 1px solid var(--line-soft);
+}
+.album-mode-toggle button {
+  min-height: 26px;
+  padding: 0 9px;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+.album-mode-toggle button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.album-mode-toggle button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .folder-selection {
   display: flex; align-items: stretch;
   border-radius: var(--radius); overflow: hidden;
@@ -448,6 +502,19 @@ input.login-input:disabled {
   transition: background .12s, color .12s;
 }
 .folder-selection .browse-btn:hover { background: var(--accent-soft); color: var(--accent); }
+
+@media (max-width: 640px) {
+  .mass-download-main-row {
+    flex-wrap: wrap;
+  }
+  .mass-download-main-row .start-btn,
+  .mass-download-main-row .stop-btn {
+    width: 100%;
+  }
+  .mass-download-topic-selection {
+    flex-basis: 100%;
+  }
+}
 
 /* Progress bar */
 .progress-bar {

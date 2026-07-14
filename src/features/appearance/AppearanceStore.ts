@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { appStorage } from '../../shared/storage/appStorage';
 
 export const PALETTES = ['abyssal', 'ion', 'ember', 'bloom', 'forest', 'light'] as const;
 export type Palette = typeof PALETTES[number];
@@ -19,24 +20,26 @@ function isDensity(value: string | null): value is Density {
 }
 
 export function getStoredPalette(): Palette {
-  return isPalette(localStorage.getItem(PALETTE_KEY))
-    ? (localStorage.getItem(PALETTE_KEY) as Palette)
+  const storedPalette = appStorage.get(PALETTE_KEY);
+  return isPalette(storedPalette)
+    ? storedPalette
     : 'abyssal';
 }
 
 export function getStoredDensity(): Density {
-  return isDensity(localStorage.getItem(DENSITY_KEY))
-    ? (localStorage.getItem(DENSITY_KEY) as Density)
+  const storedDensity = appStorage.get(DENSITY_KEY);
+  return isDensity(storedDensity)
+    ? storedDensity
     : 'cozy';
 }
 
 export function setStoredPalette(palette: Palette) {
-  localStorage.setItem(PALETTE_KEY, palette);
+  appStorage.set(PALETTE_KEY, palette);
   window.dispatchEvent(new CustomEvent(APPEARANCE_EVENT));
 }
 
 export function setStoredDensity(density: Density) {
-  localStorage.setItem(DENSITY_KEY, density);
+  appStorage.set(DENSITY_KEY, density);
   window.dispatchEvent(new CustomEvent(APPEARANCE_EVENT));
 }
 

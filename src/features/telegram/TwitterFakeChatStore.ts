@@ -1,3 +1,5 @@
+import { appStorage } from '../../shared/storage/appStorage';
+
 export const TWITTER_FAKE_CHATS_KEY = 'plasma_twitter_fake_chats';
 export const TWITTER_FAKE_PENDING_CHAT_KEY = 'plasma_twitter_pending_fake_chat';
 export const TWITTER_FAKE_CHAT_EVENT = 'plasma-twitter-fake-chat-created';
@@ -35,7 +37,7 @@ export function isTwitterFakeChatId(chatId: unknown) {
 
 export function readTwitterFakeChats(): TwitterFakeChat[] {
   try {
-    const raw = localStorage.getItem(TWITTER_FAKE_CHATS_KEY);
+    const raw = appStorage.get(TWITTER_FAKE_CHATS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -45,7 +47,7 @@ export function readTwitterFakeChats(): TwitterFakeChat[] {
 }
 
 export function writeTwitterFakeChats(chats: TwitterFakeChat[]) {
-  localStorage.setItem(TWITTER_FAKE_CHATS_KEY, JSON.stringify(chats));
+  appStorage.set(TWITTER_FAKE_CHATS_KEY, JSON.stringify(chats));
 }
 
 export function getTwitterFakeChat(chatId: unknown): TwitterFakeChat | null {
@@ -137,7 +139,7 @@ export function createTwitterProfileChat(profile: any) {
   const chats = readTwitterFakeChats().filter(existing => existing.id !== chatId);
   chats.unshift(chat);
   writeTwitterFakeChats(chats);
-  localStorage.setItem(TWITTER_FAKE_PENDING_CHAT_KEY, chatId);
+  appStorage.set(TWITTER_FAKE_PENDING_CHAT_KEY, chatId);
   window.dispatchEvent(new CustomEvent(TWITTER_FAKE_CHAT_EVENT, { detail: { chatId } }));
   return { success: true, chatId, mediaCount: mediaItems.length };
 }

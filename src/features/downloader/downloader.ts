@@ -1,6 +1,7 @@
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
+import { downloadUrlInBrowser } from '../../shared/platform/browserDownload';
+import { platformFetch as tauriFetch } from '../../shared/platform/http';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
 import type { MediaInfo, FormatOption } from './types';
 import { detectPlatform } from './platforms';
 import { downloadService } from './DownloadService';
@@ -738,12 +739,7 @@ async function downloadViaBlob(
 
   const blob = new Blob(chunks as BlobPart[]);
   const objUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = objUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  downloadUrlInBrowser(objUrl, filename);
   setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
   onProgress(100);
 }
@@ -787,7 +783,7 @@ export async function downloadMedia(
     downloadService.updateDownload(downloadId, { progress: p });
   };
 
-  if (info.platform === 'youtube' && info.originalUrl) {
+  if (info.platform === 'youtube' && info.originalUrl && runtimeCapabilities.supportsNativeYoutube) {
     try {
       // se for vídeo e não tiver áudio nativo, combina com o melhor áudio
       let ytFormat = formatId;
@@ -836,7 +832,7 @@ export async function downloadMedia(
     }
   }
 
-  if (info.platform === 'twitter' && dlUrl) {
+  if (info.platform === 'twitter' && dlUrl && runtimeCapabilities.supportsNativeTwitter) {
     try {
       const unlistenProgress = await listen<{id: string, progress: number}>('twitter-download-progress', (e) => {
         if (e.payload.id === downloadId) {

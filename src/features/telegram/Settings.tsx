@@ -3,6 +3,7 @@ import { telegramService } from './TelegramService';
 import { Trash } from '@phosphor-icons/react';
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
 import { getStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
+import { appStorage } from '../../shared/storage/appStorage';
 
 interface CacheStats {
   totalSize: number;
@@ -67,7 +68,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const [saved, setSaved] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
-  const [clearTwitter, setClearTwitter] = useState(() => localStorage.getItem("clear_twitter_groups_on_clear_cache") === "true");
+  const [clearTwitter, setClearTwitter] = useState(() => appStorage.getBoolean("clear_twitter_groups_on_clear_cache"));
   const [tdlibState, setTdlibState] = useState('not_initialized');
   const [tdlibMessage, setTdlibMessage] = useState('');
   const [tdlibPhone, setTdlibPhone] = useState('');
@@ -159,8 +160,8 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     try {
       await telegramService.clearCache();
       if (clearTwitter) {
-        localStorage.removeItem('plasma_twitter_fake_chats');
-        localStorage.removeItem('plasma_twitter_pending_fake_chat');
+        appStorage.remove('plasma_twitter_fake_chats');
+        appStorage.remove('plasma_twitter_pending_fake_chat');
         window.dispatchEvent(new CustomEvent('plasma-twitter-fake-chat-created'));
       }
       setClearConfirm(false);
@@ -413,7 +414,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                         onChange={e => {
                           const val = e.target.checked;
                           setClearTwitter(val);
-                          localStorage.setItem("clear_twitter_groups_on_clear_cache", val ? "true" : "false");
+                          appStorage.setBoolean("clear_twitter_groups_on_clear_cache", val);
                         }}
                       />
                       <span className="switch-custom" />
