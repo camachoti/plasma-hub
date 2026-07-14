@@ -5,9 +5,6 @@ use tauri::Manager;
 
 use commands::filesystem;
 
-#[cfg(target_os = "android")]
-use services::telegram_android as telegram_service;
-#[cfg(not(target_os = "android"))]
 use services::telegram as telegram_service;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

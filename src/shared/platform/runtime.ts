@@ -37,9 +37,9 @@ export function getRuntimeCapabilities(): RuntimeCapabilities {
     isAndroid,
     supportsNativeYoutube: isTauri && !isAndroid,
     supportsNativeTwitter: isTauri && !isAndroid,
-    supportsTdlib: isTauri && !isAndroid,
+    supportsTdlib: isTauri,
     supportsOpenInFolder: isTauri && !isAndroid,
-    supportsSystemDownloads: isTauri && !isAndroid,
+    supportsSystemDownloads: isTauri,
     supportsServiceWorker: !isTauri && "serviceWorker" in navigator,
   };
 }

@@ -5,7 +5,7 @@ export function RuntimeCompatibilityNotice() {
 
   return (
     <div className="runtime-notice" role="status">
-      Telegram via web ativo. Downloads nativos, yt-dlp e pastas do sistema ainda estão em modo desktop-first.
+      Telegram nativo em migração ativa. TDLib e downloads do Telegram estão habilitados; yt-dlp e Twitter/X ainda ficam no modo desktop.
     </div>
   );
 }

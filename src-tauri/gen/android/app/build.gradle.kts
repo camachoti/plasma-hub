@@ -57,6 +57,60 @@ rust {
     rootDirRel = "../../../"
 }
 
+val tdlibNativeLibs = mapOf(
+    "aarch64" to ("aarch64-linux-android" to "arm64-v8a"),
+    "armv7" to ("armv7-linux-androideabi" to "armeabi-v7a"),
+    "i686" to ("i686-linux-android" to "x86"),
+    "x86_64" to ("x86_64-linux-android" to "x86_64"),
+)
+
+afterEvaluate {
+    val targetsList = (findProperty("targetList") as? String)?.split(',') ?: listOf("aarch64", "armv7", "i686", "x86_64")
+
+    for (profile in listOf("debug", "release")) {
+        val profileCapitalized = profile.replaceFirstChar { it.uppercase() }
+        val copyTask = tasks.register("copyTdlib${profileCapitalized}NativeLibs") {
+            group = "rust"
+            description = "Copy TDLib shared libraries into Android jniLibs for $profile builds"
+            dependsOn("rustBuildUniversal$profileCapitalized")
+
+            doLast {
+                for (targetName in targetsList) {
+                    val (triple, abi) = tdlibNativeLibs[targetName] ?: continue
+                    val buildDir = file("../../../target/$triple/$profile/build")
+                    val tdjson = fileTree(buildDir) {
+                        include("**/out/tdlib/lib/libtdjson.so")
+                    }.files.maxByOrNull { it.lastModified() }
+                        ?: throw GradleException("libtdjson.so not found for $targetName in $buildDir")
+
+                    copy {
+                        from(tdjson)
+                        into(file("src/main/jniLibs/$abi"))
+                    }
+                }
+            }
+        }
+
+        tasks.matching { it.name == "mergeUniversal${profileCapitalized}JniLibFolders" }.configureEach {
+            dependsOn(copyTask)
+        }
+
+        for (targetName in targetsList) {
+            val abi = tdlibNativeLibs[targetName]?.second ?: continue
+            val archName = when (abi) {
+                "arm64-v8a" -> "Arm64"
+                "armeabi-v7a" -> "Arm"
+                "x86" -> "X86"
+                "x86_64" -> "X86_64"
+                else -> continue
+            }
+            tasks.matching { it.name == "merge$archName${profileCapitalized}JniLibFolders" }.configureEach {
+                dependsOn(copyTask)
+            }
+        }
+    }
+}
+
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
