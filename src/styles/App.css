@@ -225,6 +225,103 @@
   color: var(--accent);
 }
 
+@media (max-width: 640px) {
+  .login-screen {
+    align-items: stretch;
+    justify-content: flex-start;
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: calc(48px + env(safe-area-inset-top, 0px)) calc(22px + env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) calc(22px + env(safe-area-inset-left, 0px));
+    background:
+      radial-gradient(circle at 50% 0%, color-mix(in oklch, var(--accent) 10%, transparent), transparent 34%),
+      var(--bg-0);
+  }
+
+  .login-screen[data-runtime="android"] {
+    padding-top: calc(max(env(safe-area-inset-top, 0px), 24px) + 36px);
+  }
+
+  .login-card,
+  .login-container {
+    align-items: stretch;
+    max-width: none;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .login-header {
+    margin-bottom: 34px;
+    text-align: left;
+  }
+
+  .logo-placeholder {
+    width: 56px;
+    height: 56px;
+    margin: 0 0 22px;
+  }
+
+  .logo-placeholder img {
+    border-radius: 14px;
+  }
+
+  .login-header h1 {
+    margin: 0 0 6px;
+    font-size: 34px;
+    line-height: 1.04;
+  }
+
+  .login-header p {
+    font-size: 16px;
+  }
+
+  .login-form {
+    gap: 16px;
+  }
+
+  .login-form label {
+    font-size: 12px;
+    color: var(--text-2);
+  }
+
+  .login-phone-row {
+    grid-template-columns: 118px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .login-form input,
+  .login-form select,
+  .login-input {
+    min-height: 54px;
+    padding: 0 16px;
+    border-radius: 12px;
+    background: color-mix(in oklch, var(--bg-1) 54%, transparent);
+    font-size: 16px;
+  }
+
+  .login-form > button,
+  .login-button {
+    min-height: 54px;
+    margin-top: 4px;
+    border-radius: 12px;
+    font-size: 15px;
+  }
+
+  .login-links {
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: 8px;
+  }
+
+  .login-links button {
+    font-size: 13px;
+    text-align: left;
+  }
+}
+
 .error-message {
   background: color-mix(in oklch, var(--danger) 15%, var(--bg-1));
   border: 1px solid color-mix(in oklch, var(--danger) 30%, transparent);

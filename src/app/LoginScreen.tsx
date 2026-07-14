@@ -1,4 +1,5 @@
 import appIcon from "../../build/icon.png";
+import { runtimeCapabilities } from "../shared/platform/runtime";
 
 interface LoginScreenProps {
   palette: string;
@@ -36,7 +37,12 @@ export function LoginScreen({
   onClearCache,
 }: LoginScreenProps) {
   return (
-    <div className="login-screen" data-palette={palette} data-density={density}>
+    <div
+      className="login-screen"
+      data-palette={palette}
+      data-density={density}
+      data-runtime={runtimeCapabilities.kind}
+    >
       <div className="login-card fade-in">
         <div className="login-header">
           <div className="logo-placeholder">
