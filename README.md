@@ -58,8 +58,10 @@ Validate the generated Android project and native library with:
 
 ```bash
 npm run tauri:android:init -- --ci --skip-targets-install
-npx tauri android build --debug --apk --target x86_64 --ci
+npx tauri android build --debug --apk --target aarch64 --ci
 ```
+
+Use `--target aarch64` for most physical Android devices. Use `--target x86_64` for x86_64 emulators.
 
 The debug APK is emitted at `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`.
 Install it on a connected device or emulator with:
