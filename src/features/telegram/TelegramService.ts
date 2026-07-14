@@ -59,6 +59,7 @@ class TelegramService {
     this.mediaProgressCallbacks.forEach(cb => cb(data));
   });
   public skipLogin: boolean = false;
+  private readonly tdlibSessionKey = 'telegram_tdlib_session';
 
   constructor() {
     const savedSession = appStorage.get('telegram_session') || '';
@@ -88,6 +89,7 @@ class TelegramService {
 
   resetSession() {
     appStorage.remove('telegram_session');
+    appStorage.remove(this.tdlibSessionKey);
     if (this.client) {
       Promise.resolve(this.client.disconnect()).catch(error => {
         console.warn('[TelegramService] Failed to disconnect old client while resetting session:', error);
@@ -317,6 +319,20 @@ class TelegramService {
   }
 
   async checkAuth() {
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const status: any = await this.tdlibStatus();
+        const isAuthorized = Boolean(status?.ready);
+        if (isAuthorized) appStorage.set(this.tdlibSessionKey, 'ready');
+        else appStorage.remove(this.tdlibSessionKey);
+        return { isAuthorized };
+      } catch (e) {
+        console.error("TDLib auth check failed:", e);
+        return { isAuthorized: false };
+      }
+    }
+
     try {
       await this.connect();
       if (!this.client) return { isAuthorized: false };
@@ -373,6 +389,20 @@ class TelegramService {
   }
 
   async sendCode(phoneNumber: string) {
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const res: any = await this.tdlibSetPhone(phoneNumber);
+        if (res?.success !== false) {
+          return { success: true, phoneCodeHash: 'tdlib' };
+        }
+        return { success: false, error: res?.error || 'Falha ao enviar telefone para TDLib.' };
+      } catch (error: any) {
+        console.error("Error sending TDLib code:", error);
+        return { success: false, error: error?.message || String(error) };
+      }
+    }
+
     try {
       await this.connect();
       
@@ -394,6 +424,22 @@ class TelegramService {
   }
 
   async signIn(phoneNumber: string, phoneCodeHash: string, phoneCode: string) {
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        const codeRes: any = await this.tdlibCheckCode(phoneCode);
+        if (codeRes?.ready || codeRes?.state === 'ready') {
+          appStorage.set(this.tdlibSessionKey, 'ready');
+          return { success: true };
+        }
+        if (codeRes?.state === 'wait_password') {
+          return { success: false, error: 'Esta conta exige senha 2FA. Use Configurações > TDLib para validar a senha por enquanto.' };
+        }
+        return { success: false, error: codeRes?.error || `TDLib aguardando estado: ${codeRes?.state || 'desconhecido'}` };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+    }
+
     try {
       let cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
       if (!cleanPhone.startsWith('+')) {
@@ -418,6 +464,26 @@ class TelegramService {
   async getDialogs() {
     const fakeDialogs = twitterFakeDialogs();
     if (this.skipLogin) return { success: true, dialogs: fakeDialogs };
+
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const nativeRes: any = await this.tdlibBridge.getChats(100);
+        if (nativeRes?.success) {
+          return {
+            success: true,
+            dialogs: [
+              ...fakeDialogs,
+              ...(nativeRes.dialogs || []),
+            ],
+          };
+        }
+        console.warn('[TelegramService] TDLib chats unavailable, falling back to GramJS:', nativeRes?.error);
+      } catch (error) {
+        console.warn('[TelegramService] TDLib chats failed, falling back to GramJS:', error);
+      }
+    }
+
     try {
       if (!this.client || !this.client.connected) {
         const savedSession = appStorage.get('telegram_session');
@@ -502,6 +568,23 @@ class TelegramService {
         hasMore: filtered.length > page.length,
         oldestMessageId: page[0]?.id ?? null,
       };
+    }
+
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const nativeRes: any = await this.tdlibBridge.getMessages({ chatId, limit, offsetId, topicId });
+        if (nativeRes?.success) {
+          const cacheKey = messageCacheKey(chatId, topicId);
+          if (!offsetId && Array.isArray(nativeRes.messages)) {
+            await mediaCache.saveMessages(cacheKey, nativeRes.messages);
+          }
+          return nativeRes;
+        }
+        console.warn('[TelegramService] TDLib messages unavailable, falling back to GramJS:', nativeRes?.error);
+      } catch (error) {
+        console.warn('[TelegramService] TDLib messages failed, falling back to GramJS:', error);
+      }
     }
 
     if (!this.client) return { messages: [] };
@@ -622,6 +705,17 @@ class TelegramService {
   async resolveLink(url: string) { return { success: false, chat: null }; }
   async readHistory(chatId: any) { return { success: true }; }
   async getForumTopics(chatId: any) {
+    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const nativeRes: any = await this.tdlibBridge.getForumTopics(chatId, 100);
+        if (nativeRes?.success) return nativeRes;
+        console.warn('[TelegramService] TDLib forum topics unavailable, falling back to GramJS:', nativeRes?.error);
+      } catch (error) {
+        console.warn('[TelegramService] TDLib forum topics failed, falling back to GramJS:', error);
+      }
+    }
+
     if (!this.client) return { success: false, topics: [] };
     try {
       const channel = await this.client.getInputEntity(chatId);

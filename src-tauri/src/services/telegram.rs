@@ -6,7 +6,10 @@ use std::sync::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tdlib_rs::{
-    enums::{AuthorizationState, MessageContent, Update},
+    enums::{
+        AuthorizationState, ChatList, ChatType, MessageContent, MessageReplyTo, MessageSender,
+        MessageTopic, Update,
+    },
     functions,
     types::File,
 };
@@ -56,6 +59,81 @@ pub struct TdlibDownloadResult {
     file_path: Option<String>,
     file_name: Option<String>,
     size: i64,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibChatInfo {
+    id: String,
+    title: String,
+    date: i32,
+    unread_count: i32,
+    is_group: bool,
+    is_channel: bool,
+    has_topics: bool,
+    last_message_text: String,
+    last_message_date: i32,
+    last_message_has_media: bool,
+    last_message_is_video: bool,
+    last_message_is_photo: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibChatsResult {
+    success: bool,
+    dialogs: Vec<TdlibChatInfo>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibMessageInfo {
+    id: i64,
+    message: String,
+    date: i32,
+    out: bool,
+    sender_id: String,
+    sender_name: String,
+    reply_to_msg_id: Option<i64>,
+    topic_id: Option<i32>,
+    media: bool,
+    text: String,
+    has_media: bool,
+    is_photo: bool,
+    is_video: bool,
+    grouped_id: Option<String>,
+    video_duration: Option<i32>,
+    media_size: Option<i64>,
+    is_deleted: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibMessagesResult {
+    success: bool,
+    messages: Vec<TdlibMessageInfo>,
+    has_more: bool,
+    oldest_message_id: Option<i64>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibForumTopicInfo {
+    id: i32,
+    title: String,
+    is_closed: bool,
+    is_pinned: bool,
+    unread_count: i32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibForumTopicsResult {
+    success: bool,
+    topics: Vec<TdlibForumTopicInfo>,
     error: Option<String>,
 }
 
@@ -280,6 +358,169 @@ fn tdlib_message_id_from_app_id(message_id: i64) -> i64 {
         message_id << 20
     } else {
         message_id
+    }
+}
+
+fn app_message_id_from_tdlib(message_id: i64) -> i64 {
+    if message_id > (1_i64 << 20) {
+        message_id >> 20
+    } else {
+        message_id
+    }
+}
+
+fn sender_id_to_string(sender: &MessageSender) -> String {
+    match sender {
+        MessageSender::User(sender) => sender.user_id.to_string(),
+        MessageSender::Chat(sender) => sender.chat_id.to_string(),
+    }
+}
+
+fn message_topic_id(topic: &Option<MessageTopic>) -> Option<i32> {
+    match topic {
+        Some(MessageTopic::Forum(topic)) => Some(topic.forum_topic_id),
+        _ => None,
+    }
+}
+
+fn reply_message_id(reply_to: &Option<MessageReplyTo>) -> Option<i64> {
+    match reply_to {
+        Some(MessageReplyTo::Message(reply)) => Some(app_message_id_from_tdlib(reply.message_id)),
+        _ => None,
+    }
+}
+
+fn content_text(content: &MessageContent) -> String {
+    match content {
+        MessageContent::MessageText(content) => content.text.text.clone(),
+        MessageContent::MessageAnimation(content) => content.caption.text.clone(),
+        MessageContent::MessageAudio(content) => content.caption.text.clone(),
+        MessageContent::MessageDocument(content) => content.caption.text.clone(),
+        MessageContent::MessagePhoto(content) => content.caption.text.clone(),
+        MessageContent::MessageVideo(content) => content.caption.text.clone(),
+        MessageContent::MessageVoiceNote(content) => content.caption.text.clone(),
+        _ => String::new(),
+    }
+}
+
+fn content_media_flags(content: &MessageContent) -> (bool, bool, bool, Option<i32>, Option<i64>) {
+    match content {
+        MessageContent::MessageAnimation(content) => (
+            true,
+            false,
+            true,
+            Some(content.animation.duration),
+            Some(effective_file_size(&content.animation.animation)),
+        ),
+        MessageContent::MessageAudio(content) => (
+            true,
+            false,
+            false,
+            None,
+            Some(effective_file_size(&content.audio.audio)),
+        ),
+        MessageContent::MessageDocument(content) => (
+            true,
+            false,
+            false,
+            None,
+            Some(effective_file_size(&content.document.document)),
+        ),
+        MessageContent::MessagePhoto(content) => {
+            let size =
+                best_photo_file(content.photo.clone()).map(|file| effective_file_size(&file));
+            (true, true, false, None, size)
+        }
+        MessageContent::MessageVideo(content) => (
+            true,
+            false,
+            true,
+            Some(content.video.duration),
+            Some(effective_file_size(&content.video.video)),
+        ),
+        MessageContent::MessageVideoNote(content) => (
+            true,
+            false,
+            true,
+            Some(content.video_note.duration),
+            Some(effective_file_size(&content.video_note.video)),
+        ),
+        MessageContent::MessageVoiceNote(content) => (
+            true,
+            false,
+            false,
+            None,
+            Some(effective_file_size(&content.voice_note.voice)),
+        ),
+        _ => (false, false, false, None, None),
+    }
+}
+
+fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
+    let text = content_text(&message.content);
+    let (has_media, is_photo, is_video, video_duration, media_size) =
+        content_media_flags(&message.content);
+
+    TdlibMessageInfo {
+        id: app_message_id_from_tdlib(message.id),
+        message: text.clone(),
+        date: message.date,
+        out: message.is_outgoing,
+        sender_id: sender_id_to_string(&message.sender_id),
+        sender_name: String::new(),
+        reply_to_msg_id: reply_message_id(&message.reply_to),
+        topic_id: message_topic_id(&message.topic_id),
+        media: has_media,
+        text,
+        has_media,
+        is_photo,
+        is_video,
+        grouped_id: if message.media_album_id != 0 {
+            Some(message.media_album_id.to_string())
+        } else {
+            None
+        },
+        video_duration,
+        media_size,
+        is_deleted: false,
+    }
+}
+
+fn tdlib_chat_to_app(chat: tdlib_rs::types::Chat) -> TdlibChatInfo {
+    let (is_group, is_channel) = match &chat.r#type {
+        ChatType::Private(_) | ChatType::Secret(_) => (false, false),
+        ChatType::BasicGroup(_) => (true, false),
+        ChatType::Supergroup(chat_type) => (!chat_type.is_channel, chat_type.is_channel),
+    };
+
+    let (
+        last_message_text,
+        last_message_date,
+        last_message_has_media,
+        last_message_is_video,
+        last_message_is_photo,
+    ) = match chat.last_message {
+        Some(message) => {
+            let text = content_text(&message.content);
+            let (has_media, is_photo, is_video, _, _) = content_media_flags(&message.content);
+            (text, message.date, has_media, is_video, is_photo)
+        }
+        None => (String::new(), 0, false, false, false),
+    };
+
+    TdlibChatInfo {
+        id: chat.id.to_string(),
+        title: chat.title,
+        date: last_message_date,
+        unread_count: chat.unread_count,
+        is_group,
+        is_channel,
+        has_topics: chat.view_as_topics,
+        last_message_text,
+        last_message_date,
+        last_message_has_media,
+        last_message_is_video,
+        last_message_is_photo,
     }
 }
 
@@ -707,6 +948,178 @@ pub async fn tdlib_get_me(state: State<'_, TdlibManager>) -> Result<TdlibUserInf
             first_name: None,
             last_name: None,
             phone_number: None,
+            error: Some(error.message),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn tdlib_get_chats(
+    state: State<'_, TdlibManager>,
+    limit: Option<i32>,
+) -> Result<TdlibChatsResult, String> {
+    let client_id = match ready_client_id(&state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibChatsResult {
+                success: false,
+                dialogs: Vec::new(),
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    let chat_ids =
+        match functions::get_chats(Some(ChatList::Main), limit.unwrap_or(100), client_id).await {
+            Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
+            Err(error) => {
+                return Ok(TdlibChatsResult {
+                    success: false,
+                    dialogs: Vec::new(),
+                    error: Some(error.message),
+                });
+            }
+        };
+
+    let mut dialogs = Vec::new();
+    for chat_id in chat_ids {
+        if let Ok(tdlib_rs::enums::Chat::Chat(chat)) = functions::get_chat(chat_id, client_id).await
+        {
+            dialogs.push(tdlib_chat_to_app(chat));
+        }
+    }
+
+    Ok(TdlibChatsResult {
+        success: true,
+        dialogs,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn tdlib_get_messages(
+    state: State<'_, TdlibManager>,
+    chat_id: i64,
+    limit: Option<i32>,
+    offset_id: Option<i64>,
+    topic_id: Option<i32>,
+) -> Result<TdlibMessagesResult, String> {
+    let client_id = match ready_client_id(&state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibMessagesResult {
+                success: false,
+                messages: Vec::new(),
+                has_more: false,
+                oldest_message_id: None,
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    let requested_limit = limit.unwrap_or(50).clamp(1, 100);
+    let from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
+    let history_result = if let Some(topic_id) = topic_id {
+        functions::get_forum_topic_history(
+            chat_id,
+            topic_id,
+            from_message_id,
+            0,
+            requested_limit,
+            client_id,
+        )
+        .await
+    } else {
+        functions::get_chat_history(
+            chat_id,
+            from_message_id,
+            0,
+            requested_limit,
+            false,
+            client_id,
+        )
+        .await
+    };
+
+    let history = match history_result {
+        Ok(tdlib_rs::enums::Messages::Messages(messages)) => messages,
+        Err(error) => {
+            return Ok(TdlibMessagesResult {
+                success: false,
+                messages: Vec::new(),
+                has_more: false,
+                oldest_message_id: None,
+                error: Some(error.message),
+            });
+        }
+    };
+
+    let mut messages: Vec<TdlibMessageInfo> = history
+        .messages
+        .into_iter()
+        .flatten()
+        .filter(|message| !matches!(message.content, MessageContent::MessageChatDeleteMember(_)))
+        .map(tdlib_message_to_app)
+        .collect();
+    messages.sort_by_key(|message| message.id);
+    let oldest_message_id = messages.first().map(|message| message.id);
+    let has_more = messages.len() as i32 >= requested_limit;
+
+    Ok(TdlibMessagesResult {
+        success: true,
+        messages,
+        has_more,
+        oldest_message_id,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn tdlib_get_forum_topics(
+    state: State<'_, TdlibManager>,
+    chat_id: i64,
+    limit: Option<i32>,
+) -> Result<TdlibForumTopicsResult, String> {
+    let client_id = match ready_client_id(&state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibForumTopicsResult {
+                success: false,
+                topics: Vec::new(),
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    match functions::get_forum_topics(
+        chat_id,
+        String::new(),
+        0,
+        0,
+        0,
+        limit.unwrap_or(100),
+        client_id,
+    )
+    .await
+    {
+        Ok(tdlib_rs::enums::ForumTopics::ForumTopics(topics)) => Ok(TdlibForumTopicsResult {
+            success: true,
+            topics: topics
+                .topics
+                .into_iter()
+                .map(|topic| TdlibForumTopicInfo {
+                    id: topic.info.forum_topic_id,
+                    title: topic.info.name,
+                    is_closed: topic.info.is_closed,
+                    is_pinned: topic.is_pinned,
+                    unread_count: topic.unread_count,
+                })
+                .collect(),
+            error: None,
+        }),
+        Err(error) => Ok(TdlibForumTopicsResult {
+            success: false,
+            topics: Vec::new(),
             error: Some(error.message),
         }),
     }

@@ -22,6 +22,26 @@ interface TdlibUserInfo {
   error?: string | null;
 }
 
+interface TdlibChatsResult {
+  success: boolean;
+  dialogs: any[];
+  error?: string | null;
+}
+
+interface TdlibMessagesResult {
+  success: boolean;
+  messages: any[];
+  hasMore: boolean;
+  oldestMessageId?: number | null;
+  error?: string | null;
+}
+
+interface TdlibForumTopicsResult {
+  success: boolean;
+  topics: any[];
+  error?: string | null;
+}
+
 interface DownloadMessageMediaRequest {
   chatId: unknown;
   messageId: unknown;
@@ -107,6 +127,26 @@ export class TelegramTdlibBridge {
 
   getMe() {
     return invoke<TdlibUserInfo>('tdlib_get_me');
+  }
+
+  getChats(limit = 100) {
+    return invoke<TdlibChatsResult>('tdlib_get_chats', { limit });
+  }
+
+  getMessages({ chatId, limit = 50, offsetId = 0, topicId = null }: any) {
+    return invoke<TdlibMessagesResult>('tdlib_get_messages', {
+      chatId: toNumberValue(chatId),
+      limit,
+      offsetId: offsetId ? toNumberValue(offsetId) : null,
+      topicId: topicId == null ? null : toNumberValue(topicId),
+    });
+  }
+
+  getForumTopics(chatId: unknown, limit = 100) {
+    return invoke<TdlibForumTopicsResult>('tdlib_get_forum_topics', {
+      chatId: toNumberValue(chatId),
+      limit,
+    });
   }
 
   downloadMessageMedia({ chatId, messageId, folderPath }: DownloadMessageMediaRequest) {
