@@ -1,5 +1,3 @@
-// @ts-nocheck
-
 export function toNumberValue(value: any) {
   if (typeof value === 'number') return value;
   if (typeof value === 'bigint') return Number(value);

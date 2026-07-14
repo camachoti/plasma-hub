@@ -61,6 +61,8 @@ npm run tauri:android:init -- --ci --skip-targets-install
 npx tauri android build --debug --apk --target x86_64 --ci
 ```
 
+Use the Tauri Android command for mobile validation instead of plain `cargo check --target ...`, because the Tauri CLI injects the Android NDK linker environment expected by native dependencies.
+
 If local builds fail with `No space left on device`, clear generated Cargo/Tauri artifacts:
 
 ```bash

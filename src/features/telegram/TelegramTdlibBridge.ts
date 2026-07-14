@@ -1,10 +1,78 @@
-// @ts-nocheck
 import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
 import { toNumberValue } from './TelegramMessageUtils';
 
+interface TelegramCredentials {
+  apiId: number;
+  apiHash: string;
+}
+
+interface TdlibStatus {
+  success: boolean;
+  ready: boolean;
+  state: string;
+  error?: string | null;
+}
+
+interface TdlibUserInfo {
+  success: boolean;
+  id?: number | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  phoneNumber?: string | null;
+  error?: string | null;
+}
+
+interface DownloadMessageMediaRequest {
+  chatId: unknown;
+  messageId: unknown;
+  folderPath: string;
+}
+
+interface TdlibMassDownloadRequest {
+  chatId: unknown;
+  folderPath: string;
+  topicId?: unknown;
+  splitByUser?: boolean;
+}
+
+interface TdlibDownloadResult {
+  success: boolean;
+  skipped: boolean;
+  filePath?: string | null;
+  fileName?: string | null;
+  size: number;
+  error?: string | null;
+}
+
+interface TdlibMassDownloadResult {
+  success: boolean;
+  downloadedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  total: number;
+  aborted: boolean;
+  error?: string | null;
+}
+
+export interface TdlibDownloadProgress {
+  chatId: number;
+  total: number;
+  downloaded: number;
+  currentFile: string;
+  isScanning: boolean;
+  items: Array<{
+    name: string;
+    status: string;
+    progress: number;
+    size: number;
+    filePath?: string | null;
+    thumbnailPath?: string | null;
+  }>;
+}
+
 export class TelegramTdlibBridge {
   constructor(
-    private readonly getCredentials: () => { apiId: number; apiHash: string },
+    private readonly getCredentials: () => TelegramCredentials,
   ) {}
 
   async init() {
@@ -13,11 +81,11 @@ export class TelegramTdlibBridge {
       return { success: false, ready: false, state: 'error', error: 'Credenciais do Telegram ausentes.' };
     }
 
-    return invoke('tdlib_init', { apiId, apiHash });
+    return invoke<TdlibStatus>('tdlib_init', { apiId, apiHash });
   }
 
   status() {
-    return invoke('tdlib_status');
+    return invoke<TdlibStatus>('tdlib_status');
   }
 
   setPhone(phoneNumber: string) {
@@ -26,31 +94,31 @@ export class TelegramTdlibBridge {
       cleanPhone = '+' + cleanPhone;
     }
 
-    return invoke('tdlib_set_phone', { phoneNumber: cleanPhone });
+    return invoke<TdlibStatus>('tdlib_set_phone', { phoneNumber: cleanPhone });
   }
 
   checkCode(code: string) {
-    return invoke('tdlib_check_code', { code });
+    return invoke<TdlibStatus>('tdlib_check_code', { code });
   }
 
   checkPassword(password: string) {
-    return invoke('tdlib_check_password', { password });
+    return invoke<TdlibStatus>('tdlib_check_password', { password });
   }
 
   getMe() {
-    return invoke('tdlib_get_me');
+    return invoke<TdlibUserInfo>('tdlib_get_me');
   }
 
-  downloadMessageMedia({ chatId, messageId, folderPath }: any) {
-    return invoke('tdlib_download_message_media', {
+  downloadMessageMedia({ chatId, messageId, folderPath }: DownloadMessageMediaRequest) {
+    return invoke<TdlibDownloadResult>('tdlib_download_message_media', {
       chatId: toNumberValue(chatId),
       messageId: toNumberValue(messageId),
       folderPath,
     });
   }
 
-  startMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: any) {
-    return invoke('tdlib_start_mass_download', {
+  startMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: TdlibMassDownloadRequest) {
+    return invoke<TdlibMassDownloadResult>('tdlib_start_mass_download', {
       request: {
         chatId: toNumberValue(chatId),
         folderPath,
@@ -61,14 +129,14 @@ export class TelegramTdlibBridge {
   }
 
   stopDownload() {
-    return invoke('tdlib_stop_download');
+    return invoke<void>('tdlib_stop_download');
   }
 
   onAuthState(cb: (state: string) => void) {
     return listen<string>('tdlib-auth-state', event => cb(event.payload));
   }
 
-  onDownloadProgress(cb: (data: any) => void) {
-    return listen<any>('tdlib-download-progress', event => cb(event.payload));
+  onDownloadProgress(cb: (data: TdlibDownloadProgress) => void) {
+    return listen<TdlibDownloadProgress>('tdlib-download-progress', event => cb(event.payload));
   }
 }
