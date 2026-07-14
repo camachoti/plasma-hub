@@ -61,6 +61,13 @@ npm run tauri:android:init -- --ci --skip-targets-install
 npx tauri android build --debug --apk --target x86_64 --ci
 ```
 
+The debug APK is emitted at `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`.
+Install it on a connected device or emulator with:
+
+```bash
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
 Use the Tauri Android command for mobile validation instead of plain `cargo check --target ...`, because the Tauri CLI injects the Android NDK linker environment expected by native dependencies.
 
 If local builds fail with `No space left on device`, clear generated Cargo/Tauri artifacts:
