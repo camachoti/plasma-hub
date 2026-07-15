@@ -1,10 +1,25 @@
 import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
 import { downloadUrlInBrowser } from '../../shared/platform/browserDownload';
+import { getDownloadDir, joinPath } from '../../shared/platform/files';
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { debugWarn } from '../../shared/debug/logger';
 import type { MediaInfo, FormatOption } from './types';
 import { detectPlatform } from './platforms';
 import { downloadService } from './DownloadService';
+import {
+  cleanOptional,
+  extractInstagramCode,
+  extractRedditPostId,
+  extractTikTokVideoId,
+  extractTwitterId,
+  extractYoutubeId,
+  formatBytes,
+  formatCount,
+  formatDuration,
+  getDownloadExtension,
+  isTwitterProfileUrl,
+} from './downloaderUtils';
 
 export interface TwitterRequestOptions {
   twitterCookies?: string;
@@ -34,71 +49,6 @@ export async function apiFetch(url: string, opts: ApiOptions = {}): Promise<any>
   const headers: Record<string, string> = {};
   res.headers.forEach((v: string, k: string) => { headers[k] = v; });
   return { status: res.status, data, text, headers };
-}
-
-// ─── Utilities ─────────────────────────────────────────────────────────────────
-
-function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return '—';
-  const mb = bytes / 1024 / 1024;
-  return mb < 1 ? `${(mb * 1024).toFixed(0)} KB` : `${mb.toFixed(1)} MB`;
-}
-
-function extractYoutubeId(url: string): string | null {
-  for (const p of [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/(?:embed|shorts|v)\/([a-zA-Z0-9_-]{11})/,
-  ]) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-function extractRedditPostId(url: string): string | null {
-  const m = url.match(/reddit\.com\/(?:r\/[^/]+\/)?comments\/([a-zA-Z0-9]+)/);
-  return m ? m[1] : null;
-}
-
-function extractTikTokVideoId(url: string): string | null {
-  const m = url.match(/\/video\/(\d+)/);
-  return m ? m[1] : null;
-}
-
-function extractTwitterId(url: string): string | null {
-  const m = url.match(/(?:twitter\.com|x\.com)\/(?:\w+\/status|i\/web\/status)\/(\d+)/);
-  return m ? m[1] : null;
-}
-
-function isTwitterProfileUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    if (host !== 'twitter.com' && host !== 'x.com') return false;
-
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    return parts.length === 1 && /^[A-Za-z0-9_]{1,15}$/.test(parts[0]);
-  } catch {
-    return /(?:twitter\.com|x\.com)\/[A-Za-z0-9_]{1,15}\/?$/.test(url);
-  }
-}
-
-function cleanOptional(value?: string): string | null {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
-}
-
-function extractInstagramCode(url: string): string | null {
-  const m = url.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
-  return m ? m[1] : null;
 }
 
 // ─── Platform extractors ───────────────────────────────────────────────────────
@@ -265,7 +215,7 @@ async function extractYoutube(url: string): Promise<MediaInfo> {
         sub: `MP4 · ${f.quality}`,
         size: f.contentLength ? formatBytes(parseInt(f.contentLength)) : '—',
         best: uniqueVideos.length === 0 && !isAdaptive,
-        url: f.url ?? 'cipher',
+        url: f.url,
         hasAudio: !isAdaptive
       });
     } else if (!isAdaptive) {
@@ -278,7 +228,7 @@ async function extractYoutube(url: string): Promise<MediaInfo> {
           sub: `MP4 · ${f.quality}`,
           size: f.contentLength ? formatBytes(parseInt(f.contentLength)) : '—',
           best: existingIdx === 0,
-          url: f.url ?? 'cipher',
+          url: f.url,
           hasAudio: true
         };
       }
@@ -301,7 +251,7 @@ async function extractYoutube(url: string): Promise<MediaInfo> {
     sub: f.mimeType.split(';')[0].replace('audio/', '').toUpperCase() + (f.audioSampleRate ? ` · ${Math.round(parseInt(f.audioSampleRate) / 1000)}kHz` : ''),
     size: f.contentLength ? formatBytes(parseInt(f.contentLength)) : '—',
     best: i === 0,
-    url: f.url ?? 'cipher',
+    url: f.url,
   }));
 
   if (audioFormats.length === 0) {
@@ -347,7 +297,7 @@ interface TikTokAwemeItem {
 }
 
 async function extractTikTok(url: string): Promise<MediaInfo> {
-  if (!true) {
+  if (!runtimeCapabilities.isTauri) {
     return extractTikTokWebFallback(url);
   }
 
@@ -468,7 +418,7 @@ async function extractInstagram(url: string): Promise<MediaInfo> {
   const code = extractInstagramCode(url);
   if (!code) throw new Error('Cannot parse Instagram URL');
 
-  if (!true) {
+  if (!runtimeCapabilities.isTauri) {
     return extractInstagramOembed(url);
   }
 
@@ -640,10 +590,10 @@ async function extractTwitterSyndication(_url: string, tweetId: string): Promise
 
 async function resolveRedirects(url: string): Promise<string> {
   try {
-    if (true) {
+    if (runtimeCapabilities.isTauri) {
       // HEAD request to follow redirects
       const res = await apiFetch(url, { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' }, rawText: true });
-      // CapacitorHttp follows redirects and returns final URL in headers
+      // Native HTTP follows redirects and may expose the final URL in headers.
       return (res.headers['x-final-url'] ?? res.headers['location'] ?? url) as string;
     }
     const res = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
@@ -651,27 +601,6 @@ async function resolveRedirects(url: string): Promise<string> {
   } catch {
     return url;
   }
-}
-
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
-}
-
-function getDownloadExtension(platform: string, mode: 'video' | 'audio', url?: string): string {
-  if (platform === 'twitter' && url) {
-    const cleanUrl = url.split('?')[0].toLowerCase();
-    const match = cleanUrl.match(/\.([a-z0-9]{2,5})$/);
-    if (match?.[1]) {
-      const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
-      if (['jpg', 'png', 'webp', 'gif', 'mp4', 'mov'].includes(ext)) return ext;
-    }
-    if (url.includes('format=jpg')) return 'jpg';
-  }
-
-  if (platform === 'twitter') return mode === 'audio' ? 'mp4' : 'mp4';
-  return mode === 'audio' ? 'mp3' : 'mp4';
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
@@ -698,7 +627,7 @@ export async function analyzeUrl(url: string, options: TwitterRequestOptions = {
           cookies: cleanOptional(options.twitterCookies),
         });
       } catch (err) {
-        console.warn('Native Twitter analyzer failed, falling back to syndication extractor:', err);
+        debugWarn('Native Twitter analyzer failed, falling back to syndication extractor:', err);
         return extractTwitter(url);
       }
   }
@@ -744,15 +673,53 @@ async function downloadViaBlob(
   onProgress(100);
 }
 
-async function simulateDownload(onProgress: (p: number) => void): Promise<void> {
-  return new Promise((resolve) => {
-    let p = 0;
-    const iv = setInterval(() => {
-      p += Math.random() * 6 + 2;
-      if (p >= 100) { clearInterval(iv); onProgress(100); resolve(); }
-      else onProgress(p);
-    }, 220);
+async function downloadViaNativeFile(
+  url: string,
+  filename: string,
+  onProgress: (p: number) => void
+): Promise<string> {
+  const downloadDir = await getDownloadDir();
+  const filePath = await joinPath(downloadDir, filename);
+
+  const res = await tauriFetch(url, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://www.youtube.com/',
+      'Origin': 'https://www.youtube.com'
+    }
   });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const contentLength = res.headers.get('content-length');
+  const total = contentLength ? parseInt(contentLength, 10) : 0;
+  const reader = res.body?.getReader();
+
+  await invoke('begin_download_file', { filePath });
+  try {
+    if (!reader) {
+      const buffer = new Uint8Array(await res.arrayBuffer());
+      await invoke('append_download_file_chunk', { filePath, data: Array.from(buffer) });
+      onProgress(97);
+    } else {
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        received += value.length;
+        await invoke('append_download_file_chunk', { filePath, data: Array.from(value) });
+        onProgress(total > 0 ? Math.min(97, (received / total) * 100) : Math.min(90, received / 20000));
+      }
+    }
+
+    await invoke('finish_download_file', { filePath });
+    onProgress(100);
+    return filePath;
+  } catch (error) {
+    await invoke('abort_download_file', { filePath }).catch(() => {});
+    throw error;
+  }
 }
 
 export async function downloadMedia(
@@ -783,7 +750,19 @@ export async function downloadMedia(
     downloadService.updateDownload(downloadId, { progress: p });
   };
 
-  if (info.platform === 'youtube' && info.originalUrl && runtimeCapabilities.supportsNativeYoutube) {
+  if (info.platform === 'youtube' && runtimeCapabilities.isAndroid && mode === 'video' && format.hasAudio === false) {
+    downloadService.updateDownload(downloadId, {
+      status: 'failed',
+      error: 'Este formato separa video e audio. Escolha um formato com audio no Android.',
+    });
+    return;
+  }
+
+  if (
+    info.platform === 'youtube' &&
+    info.originalUrl &&
+    runtimeCapabilities.supportsNativeYoutube
+  ) {
     try {
       // se for vídeo e não tiver áudio nativo, combina com o melhor áudio
       let ytFormat = formatId;
@@ -821,7 +800,7 @@ export async function downloadMedia(
       unlistenError();
       return;
     } catch (err: any) {
-      console.warn('Backend download failed, fallback to direct url:', err);
+      debugWarn('Backend download failed, fallback to direct url:', err);
       // Try to fallback
       try {
         dlUrl = await invoke<string>('get_youtube_stream_url', { 
@@ -864,19 +843,28 @@ export async function downloadMedia(
       unlistenError();
       return;
     } catch (err: any) {
-      console.warn('Native Twitter download failed, falling back to blob download:', err);
+      debugWarn('Native Twitter download failed, falling back to blob download:', err);
     }
   }
 
   if (!dlUrl) {
-    await simulateDownload(onProgress);
-    downloadService.updateDownload(downloadId, { status: 'failed', error: 'No URL' });
+    downloadService.updateDownload(downloadId, {
+      status: 'failed',
+      error: info.platform === 'youtube'
+        ? 'Formato sem URL direta resolvível pelo backend nativo.'
+        : 'URL de download não encontrada.'
+    });
     return;
   }
 
   try {
-    await downloadViaBlob(dlUrl, filename, onProgress);
-    downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+    if (runtimeCapabilities.isTauri) {
+      const filePath = await downloadViaNativeFile(dlUrl, filename, onProgress);
+      downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, filePath });
+    } else {
+      await downloadViaBlob(dlUrl, filename, onProgress);
+      downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+    }
   } catch (err: any) {
     console.error("Download failed", err);
     downloadService.updateDownload(downloadId, { status: 'failed', error: err.message });
@@ -884,5 +872,5 @@ export async function downloadMedia(
 }
 
 export function isNative(): boolean {
-  return true;
+  return runtimeCapabilities.isTauri;
 }

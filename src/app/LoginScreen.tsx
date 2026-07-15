@@ -1,4 +1,4 @@
-import appIcon from "../../build/icon.png";
+import appIcon from "../assets/plasma-hub-logo.png";
 import { runtimeCapabilities } from "../shared/platform/runtime";
 
 interface LoginScreenProps {

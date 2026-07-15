@@ -40,4 +40,28 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    // GramJS and its Node polyfills are intentionally isolated in a lazy Telegram chunk.
+    chunkSizeWarningLimit: 1600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (
+            id.includes("/telegram/") ||
+            id.includes("/big-integer/") ||
+            id.includes("/node-stdlib-browser/") ||
+            id.includes("/crypto-browserify/") ||
+            id.includes("/stream-browserify/") ||
+            id.includes("/buffer/") ||
+            id.includes("/readable-stream/")
+          ) {
+            return "telegram-vendor";
+          }
+          if (id.includes("/@tauri-apps/")) return "tauri-vendor";
+          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react-vendor";
+        },
+      },
+    },
+  },
 }));

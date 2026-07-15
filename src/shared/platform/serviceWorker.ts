@@ -1,4 +1,5 @@
 import { runtimeCapabilities } from "./runtime";
+import { debugLog, debugWarn } from "../debug/logger";
 
 export function canUseServiceWorker() {
   return runtimeCapabilities.supportsServiceWorker;
@@ -9,9 +10,9 @@ export function registerAppServiceWorker() {
 
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").then(registration => {
-      console.log("SW registered: ", registration);
+      debugLog("SW registered: ", registration);
     }).catch(registrationError => {
-      console.log("SW registration failed: ", registrationError);
+      debugWarn("SW registration failed: ", registrationError);
     });
   });
 }

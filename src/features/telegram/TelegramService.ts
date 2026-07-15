@@ -12,6 +12,7 @@ import { platformFetch as tauriFetch } from '../../shared/platform/http';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { canUseServiceWorker } from '../../shared/platform/serviceWorker';
 import { appStorage } from '../../shared/storage/appStorage';
+import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { downloadService } from '../downloader/DownloadService';
 import { mediaCache } from './MediaCacheService';
 import {
@@ -92,7 +93,7 @@ class TelegramService {
     appStorage.remove(this.tdlibSessionKey);
     if (this.client) {
       Promise.resolve(this.client.disconnect()).catch(error => {
-        console.warn('[TelegramService] Failed to disconnect old client while resetting session:', error);
+        debugWarn('[TelegramService] Failed to disconnect old client while resetting session:', error);
       });
     }
     this.client = null;
@@ -124,14 +125,14 @@ class TelegramService {
     const { type, chatId, messageId, requestId, offset, streamId } = event.data;
     const streamKey = `${chatId}_${messageId}_${streamId}`; // Unique per video stream instance
 
-    console.log(`[TelegramService] Received message from SW: type=${type}, streamId=${streamId}, offset=${offset}`);
+    debugLog(`[TelegramService] Received message from SW: type=${type}, streamId=${streamId}, offset=${offset}`);
 
     if (type === 'init_stream') {
       try {
         // Handle Twitter fake chats stream initialization from local cache
         const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
         if (fakeMessage) {
-          console.log(`[TelegramService] Initializing stream for Twitter fake message: ${chatId}/${messageId}`);
+          debugLog(`[TelegramService] Initializing stream for Twitter fake message: ${chatId}/${messageId}`);
           const cacheKey = `twitter_fake_${chatId}_${messageId}_full`;
           const buffer = await mediaCache.getMediaBuffer(cacheKey);
           if (!buffer) {
@@ -142,7 +143,7 @@ class TelegramService {
           const mimeType = 'video/mp4';
           const startOffset = offset || 0;
           
-          console.log(`[TelegramService] Creating buffer iterator for Twitter video: streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
+          debugLog(`[TelegramService] Creating buffer iterator for Twitter video: streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
           
           let currentOffset = startOffset;
           const chunkSize = 512 * 1024; // 512KB chunks
@@ -167,13 +168,13 @@ class TelegramService {
           });
 
           const response = { type: 'chunk_response', requestId, totalSize: fileSize, mimeType };
-          console.log(`[TelegramService] Sending Twitter init_stream success: size=${fileSize}, mime=${mimeType}`);
+          debugLog(`[TelegramService] Sending Twitter init_stream success: size=${fileSize}, mime=${mimeType}`);
           navigator.serviceWorker.controller?.postMessage(response);
           return;
         }
 
         if (!this.client) throw new Error("Client not connected");
-        console.log(`[TelegramService] Fetching message ${messageId} for stream...`);
+        debugLog(`[TelegramService] Fetching message ${messageId} for stream...`);
         const entity = await this.client.getEntity(chatId);
         const messages = await this.client.getMessages(entity, { ids: [Number(messageId)] });
         if (!messages || messages.length === 0 || !messages[0].media) {
@@ -188,7 +189,7 @@ class TelegramService {
         const mimeType = message.media?.document?.mimeType || 'video/mp4';
         const startOffset = offset || 0;
 
-        console.log(`[TelegramService] Creating iterDownload for streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
+        debugLog(`[TelegramService] Creating iterDownload for streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
         const iter = this.client.iterDownload({
           file: message.media,
           requestSize: 512 * 1024, // 512KB chunks
@@ -204,11 +205,11 @@ class TelegramService {
         });
 
         const response = { type: 'chunk_response', requestId, totalSize: fileSize, mimeType };
-        console.log(`[TelegramService] Sending init_stream success response: size=${fileSize}, mime=${mimeType}`);
+        debugLog(`[TelegramService] Sending init_stream success response: size=${fileSize}, mime=${mimeType}`);
         if (navigator.serviceWorker.controller) {
           navigator.serviceWorker.controller.postMessage(response);
         } else {
-          console.warn("[TelegramService] No service worker controller found to send init_stream success response");
+          debugWarn("[TelegramService] No service worker controller found to send init_stream success response");
         }
       } catch (err: any) {
         console.error(`[TelegramService] Error in init_stream:`, err);
@@ -220,15 +221,15 @@ class TelegramService {
         const streamData = this.streamIterators.get(streamKey);
         if (!streamData) throw new Error("Stream not initialized");
 
-        console.log(`[TelegramService] Fetching next chunk for streamKey=${streamKey}...`);
+        debugLog(`[TelegramService] Fetching next chunk for streamKey=${streamKey}...`);
         const next = await streamData.iter.next();
         if (next.done) {
-          console.log(`[TelegramService] Iterator done for streamKey=${streamKey}`);
+          debugLog(`[TelegramService] Iterator done for streamKey=${streamKey}`);
           this.streamIterators.delete(streamKey);
           navigator.serviceWorker.controller?.postMessage({ type: 'chunk_response', requestId, done: true });
         } else {
           const chunk = next.value;
-          console.log(`[TelegramService] Iterator yielded chunk of size=${chunk.length} for streamKey=${streamKey}`);
+          debugLog(`[TelegramService] Iterator yielded chunk of size=${chunk.length} for streamKey=${streamKey}`);
           // Ensure we send a clean ArrayBuffer that is exactly the size of the chunk
           const chunkArray = new Uint8Array(chunk);
           const chunkBuffer = chunkArray.buffer.slice(chunkArray.byteOffset, chunkArray.byteOffset + chunkArray.byteLength);
@@ -237,7 +238,7 @@ class TelegramService {
           if (navigator.serviceWorker.controller) {
             navigator.serviceWorker.controller.postMessage(response, [chunkBuffer]);
           } else {
-            console.warn("[TelegramService] No service worker controller found to send chunk response");
+            debugWarn("[TelegramService] No service worker controller found to send chunk response");
           }
         }
       } catch (err: any) {
@@ -246,7 +247,7 @@ class TelegramService {
       }
     }
     else if (type === 'cancel_stream') {
-      console.log(`[TelegramService] Cancelling stream for streamKey=${streamKey}`);
+      debugLog(`[TelegramService] Cancelling stream for streamKey=${streamKey}`);
       this.streamIterators.delete(streamKey);
     }
   }
@@ -259,7 +260,7 @@ class TelegramService {
     if (this.connectPromise) return this.connectPromise;
     
     if (!telegramApiCredentials.apiId || !telegramApiCredentials.apiHash) {
-      console.warn("API_ID and API_HASH are required in .env");
+      debugWarn("API_ID and API_HASH are required in .env");
       throw new Error("Credenciais do Telegram ausentes. Crie um arquivo .env com VITE_API_ID e VITE_API_HASH.");
     }
 
@@ -299,7 +300,7 @@ class TelegramService {
         await this.mergeMessageIntoCache(chatId, message, topicId);
         this.newMessageCallbacks.forEach(cb => cb({ chatId, topicId, message }));
       } catch (error) {
-        console.warn('[TelegramService] Failed to handle new message update:', error);
+        debugWarn('[TelegramService] Failed to handle new message update:', error);
       }
     }, new NewMessage({}));
   }
@@ -478,9 +479,9 @@ class TelegramService {
             ],
           };
         }
-        console.warn('[TelegramService] TDLib chats unavailable, falling back to GramJS:', nativeRes?.error);
+        debugWarn('[TelegramService] TDLib chats unavailable, falling back to GramJS:', nativeRes?.error);
       } catch (error) {
-        console.warn('[TelegramService] TDLib chats failed, falling back to GramJS:', error);
+        debugWarn('[TelegramService] TDLib chats failed, falling back to GramJS:', error);
       }
     }
 
@@ -581,9 +582,9 @@ class TelegramService {
           }
           return nativeRes;
         }
-        console.warn('[TelegramService] TDLib messages unavailable, falling back to GramJS:', nativeRes?.error);
+        debugWarn('[TelegramService] TDLib messages unavailable, falling back to GramJS:', nativeRes?.error);
       } catch (error) {
-        console.warn('[TelegramService] TDLib messages failed, falling back to GramJS:', error);
+        debugWarn('[TelegramService] TDLib messages failed, falling back to GramJS:', error);
       }
     }
 
@@ -710,9 +711,9 @@ class TelegramService {
         await this.tdlibInit();
         const nativeRes: any = await this.tdlibBridge.getForumTopics(chatId, 100);
         if (nativeRes?.success) return nativeRes;
-        console.warn('[TelegramService] TDLib forum topics unavailable, falling back to GramJS:', nativeRes?.error);
+        debugWarn('[TelegramService] TDLib forum topics unavailable, falling back to GramJS:', nativeRes?.error);
       } catch (error) {
-        console.warn('[TelegramService] TDLib forum topics failed, falling back to GramJS:', error);
+        debugWarn('[TelegramService] TDLib forum topics failed, falling back to GramJS:', error);
       }
     }
 
@@ -1006,7 +1007,7 @@ class TelegramService {
         unsubscribe();
       }
     } catch (error) {
-      console.warn('[TelegramService] TDLib mass download unavailable, falling back to GramJS:', error);
+      debugWarn('[TelegramService] TDLib mass download unavailable, falling back to GramJS:', error);
       return null;
     }
   }
@@ -1469,7 +1470,7 @@ class TelegramService {
       if (!downloadRes.success) return downloadRes;
       
       if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        console.log(`[TelegramService] getMessageMediaStream using service worker stream for Twitter video ${chatId}/${messageId}`);
+        debugLog(`[TelegramService] getMessageMediaStream using service worker stream for Twitter video ${chatId}/${messageId}`);
         return { success: true, streamUrl: `/stream_media/${chatId}/${messageId}` };
       }
       return downloadRes;
@@ -1479,24 +1480,24 @@ class TelegramService {
       // Prefer range-capable streaming for video playback. Blob URLs from the
       // full-media cache are still useful as a fallback, but they can be less
       // reliable for media seeking/playback in WebView.
-      console.log(`[TelegramService] getMessageMediaStream using service worker stream for ${chatId}/${messageId}`);
+      debugLog(`[TelegramService] getMessageMediaStream using service worker stream for ${chatId}/${messageId}`);
       return { success: true, streamUrl: `/stream_media/${chatId}/${messageId}` };
     }
 
     const cacheKey = `media_${chatId}_${messageId}_full`;
     const cachedUrl = await mediaCache.getMedia(cacheKey, 'video/mp4');
     if (cachedUrl) {
-      console.log(`[TelegramService] getMessageMediaStream using cached blob fallback for ${chatId}/${messageId}`);
+      debugLog(`[TelegramService] getMessageMediaStream using cached blob fallback for ${chatId}/${messageId}`);
       return { success: true, streamUrl: cachedUrl };
     }
 
     // Fallback: download full file
-    console.log(`[TelegramService] getMessageMediaStream downloading full media fallback for ${chatId}/${messageId}`);
+    debugLog(`[TelegramService] getMessageMediaStream downloading full media fallback for ${chatId}/${messageId}`);
     const res = await this.getMessageMediaFile(opts);
     if (res.success && res.filePath) {
       return { success: true, streamUrl: res.filePath };
     }
-    console.warn(`[TelegramService] getMessageMediaStream failed for ${chatId}/${messageId}: ${res.error || 'unknown error'}`);
+    debugWarn(`[TelegramService] getMessageMediaStream failed for ${chatId}/${messageId}: ${res.error || 'unknown error'}`);
     return res;
   }
 
@@ -1581,7 +1582,7 @@ class TelegramService {
           fromUser,
         });
       } catch (searchErr) {
-        console.warn('Telegram fromUser media search failed, falling back to scan:', searchErr);
+        debugWarn('Telegram fromUser media search failed, falling back to scan:', searchErr);
       }
 
       let mediaMessages = (Array.isArray(messages) ? messages : []).filter((m: any) => m?.media);
@@ -1852,6 +1853,34 @@ class TelegramService {
       return { success: false, error: error?.message || String(error) };
     }
   }
+  async forwardMessage({ chatId, messageId, toChatId = chatId, topicId }: any) {
+    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+    if (!messageId) return { success: false, error: 'Mensagem inválida.' };
+
+    try {
+      const fromEntity = await this.client.getEntity(chatId);
+      const toEntity = await this.client.getEntity(toChatId);
+
+      if (topicId) {
+        const result = await this.client.invoke(new Api.messages.ForwardMessages({
+          fromPeer: await this.client.getInputEntity(fromEntity),
+          id: [Number(messageId)],
+          toPeer: await this.client.getInputEntity(toEntity),
+          topMsgId: Number(topicId),
+        } as any));
+        return { success: true, result };
+      }
+
+      const messages = await this.client.forwardMessages(toEntity, {
+        messages: [Number(messageId)],
+        fromPeer: fromEntity,
+      });
+      return { success: true, messages };
+    } catch (error: any) {
+      console.error('Failed to forward message:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
   async createTopic(opts: any) { return { success: true }; }
   async getOriginalMessage(opts: any) { return { success: true, message: null }; }
   async sendReaction(opts: any) { return { success: true }; }
@@ -1937,7 +1966,7 @@ class TelegramService {
               this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
             });
           } catch (directError) {
-            console.warn('[TelegramService] Direct Save As failed, trying cached media fallback:', directError);
+            debugWarn('[TelegramService] Direct Save As failed, trying cached media fallback:', directError);
             const res = await this.getMessageMediaFile({ chatId, messageId });
             if (!res.success || !res.filePath) throw directError;
             await this.saveCachedMediaToPath(`media_${chatId}_${messageId}_full`, res.filePath, saveAsPath);

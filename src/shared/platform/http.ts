@@ -1,5 +1,10 @@
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { runtimeCapabilities } from "./runtime";
 
-export function platformFetch(input: Parameters<typeof tauriFetch>[0], init?: Parameters<typeof tauriFetch>[1]) {
-  return tauriFetch(input, init);
+export async function platformFetch(input: RequestInfo | URL, init?: RequestInit) {
+  if (runtimeCapabilities.isTauri) {
+    const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
+    return tauriFetch(input, init);
+  }
+
+  return fetch(input, init);
 }

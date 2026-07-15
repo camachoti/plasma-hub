@@ -1,18 +1,41 @@
-import { downloadDir, join } from "@tauri-apps/api/path";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { runtimeCapabilities } from "./runtime";
 
 export async function getDownloadDir() {
-  return downloadDir();
+  if (runtimeCapabilities.isTauri) {
+    const { appDataDir, downloadDir, join } = await import("@tauri-apps/api/path");
+    try {
+      return await downloadDir();
+    } catch {
+      return join(await appDataDir(), "downloads");
+    }
+  }
+
+  return "";
 }
 
 export async function joinPath(...parts: string[]) {
-  return join(...parts);
+  if (runtimeCapabilities.isTauri) {
+    const { join } = await import("@tauri-apps/api/path");
+    return join(...parts);
+  }
+
+  return parts.filter(Boolean).join("/");
 }
 
 export async function openSystemPath(path: string) {
-  return openPath(path);
+  if (runtimeCapabilities.isTauri) {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    return openPath(path);
+  }
+
+  window.open(path, "_blank", "noopener,noreferrer");
 }
 
 export async function revealSystemItem(path: string) {
-  return revealItemInDir(path);
+  if (runtimeCapabilities.isTauri) {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    return revealItemInDir(path);
+  }
+
+  return openSystemPath(path);
 }

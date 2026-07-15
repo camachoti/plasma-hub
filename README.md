@@ -22,9 +22,13 @@ npm run tauri:android:init
 npm run tauri:android:dev
 ```
 
-Android support is currently an initial compatibility target: the app should initialize and open, while desktop-only capabilities can be gated until they receive a mobile implementation.
+`npm run tauri:android:build` targets `aarch64` by default. The Android migration targets modern arm64 Android devices (`arm64-v8a`).
+
+Android support is an active compatibility target: the app should initialize and open, and native Telegram/TDLib plus Twitter/X download paths are expected to run through Tauri commands. YouTube uses the native Android extractor for direct streams and `signatureCipher` streams that can be resolved from the YouTube player.
 
 Android builds require a full JDK, Android SDK, and Android NDK. If Gradle reports that the Java toolchain does not provide `JAVA_COMPILER`, install a JDK package that includes `javac` and point `JAVA_HOME` to it.
+
+The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it reports `aarch64-linux-android-clang` as missing, install an Android NDK through Android Studio or `sdkmanager`, then make sure `ANDROID_HOME` or `ANDROID_SDK_ROOT` points at the SDK.
 
 ## Project Map
 
@@ -37,12 +41,12 @@ Android builds require a full JDK, Android SDK, and Android NDK. If Gradle repor
 
 ## Platform Notes
 
-The desktop app currently owns the full feature set. Android is intentionally conservative until each native dependency is validated:
+The desktop app currently owns the full feature set. Android is intentionally conservative where native dependencies still need a mobile implementation:
 
-- TDLib native login/downloads are desktop-first; Android commands return controlled unavailable responses.
-- YouTube downloads depend on `yt-dlp`, which is desktop-first; Android commands return controlled unavailable responses.
-- Twitter/X native downloads are desktop-first; Android commands return controlled unavailable responses.
-- Opening/revealing files and system download directories are desktop-first.
+- TDLib native login/downloads are enabled in Tauri, including Android.
+- Twitter/X native downloads are enabled in Tauri, including Android, with download-directory fallback to app data when the system Downloads directory is unavailable.
+- YouTube direct and signed stream downloads can be saved by the native downloader on Android. Adaptive video-only formats are hidden on Android unless they already include audio, because the mobile path does not mux separate audio/video tracks.
+- Opening/revealing files is desktop-first; Android falls back to app/system paths where available.
 - Service worker registration is disabled inside Tauri webviews by default.
 
 ## Validation
@@ -52,6 +56,7 @@ Useful checks while refactoring:
 ```bash
 npm run build
 cd src-tauri && cargo check
+cd .. && scripts/check-android-toolchain.sh
 ```
 
 Validate the generated Android project and native library with:
@@ -61,14 +66,16 @@ npm run tauri:android:init -- --ci --skip-targets-install
 npx tauri android build --debug --apk --target aarch64 --ci
 ```
 
-Use `--target aarch64` for most physical Android devices. Use `--target x86_64` for x86_64 emulators.
+Use `--target aarch64` for physical Android validation. Other Android ABIs are outside the current migration scope.
 
 The debug APK is emitted at `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`.
-Install it on a connected device or emulator with:
+Install the release APK on a connected device or emulator with:
 
 ```bash
-adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+npm run tauri:android:install
 ```
+
+The install script uses `adb` from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `$HOME/Android/Sdk` when `platform-tools` is not on `PATH`.
 
 Use the Tauri Android command for mobile validation instead of plain `cargo check --target ...`, because the Tauri CLI injects the Android NDK linker environment expected by native dependencies.
 

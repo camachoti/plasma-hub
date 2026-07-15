@@ -10,12 +10,16 @@
     "pretauri": "scripts/check-tdlib-runtime.sh",
     "pretauri:dev": "scripts/check-tdlib-runtime.sh",
     "pretauri:build": "scripts/check-tdlib-runtime.sh",
+    "pretauri:android:init": "scripts/check-android-toolchain.sh",
+    "pretauri:android:dev": "scripts/check-android-toolchain.sh",
+    "pretauri:android:build": "scripts/check-android-toolchain.sh",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:android:init": "tauri android init",
     "tauri:android:dev": "tauri android dev",
-    "tauri:android:build": "tauri android build"
+    "tauri:android:build": "tauri android build --target aarch64",
+    "tauri:android:install": "scripts/install-android-apk.sh"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

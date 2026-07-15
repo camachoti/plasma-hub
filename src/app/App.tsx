@@ -1,16 +1,25 @@
 import { useEffect, useState } from "react";
 import { useAppearance } from "../features/appearance/AppearanceStore";
-import { telegramService } from "../features/telegram/TelegramService";
 import { appStorage } from "../shared/storage/appStorage";
 import { AppShell, type AppTab } from "./AppShell";
 import { LoginScreen } from "./LoginScreen";
 import { useWebviewLogger } from "./useWebviewLogger";
 import { runtimeCapabilities } from "../shared/platform/runtime";
+import {
+  SHARED_DOWNLOAD_URL_EVENT,
+  queueSharedDownloadUrl,
+  takePendingSharedDownloadUrl,
+} from "../shared/platform/sharedDownloadIntent";
 import "../styles/App.css";
 
 const SKIP_LOGIN_KEY = "skip_login";
 const TELEGRAM_SESSION_KEY = "telegram_session";
 const TELEGRAM_TDLIB_SESSION_KEY = "telegram_tdlib_session";
+
+async function getTelegramService() {
+  const { telegramService } = await import("../features/telegram/TelegramService");
+  return telegramService;
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("telegram");
@@ -18,7 +27,6 @@ function App() {
   const [skipLogin, setSkipLogin] = useState(() => appStorage.getBoolean(SKIP_LOGIN_KEY));
   const { palette, density } = useAppearance();
 
-  telegramService.skipLogin = skipLogin;
   useWebviewLogger();
 
   useEffect(() => {
@@ -30,7 +38,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    telegramService.skipLogin = skipLogin;
+    getTelegramService().then(service => {
+      service.skipLogin = skipLogin;
+    });
   }, [skipLogin]);
 
   const [countryCode, setCountryCode] = useState("+55");
@@ -44,6 +54,29 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
+    const openSharedDownloadUrl = (url?: string | null) => {
+      if (url) queueSharedDownloadUrl(url);
+      if (!isLoggedIn && !skipLogin) {
+        appStorage.setBoolean(SKIP_LOGIN_KEY, true);
+        setSkipLogin(true);
+        setIsLoggedIn(true);
+      }
+      setIsSettingsOpen(false);
+      setActiveTab("downloads");
+    };
+
+    const pendingUrl = takePendingSharedDownloadUrl();
+    if (pendingUrl) openSharedDownloadUrl(pendingUrl);
+
+    const onSharedDownloadUrl = (event: Event) => {
+      const url = (event as CustomEvent<{ url?: string }>).detail?.url;
+      openSharedDownloadUrl(url);
+    };
+    window.addEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedDownloadUrl);
+    return () => window.removeEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedDownloadUrl);
+  }, [isLoggedIn, skipLogin]);
+
+  useEffect(() => {
     let cancelled = false;
     const checkLoginStatus = async () => {
       if (skipLogin) return;
@@ -55,6 +88,8 @@ function App() {
         return;
       }
       try {
+        const telegramService = await getTelegramService();
+        telegramService.skipLogin = skipLogin;
         const res = await telegramService.checkAuth();
         if (!cancelled && appStorage.get(sessionKey) === savedSession) {
           setIsLoggedIn(res.isAuthorized);
@@ -83,6 +118,8 @@ function App() {
     setIsLoading(true);
     setError("");
     try {
+      const telegramService = await getTelegramService();
+      telegramService.skipLogin = skipLogin;
       const res = await telegramService.sendCode(fullPhone);
       if (res.success && res.phoneCodeHash) {
         setPhoneCodeHash(res.phoneCodeHash);
@@ -102,6 +139,8 @@ function App() {
     setError("");
     const fullPhone = countryCode + phone;
     try {
+      const telegramService = await getTelegramService();
+      telegramService.skipLogin = skipLogin;
       const res = await telegramService.signIn(fullPhone, phoneCodeHash, code);
       if (res.success) {
         appStorage.remove(SKIP_LOGIN_KEY);
@@ -132,7 +171,8 @@ function App() {
     window.location.reload();
   };
 
-  const handleTelegramLoginRequest = () => {
+  const handleTelegramLoginRequest = async () => {
+    const telegramService = await getTelegramService();
     telegramService.resetSession();
     appStorage.remove(SKIP_LOGIN_KEY);
     setSkipLogin(false);

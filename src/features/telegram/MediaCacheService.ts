@@ -1,4 +1,5 @@
 import { get, set, del, clear } from 'idb-keyval';
+import { debugLog, debugWarn } from '../../shared/debug/logger';
 
 export interface CacheItemInfo {
   key: string;
@@ -25,7 +26,7 @@ export class MediaCacheService {
       const obj = Object.fromEntries(this.registry.entries());
       await set('cache_registry', obj);
     } catch (e) {
-      console.warn("Failed to save cache registry", e);
+      debugWarn("Failed to save cache registry", e);
     }
   }
 
@@ -41,7 +42,7 @@ export class MediaCacheService {
         await this.saveRegistry();
       }
     } catch (e) {
-      console.warn("Failed to load cache registry, starting empty", e);
+      debugWarn("Failed to load cache registry, starting empty", e);
       this.registry = new Map();
     }
     this.registryLoaded = true;
@@ -103,7 +104,7 @@ export class MediaCacheService {
         return url;
       }
     } catch (e) {
-      console.warn("Failed to get media from IndexedDB cache", e);
+      debugWarn("Failed to get media from IndexedDB cache", e);
     }
 
     return null;
@@ -124,7 +125,7 @@ export class MediaCacheService {
         await set(`${key}_mime`, mimeType);
       }
     } catch (e) {
-      console.warn("Error initiating IDB save", e);
+      debugWarn("Error initiating IDB save", e);
     }
 
     // Create Blob and save to Memory Cache
@@ -146,7 +147,7 @@ export class MediaCacheService {
     await this.saveRegistry();
 
     // Evict items if registry size exceeds the maximum limit
-    this.evictIfNeeded().catch(e => console.warn("Failed to evict cache", e));
+    this.evictIfNeeded().catch(e => debugWarn("Failed to evict cache", e));
 
     return url;
   }
@@ -161,7 +162,7 @@ export class MediaCacheService {
         return this.toArrayBuffer(buffer);
       }
     } catch (e) {
-      console.warn("Failed to get media buffer from IndexedDB", e);
+      debugWarn("Failed to get media buffer from IndexedDB", e);
     }
     return null;
   }
@@ -218,7 +219,7 @@ export class MediaCacheService {
       });
       await this.saveRegistry();
     } catch (e) {
-      console.warn("Error saving messages cache", e);
+      debugWarn("Error saving messages cache", e);
     }
   }
 
@@ -267,7 +268,7 @@ export class MediaCacheService {
       await this.evictIfNeeded();
       return true;
     } catch (e) {
-      console.warn("Failed to save cache settings", e);
+      debugWarn("Failed to save cache settings", e);
       return false;
     }
   }
@@ -315,7 +316,7 @@ export class MediaCacheService {
     // Re-save settings and registry
     await set('cache_settings', settings);
     await this.saveRegistry();
-    console.log("[MediaCacheService] Cache cleared successfully.");
+    debugLog("[MediaCacheService] Cache cleared successfully.");
   }
 
   // --- LRU Eviction ---
@@ -335,12 +336,12 @@ export class MediaCacheService {
       .filter(item => item.type === 'media')
       .sort((a, b) => a.lastAccessed - b.lastAccessed);
 
-    console.log(`[MediaCacheService] Eviction required: totalSize=${totalSize} bytes, limit=${settings.maxCacheSize} bytes.`);
+    debugLog(`[MediaCacheService] Eviction required: totalSize=${totalSize} bytes, limit=${settings.maxCacheSize} bytes.`);
 
     for (const item of mediaItems) {
       if (totalSize <= settings.maxCacheSize) break;
 
-      console.log(`[MediaCacheService] Evicting cached media: ${item.key} (size=${item.size} bytes)`);
+      debugLog(`[MediaCacheService] Evicting cached media: ${item.key} (size=${item.size} bytes)`);
       await del(item.key);
       await del(`${item.key}_mime`);
       

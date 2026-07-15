@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Play, SpeakerSlash, SpeakerHigh, ImageSquare, FilmStrip, DownloadSimple } from "@phosphor-icons/react";
 import { ContextMenu } from './ContextMenu';
 import { telegramService } from '../features/telegram/TelegramService';
+import { debugLog, debugWarn } from '../shared/debug/logger';
 
 interface Props {
   chatId: string;
@@ -45,7 +46,7 @@ const getVideoDebugState = (video: HTMLVideoElement | null) => {
 };
 
 const logVideoEvent = (label: string, video: HTMLVideoElement | null, context: Record<string, any>) => {
-  console.log(`[MessageMedia] ${label}`, {
+  debugLog(`[MessageMedia] ${label}`, {
     ...context,
     video: getVideoDebugState(video),
   });
@@ -169,12 +170,12 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
         if (activeIsVideo) {
           setMediaStage('streaming');
           const res = await telegramService.getMessageMediaStream({ chatId, messageId: activeMessageId });
-          console.log(`[MessageMedia] Lightbox stream request result for ${chatId}/${activeMessageId}`, res);
+          debugLog(`[MessageMedia] Lightbox stream request result for ${chatId}/${activeMessageId}`, res);
           if (isMounted && res.success && res.streamUrl) {
             setActiveStreamUrl(res.streamUrl);
             setActiveFullSrc(null);
           } else {
-            console.warn(`[MessageMedia] Lightbox stream request failed for ${chatId}/${activeMessageId}`, res);
+            debugWarn(`[MessageMedia] Lightbox stream request failed for ${chatId}/${activeMessageId}`, res);
           }
         } else {
           const res = await telegramService.getMessageMediaFile({ chatId, messageId: activeMessageId });
@@ -244,7 +245,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     e.stopPropagation();
     
     if (inlineStreamUrl) {
-      console.log(`[MessageMedia] Reusing inline stream URL for ${chatId}/${messageId}: ${inlineStreamUrl}`);
+      debugLog(`[MessageMedia] Reusing inline stream URL for ${chatId}/${messageId}: ${inlineStreamUrl}`);
       setIsInlinePlaying(true);
       if (inlineVideoRef.current) {
         inlineVideoRef.current.play().catch(err => {
@@ -258,12 +259,12 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     setMediaStage('streaming');
     try {
       const res = await telegramService.getMessageMediaStream({ chatId, messageId });
-      console.log(`[MessageMedia] Inline stream request result for ${chatId}/${messageId}`, res);
+      debugLog(`[MessageMedia] Inline stream request result for ${chatId}/${messageId}`, res);
       if (res.success && res.streamUrl) {
         setInlineStreamUrl(res.streamUrl);
         setIsInlinePlaying(true);
       } else {
-        console.warn(`[MessageMedia] Inline stream request failed for ${chatId}/${messageId}`, res);
+        debugWarn(`[MessageMedia] Inline stream request failed for ${chatId}/${messageId}`, res);
       }
     } catch (err) {
       console.error(`[MessageMedia] Inline stream request threw for ${chatId}/${messageId}`, err);
@@ -288,7 +289,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     try {
       const res = await telegramService.saveMessageMediaFile({ chatId, messageId: activeMessageId, downloadMeta, saveAs });
       if (!res?.success && !res?.canceled) {
-        console.warn('[MessageMedia] Failed to save media', res);
+        debugWarn('[MessageMedia] Failed to save media', res);
       }
     } catch (e) {
       console.error(e);

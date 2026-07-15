@@ -11,6 +11,17 @@ node_modules
 dist
 dist-ssr
 *.local
+*.apk
+*.aab
+f485ff55-fdbb-4396-b2ae-4897befaaca7.png
+.env
+.env.*
+!.env.example
+
+# Android signing secrets
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/*.jks
+src-tauri/gen/android/*.keystore
 
 # Editor directories and files
 .vscode/*

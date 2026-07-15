@@ -14,90 +14,9 @@ import { updateTwitterProfileChat } from './TwitterFakeChatStore';
 import { getStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
 import { writeClipboardText } from '../../shared/platform/clipboard';
-
-const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '😢', '🎉', '🙏', '👌', '💯', '🤣', '🤩', '🤮', '💩', '🖕', '😈'];
-
-const TOPIC_ICON_COLORS = [
-  { label: 'Vermelho', value: 16711680, css: '#ff4444' },
-  { label: 'Laranja', value: 16744272, css: '#ff9010' },
-  { label: 'Violeta', value: 7322096, css: '#6f48eb' },
-  { label: 'Verde', value: 528304, css: '#00a152' },
-  { label: 'Ciano', value: 3284671, css: '#32b3ff' },
-  { label: 'Rosa', value: 14318475, css: '#da8aff' },
-];
-
-const PLASMA_COLORS = ['rose', 'violet', 'cyan', 'amber', 'emerald', 'fuchsia', 'sky'] as const;
-type PlasmaColor = typeof PLASMA_COLORS[number];
-
-const hashColor = (str: string | undefined | null): PlasmaColor => {
-  if (!str || typeof str !== 'string') return 'cyan';
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) & 0x7fffffff;
-  return PLASMA_COLORS[Math.abs(h) % PLASMA_COLORS.length];
-};
-
-interface Chat {
-  id: string;
-  title: string;
-  isGroup: boolean;
-  isChannel: boolean;
-  isMember?: boolean;
-  isInvite?: boolean;
-  inviteHash?: string;
-  about?: string;
-  participantsCount?: number;
-  hasTopics?: boolean;
-  isFakeTwitter?: boolean;
-  lastMessageText?: string;
-  lastMessageDate?: number;
-  unreadCount?: number;
-  lastMessageHasMedia?: boolean;
-  lastMessageIsVideo?: boolean;
-  lastMessageIsPhoto?: boolean;
-}
-
-interface ChatFullInfo {
-  about?: string;
-  participantsCount?: number;
-  username?: string | null;
-  pinnedMsgId?: number | null;
-}
-
-interface ForumTopic {
-  id: number;
-  title: string;
-  topMessageId: number;
-  unreadCount: number;
-  closed: boolean;
-  pinned: boolean;
-}
-
-interface Message {
-  id: number;
-  text: string;
-  date: number;
-  out: boolean;
-  senderId: string | null;
-  senderName?: string | null;
-  hasMedia: boolean;
-  isPhoto: boolean;
-  isVideo: boolean;
-  videoDuration?: number | null;
-  mediaSize?: number | null;
-  reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
-  is_deleted?: boolean;
-  is_edited?: boolean;
-  replyToMsgId?: number | null;
-  groupedId?: string | null;
-  topicId?: number | null;
-}
-
-interface TimelineItem {
-  type: 'message' | 'album';
-  id: number;
-  message: Message;
-  messages?: Message[];
-}
+import { debugLog, debugWarn } from '../../shared/debug/logger';
+import { QUICK_REACTIONS, TOPIC_ICON_COLORS, hashColor } from './TelegramDashboardConstants';
+import type { Chat, ChatFullInfo, ForumTopic, Message, TimelineItem } from './TelegramDashboardTypes';
 
 const getTimelineItems = (msgs: Message[]): TimelineItem[] => {
   const items: TimelineItem[] = [];
@@ -1098,6 +1017,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
+  const handleForwardMessage = async (msg: Message) => {
+    if (!selectedChat || isSending) return;
+    const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+
+    setIsSending(true);
+    try {
+      const res = await telegramService.forwardMessage({
+        chatId: selectedChat.id,
+        messageId: msg.id,
+        topicId,
+      });
+
+      if (res.success) {
+        shouldScrollToBottomRef.current = true;
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true });
+      } else {
+        setError(res.error || 'Falha ao encaminhar mensagem.');
+      }
+    } catch (e: any) {
+      setError(e.message || 'Erro ao encaminhar mensagem.');
+    } finally {
+      setIsSending(false);
+      setMsgContextMenu(null);
+      setImgContextMenu(null);
+    }
+  };
+
   const handleReact = useCallback(async (msg: Message, emoji: string) => {
     setEmojiPickerMsgId(null);
     if (!selectedChat) return;
@@ -1143,7 +1089,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [emojiPickerMsgId]);
 
   const triggerJumpScroll = (targetMsgId: number, virtuosoIdx: number) => {
-    console.log('[TelegramEnchanted] Triggering jump scroll to index:', virtuosoIdx, 'for msg ID:', targetMsgId);
+    debugLog('[TelegramEnchanted] Triggering jump scroll to index:', virtuosoIdx, 'for msg ID:', targetMsgId);
     if (virtuosoRef.current) {
       virtuosoRef.current.scrollToIndex({ index: virtuosoIdx, align: 'center' });
     }
@@ -1153,7 +1099,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     const pollAndAlign = () => {
       const domEl = document.getElementById(targetId);
       if (domEl) {
-        console.log('[TelegramEnchanted] Found target in DOM. Scrolling into center view.');
+        debugLog('[TelegramEnchanted] Found target in DOM. Scrolling into center view.');
         domEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
         
         // Highlight flash effect
@@ -1172,7 +1118,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         if (success || attemptsCount > 60) { // 60 * 50ms = 3000ms max polling
           clearInterval(intervalId);
           if (!success) {
-            console.warn('[TelegramEnchanted] Polling failed to find target in DOM after 3 seconds.');
+            debugWarn('[TelegramEnchanted] Polling failed to find target in DOM after 3 seconds.');
           }
         }
       }, 50);
@@ -1181,11 +1127,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const handleJumpToMessage = async (replyToMsgId: number) => {
     let currentMessages = [...messagesRef.current];
-    console.log('[TelegramEnchanted] Jump to Message triggered. Target replyToMsgId:', replyToMsgId);
-    console.log('[TelegramEnchanted] Total loaded messages:', currentMessages.length);
+    debugLog('[TelegramEnchanted] Jump to Message triggered. Target replyToMsgId:', replyToMsgId);
+    debugLog('[TelegramEnchanted] Total loaded messages:', currentMessages.length);
 
     let originalMsgIdx = currentMessages.findIndex(m => Number(m.id) === Number(replyToMsgId));
-    console.log('[TelegramEnchanted] Message index in array:', originalMsgIdx);
+    debugLog('[TelegramEnchanted] Message index in array:', originalMsgIdx);
 
     if (originalMsgIdx >= 0) {
       // Message already in memory, scroll to it immediately
@@ -1204,7 +1150,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           let newMessages = [...currentMessages];
           
           while (!found && currentOldestId && attempts < 15) {
-            console.log('[TelegramEnchanted] Target message not found in local feed. Loading older chunk... Attempt:', attempts + 1);
+            debugLog('[TelegramEnchanted] Target message not found in local feed. Loading older chunk... Attempt:', attempts + 1);
             const res = await telegramService.getMessages({
               chatId: selectedChat!.id,
               limit: PAGE_SIZE,
@@ -1244,7 +1190,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           setLoadingMessages(false);
         }
       } else {
-        console.warn('[TelegramEnchanted] Target message not found in local feed and cannot load older.');
+        debugWarn('[TelegramEnchanted] Target message not found in local feed and cannot load older.');
         setError('A mensagem original está muito antiga.');
       }
     }
@@ -2057,7 +2003,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                 >↩</button>
                                 <button
                                   type="button" className="icon-btn" title="Encaminhar"
-                                  onClick={(e) => { e.stopPropagation(); /* TODO: forward */ }}
+                                  onClick={(e) => { e.stopPropagation(); handleForwardMessage(msg); }}
                                 >→</button>
                                 {item.type === 'album' ? (
                                   <button
@@ -2439,6 +2385,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               icon: <IcoCopy />,
               onClick: () => { writeClipboardText(msgContextMenu.message.text); setMsgContextMenu(null); },
             }] : []),
+            {
+              label: 'Encaminhar',
+              icon: <IcoForward />,
+              onClick: () => handleForwardMessage(msgContextMenu.message),
+            },
             ...(msgContextMenu.message.is_edited ? [{ separator: true as const }] : []),
             ...(msgContextMenu.message.is_edited ? [{
               label: 'Ver mensagem original',
@@ -2540,7 +2491,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             {
               label: 'Encaminhar',
               icon: <IcoForward />,
-              onClick: () => { },
+              onClick: () => handleForwardMessage(imgContextMenu.msg),
             },
           ]}
           onClose={() => setImgContextMenu(null)}

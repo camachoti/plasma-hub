@@ -1,10 +1,11 @@
+import { lazy, Suspense } from "react";
 import { At, ChatCircle, DownloadSimple, Gear as SettingsIcon } from "@phosphor-icons/react";
-import { Dashboard } from "../features/telegram/Dashboard";
-import { Downloads } from "../features/telegram/Downloads";
-import { Settings as TelegramSettings } from "../features/telegram/Settings";
-import { TwitterLibrary } from "../features/twitter/TwitterLibrary";
 import { runtimeCapabilities } from "../shared/platform/runtime";
-import { RuntimeCompatibilityNotice } from "./RuntimeCompatibilityNotice";
+
+const Dashboard = lazy(() => import("../features/telegram/Dashboard").then(module => ({ default: module.Dashboard })));
+const Downloads = lazy(() => import("../features/telegram/Downloads").then(module => ({ default: module.Downloads })));
+const TelegramSettings = lazy(() => import("../features/telegram/Settings").then(module => ({ default: module.Settings })));
+const TwitterLibrary = lazy(() => import("../features/twitter/TwitterLibrary").then(module => ({ default: module.TwitterLibrary })));
 
 export type AppTab = "telegram" | "downloads" | "twitter";
 
@@ -31,6 +32,8 @@ export function AppShell({
   onSettingsClose,
   onTelegramLoginRequest,
 }: AppShellProps) {
+  const fallback = <div className="app-loading">Carregando...</div>;
+
   return (
     <div
       className="app-container"
@@ -71,39 +74,40 @@ export function AppShell({
       </div>
 
       <div className="main-content" style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <RuntimeCompatibilityNotice />
-        {activeTab === "telegram" && (
-          <div style={{ width: "100%", height: "100%" }}>
-            <Dashboard skipLogin={skipLogin} onTelegramLoginRequest={onTelegramLoginRequest} />
-          </div>
-        )}
-        {activeTab === "downloads" && (
-          <div style={{ width: "100%", height: "100%" }}>
-            <Downloads />
-          </div>
-        )}
-        {activeTab === "twitter" && (
-          <div style={{ width: "100%", height: "100%" }}>
-            <TwitterLibrary />
-          </div>
-        )}
-        {isSettingsOpen && (
-          <div style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            background: "rgba(0,0,0,0.6)",
-            backdropFilter: "blur(4px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 100,
-          }}>
-            <TelegramSettings onClose={onSettingsClose} />
-          </div>
-        )}
+        <Suspense fallback={fallback}>
+          {activeTab === "telegram" && (
+            <div style={{ width: "100%", height: "100%" }}>
+              <Dashboard skipLogin={skipLogin} onTelegramLoginRequest={onTelegramLoginRequest} />
+            </div>
+          )}
+          {activeTab === "downloads" && (
+            <div style={{ width: "100%", height: "100%" }}>
+              <Downloads />
+            </div>
+          )}
+          {activeTab === "twitter" && (
+            <div style={{ width: "100%", height: "100%" }}>
+              <TwitterLibrary />
+            </div>
+          )}
+          {isSettingsOpen && (
+            <div style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              background: "rgba(0,0,0,0.6)",
+              backdropFilter: "blur(4px)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 100,
+            }}>
+              <TelegramSettings onClose={onSettingsClose} />
+            </div>
+          )}
+        </Suspense>
       </div>
     </div>
   );

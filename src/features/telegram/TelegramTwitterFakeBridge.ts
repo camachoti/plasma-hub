@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
+import { debugLog } from '../../shared/debug/logger';
 import { mediaCache } from './MediaCacheService';
 import {
   findTwitterFakeMessage,
@@ -35,7 +36,7 @@ export class TelegramTwitterFakeBridge {
 
       this.emitMediaProgress({ chatId, messageId, progress: 1, stage: 'downloading' });
 
-      console.log(`[TelegramService] Downloading Twitter/X media from: ${message.url}`);
+      debugLog(`[TelegramService] Downloading Twitter/X media from: ${message.url}`);
       const response = await tauriFetch(message.url, {
         method: 'GET',
         headers: {

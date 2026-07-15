@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { debugLog, isDebugLoggingEnabled } from "../shared/debug/logger";
 import { canUseServiceWorker } from "../shared/platform/serviceWorker";
 
 function serializeLogArg(arg: unknown) {
@@ -15,6 +16,8 @@ function serializeLogArg(arg: unknown) {
 
 export function useWebviewLogger() {
   useEffect(() => {
+    if (!isDebugLoggingEnabled()) return;
+
     const sendLog = (level: string, ...args: unknown[]) => {
       const message = args.map(serializeLogArg).join(" ");
 
@@ -46,14 +49,14 @@ export function useWebviewLogger() {
       sendLog("ERROR", ...args);
     };
 
-    console.log("Webview logger initialized!");
+    debugLog("Webview logger initialized!");
 
     if (canUseServiceWorker()) {
       const swListener = (event: MessageEvent) => {
         sendLog("SW_MSG", event.data);
       };
       navigator.serviceWorker.addEventListener("message", swListener);
-      console.log("Service Worker message listener registered");
+      debugLog("Service Worker message listener registered");
       return () => {
         console.log = originalLog;
         console.warn = originalWarn;

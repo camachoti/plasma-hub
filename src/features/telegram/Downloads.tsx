@@ -5,6 +5,15 @@ import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
 import type { MediaInfo } from '../downloader/types';
 import { getDownloadDir, joinPath, openSystemPath, revealSystemItem } from '../../shared/platform/files';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { SHARED_DOWNLOAD_URL_EVENT, takePendingSharedDownloadUrl } from '../../shared/platform/sharedDownloadIntent';
+
+function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['video'][number]) {
+  if (!format || format.id === 'na' || format.id === 'web-limit') return false;
+  if (media.platform === 'youtube' && runtimeCapabilities.isAndroid && format.hasAudio === false) return false;
+  if (format.url) return true;
+  return media.platform === 'youtube' && Boolean(media.originalUrl) && runtimeCapabilities.supportsNativeYoutube;
+}
 
 export const Downloads: React.FC = () => {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
@@ -24,10 +33,44 @@ export const Downloads: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    const applySharedUrl = (sharedUrl?: string) => {
+      if (!sharedUrl) return;
+      setUrl(sharedUrl);
+      setError(null);
+      setMedia(null);
+      window.setTimeout(() => {
+        setAnalyzing(true);
+        analyzeUrl(sharedUrl)
+          .then((info) => {
+            setMedia(info);
+            const formats = [...info.formats.video, ...info.formats.audio];
+            const firstDownloadable = formats.find(f => canDownloadFormat(info, f));
+            setSelectedFormat(firstDownloadable?.id || formats[0]?.id || '');
+          })
+          .catch((err: any) => setError(err.message || 'Erro ao analisar URL compartilhada'))
+          .finally(() => setAnalyzing(false));
+      }, 0);
+    };
+
+    applySharedUrl(takePendingSharedDownloadUrl() || undefined);
+
+    const onSharedUrl = (event: Event) => {
+      const sharedUrl = (event as CustomEvent<{ url?: string }>).detail?.url || takePendingSharedDownloadUrl();
+      if (sharedUrl) takePendingSharedDownloadUrl();
+      applySharedUrl(sharedUrl || undefined);
+    };
+
+    window.addEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedUrl);
+    return () => window.removeEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedUrl);
+  }, []);
+
+  useEffect(() => {
     if (media) {
-      const currentValid = media.formats.video.some(f => f.id === selectedFormat) || media.formats.audio.some(f => f.id === selectedFormat);
-      if (!currentValid && media.formats.video.length > 0) {
-        setSelectedFormat(media.formats.video[0].id);
+      const formats = [...media.formats.video, ...media.formats.audio];
+      const currentValid = formats.some(f => f.id === selectedFormat && canDownloadFormat(media, f));
+      if (!currentValid) {
+        const nextFormat = formats.find(f => canDownloadFormat(media, f));
+        setSelectedFormat(nextFormat?.id || formats[0]?.id || '');
       }
     }
   }, [media, selectedFormat]);
@@ -40,11 +83,9 @@ export const Downloads: React.FC = () => {
     try {
       const info = await analyzeUrl(url.trim());
       setMedia(info);
-      if (info.formats.video.length > 0) {
-        setSelectedFormat(info.formats.video[0].id);
-      } else if (info.formats.audio.length > 0) {
-        setSelectedFormat(info.formats.audio[0].id);
-      }
+      const formats = [...info.formats.video, ...info.formats.audio];
+      const firstDownloadable = formats.find(f => canDownloadFormat(info, f));
+      setSelectedFormat(firstDownloadable?.id || formats[0]?.id || '');
     } catch (err: any) {
       setError(err.message || 'Erro ao analisar URL');
     } finally {
@@ -54,11 +95,23 @@ export const Downloads: React.FC = () => {
 
   const handleDownload = () => {
     if (!media || !selectedFormat) return;
+    const selected = [...media.formats.video, ...media.formats.audio].find(f => f.id === selectedFormat);
+    if (!selected || !canDownloadFormat(media, selected)) {
+      setError(runtimeCapabilities.isAndroid && selected?.hasAudio === false
+        ? 'Este formato separa video e audio. Escolha um formato com audio no Android.'
+        : 'Este formato precisa do backend nativo do app.');
+      return;
+    }
+
     const mode = media.formats.video.some(f => f.id === selectedFormat) ? 'video' : 'audio';
     downloadMedia(media, mode, selectedFormat);
     setUrl('');
     setMedia(null);
   };
+
+  const selectedDownloadable = media
+    ? canDownloadFormat(media, [...media.formats.video, ...media.formats.audio].find(f => f.id === selectedFormat))
+    : false;
 
   const handleOpenFolder = async (item?: DownloadItem) => {
     try {
@@ -291,20 +344,20 @@ export const Downloads: React.FC = () => {
                 >
                   <optgroup label="Vídeo">
                     {media.formats.video.map(f => (
-                      <option key={f.id} value={f.id} disabled={f.id === 'na' || f.id === 'web-limit'}>
+                      <option key={f.id} value={f.id} disabled={!canDownloadFormat(media, f)}>
                         {f.label} {f.size !== '—' ? `(${f.size})` : ''}
                       </option>
                     ))}
                   </optgroup>
                   <optgroup label="Áudio">
                     {media.formats.audio.map(f => (
-                      <option key={f.id} value={f.id} disabled={f.id === 'na' || f.id === 'web-limit'}>
+                      <option key={f.id} value={f.id} disabled={!canDownloadFormat(media, f)}>
                         {f.label} {f.size !== '—' ? `(${f.size})` : ''}
                       </option>
                     ))}
                   </optgroup>
                 </select>
-                <button className="download-btn" onClick={handleDownload}>
+                <button className="download-btn" onClick={handleDownload} disabled={!selectedDownloadable}>
                   <CloudArrowDown size={18} /> Confirmar
                 </button>
               </div>

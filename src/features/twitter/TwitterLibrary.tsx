@@ -113,7 +113,7 @@ export function TwitterLibrary() {
   async function handleProfileDownload() {
     if (!profile || profile.mediaUrls.length === 0) return;
     if (!runtimeCapabilities.supportsNativeTwitter) {
-      setError('Download nativo do Twitter/X ainda não está disponível no Android.');
+      setError('Download nativo do Twitter/X disponível apenas no app Tauri.');
       return;
     }
 
