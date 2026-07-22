@@ -32,7 +32,13 @@ export function AppShell({
   onSettingsClose,
   onTelegramLoginRequest,
 }: AppShellProps) {
-  const fallback = <div className="app-loading">Carregando...</div>;
+  const fallback = (
+    <div className="app-loading">
+      <div className="loader-surface" role="status" aria-label="Carregando">
+        <span className="modern-loader" />
+      </div>
+    </div>
+  );
 
   return (
     <div

@@ -46,6 +46,7 @@ export interface Message {
   isVideo: boolean;
   videoDuration?: number | null;
   mediaSize?: number | null;
+  thumbnailUrl?: string | null;
   reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
   is_deleted?: boolean;
   is_edited?: boolean;

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
-import { debugLog } from '../../shared/debug/logger';
+import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { mediaCache } from './MediaCacheService';
 import {
   findTwitterFakeMessage,
@@ -56,7 +56,7 @@ export class TelegramTwitterFakeBridge {
       this.emitMediaProgress({ chatId, messageId, progress: 100, stage: 'ready' });
       return { success: true, filePath, streamUrl: filePath };
     } catch (error: any) {
-      console.error("[TelegramService] Failed to download Twitter/X media:", error);
+      debugWarn("[TelegramService] Failed to download Twitter/X media:", error);
       this.emitMediaProgress({ chatId, messageId, progress: 0, stage: 'failed' });
       return { success: false, error: error.message || String(error) };
     }

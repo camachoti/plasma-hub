@@ -1,5 +1,7 @@
 import { get, set, del, clear } from 'idb-keyval';
 import { debugLog, debugWarn } from '../../shared/debug/logger';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { invokeCommand } from '../../shared/platform/tauri';
 
 export interface CacheItemInfo {
   key: string;
@@ -8,12 +10,44 @@ export interface CacheItemInfo {
   type: 'avatar' | 'media' | 'message';
   addedAt: number;
   lastAccessed: number;
+  nativeFilePath?: string;
 }
 
 export interface CacheSettings {
   maxCacheSize: number;
   avatarRefreshHours: number;
   downloadWorkers: number;
+}
+
+export interface MessageCacheMeta {
+  lastFetchedAt?: number;
+}
+
+export type MediaAssetState = 'empty' | 'partial' | 'complete' | 'native';
+
+export interface MediaAssetSegment {
+  offset: number;
+  length: number;
+}
+
+export interface MediaAssetMeta {
+  key: string;
+  state: MediaAssetState;
+  totalBytes?: number;
+  downloadedBytes?: number;
+  mimeType?: string;
+  fileName?: string;
+  nativeFilePath?: string;
+  completedAt?: number;
+  updatedAt?: number;
+  segments?: MediaAssetSegment[];
+}
+
+export interface MediaDownloadProgress {
+  percent: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  stage?: string;
 }
 
 export class MediaCacheService {
@@ -58,11 +92,16 @@ export class MediaCacheService {
     // 1. Check Memory Cache (instant)
     if (this.memoryCache.has(key)) {
       const info = this.registry.get(key);
-      if (info) {
-        info.lastAccessed = Date.now();
-        this.saveRegistry().catch(() => {});
+      if (mimeType && info?.mimeType && info.mimeType !== mimeType) {
+        URL.revokeObjectURL(this.memoryCache.get(key)!);
+        this.memoryCache.delete(key);
+      } else {
+        if (info) {
+          info.lastAccessed = Date.now();
+          this.saveRegistry().catch(() => {});
+        }
+        return this.memoryCache.get(key)!;
       }
-      return this.memoryCache.get(key)!;
     }
 
     // 2. Check IndexedDB (persistent)
@@ -87,6 +126,10 @@ export class MediaCacheService {
         // Update registry metadata
         if (info) {
           info.lastAccessed = Date.now();
+          if (mimeType && info.mimeType !== resolvedMimeType) {
+            info.mimeType = resolvedMimeType;
+            set(`${key}_mime`, resolvedMimeType).catch(() => {});
+          }
         } else {
           // If missing in registry (e.g. legacy cached item), add it
           const size = normalizedBuffer.byteLength;
@@ -99,7 +142,7 @@ export class MediaCacheService {
             lastAccessed: Date.now()
           });
         }
-        await this.saveRegistry();
+        this.saveRegistry().catch(() => {});
 
         return url;
       }
@@ -108,6 +151,11 @@ export class MediaCacheService {
     }
 
     return null;
+  }
+
+  async getCacheItemInfo(key: string): Promise<CacheItemInfo | null> {
+    await this.ensureRegistryLoaded();
+    return this.registry.get(key) || null;
   }
 
   /**
@@ -145,11 +193,41 @@ export class MediaCacheService {
       lastAccessed: Date.now()
     });
     await this.saveRegistry();
+    await this.saveMediaAssetMeta(key, {
+      state: 'complete',
+      totalBytes: size,
+      downloadedBytes: size,
+      mimeType: resolvedMime,
+      completedAt: Date.now(),
+      segments: [],
+    });
 
     // Evict items if registry size exceeds the maximum limit
     this.evictIfNeeded().catch(e => debugWarn("Failed to evict cache", e));
 
     return url;
+  }
+
+  async saveNativeFileReference(key: string, nativeFilePath: string, mimeType?: string): Promise<void> {
+    await this.ensureRegistryLoaded();
+
+    const existing = this.registry.get(key);
+    this.registry.set(key, {
+      key,
+      size: existing?.size ?? 0,
+      mimeType: mimeType || existing?.mimeType || 'application/octet-stream',
+      type: key.startsWith('avatar_') ? 'avatar' : 'media',
+      addedAt: existing?.addedAt ?? Date.now(),
+      lastAccessed: Date.now(),
+      nativeFilePath,
+    });
+    await this.saveMediaAssetMeta(key, {
+      state: 'native',
+      mimeType: mimeType || existing?.mimeType || 'application/octet-stream',
+      nativeFilePath,
+      completedAt: Date.now(),
+    });
+    await this.saveRegistry();
   }
 
   /**
@@ -181,9 +259,308 @@ export class MediaCacheService {
     return new Uint8Array(value || []).buffer;
   }
 
+  // --- Media Asset Cache ---
+  private mediaAssetMetaKey(key: string) {
+    return `${key}_asset_meta`;
+  }
+
+  private mediaSegmentKey(key: string, offset: number, length: number) {
+    return `${key}_segment_${offset}_${length}`;
+  }
+
+  private canUseNativeMessageCache() {
+    return runtimeCapabilities.isTauri;
+  }
+
+  private async getNativeMessages(cacheKey: string): Promise<{ messages: any[]; meta: MessageCacheMeta } | null> {
+    if (!this.canUseNativeMessageCache()) return null;
+    try {
+      const result = await invokeCommand<{ success?: boolean; messages?: any[]; meta?: MessageCacheMeta }>(
+        'telegram_message_cache_get',
+        { cacheKey },
+      );
+      if (result?.success) {
+        return {
+          messages: Array.isArray(result.messages) ? result.messages : [],
+          meta: result.meta || {},
+        };
+      }
+    } catch (error) {
+      debugWarn('[MediaCacheService] Native message cache get failed:', error);
+    }
+    return null;
+  }
+
+  private async getNativeMessageMeta(cacheKey: string): Promise<MessageCacheMeta | null> {
+    if (!this.canUseNativeMessageCache()) return null;
+    try {
+      return await invokeCommand<MessageCacheMeta>('telegram_message_cache_meta', { cacheKey });
+    } catch (error) {
+      debugWarn('[MediaCacheService] Native message cache meta failed:', error);
+      return null;
+    }
+  }
+
+  private async saveNativeMessages(cacheKey: string, messages: any[], meta?: MessageCacheMeta): Promise<boolean> {
+    if (!this.canUseNativeMessageCache()) return false;
+    try {
+      const result = await invokeCommand<{ success?: boolean }>('telegram_message_cache_save', {
+        cacheKey,
+        messages,
+        meta: meta || null,
+      });
+      return Boolean(result?.success);
+    } catch (error) {
+      debugWarn('[MediaCacheService] Native message cache save failed:', error);
+      return false;
+    }
+  }
+
+  async getSharedMediaMessages(cacheKey: string, limit = 12): Promise<any[]> {
+    if (this.canUseNativeMessageCache()) {
+      try {
+        const result = await invokeCommand<{ success?: boolean; media?: any[] }>(
+          'telegram_message_cache_shared_media',
+          { cacheKey, limit },
+        );
+        if (result?.success && Array.isArray(result.media)) {
+          return result.media;
+        }
+      } catch (error) {
+        debugWarn('[MediaCacheService] Native shared media cache failed:', error);
+      }
+    }
+
+    const messages = await this.getMessages(cacheKey);
+    return messages
+      .filter(message => message?.hasMedia)
+      .slice(-limit)
+      .map(message => ({
+        id: message.id,
+        isVideo: Boolean(message.isVideo),
+        mediaSize: message.mediaSize ?? null,
+      }));
+  }
+
+  private normalizeSegments(segments: MediaAssetSegment[] = []): MediaAssetSegment[] {
+    return segments
+      .map(segment => ({
+        offset: Math.max(0, Number(segment.offset) || 0),
+        length: Math.max(0, Number(segment.length) || 0),
+      }))
+      .filter(segment => segment.length > 0)
+      .sort((a, b) => a.offset - b.offset || a.length - b.length);
+  }
+
+  private coverageBytes(segments: MediaAssetSegment[] = []) {
+    const sorted = this.normalizeSegments(segments);
+    let total = 0;
+    let coverageStart = -1;
+    let coverageEnd = -1;
+
+    for (const segment of sorted) {
+      const start = segment.offset;
+      const end = segment.offset + segment.length;
+      if (coverageStart < 0) {
+        coverageStart = start;
+        coverageEnd = end;
+        continue;
+      }
+      if (start <= coverageEnd) {
+        coverageEnd = Math.max(coverageEnd, end);
+      } else {
+        total += coverageEnd - coverageStart;
+        coverageStart = start;
+        coverageEnd = end;
+      }
+    }
+
+    if (coverageStart >= 0) total += coverageEnd - coverageStart;
+    return total;
+  }
+
+  async getMediaAssetMeta(key: string): Promise<MediaAssetMeta> {
+    await this.ensureRegistryLoaded();
+
+    try {
+      const saved = await get<MediaAssetMeta>(this.mediaAssetMetaKey(key));
+      if (saved) {
+        return {
+          ...saved,
+          key,
+          state: saved.state || 'empty',
+          segments: this.normalizeSegments(saved.segments),
+        };
+      }
+    } catch (e) {
+      debugWarn("Failed to get media asset meta", e);
+    }
+
+    const info = this.registry.get(key);
+    if (info?.nativeFilePath) {
+      return {
+        key,
+        state: 'native',
+        totalBytes: info.size || undefined,
+        downloadedBytes: info.size || undefined,
+        mimeType: info.mimeType,
+        nativeFilePath: info.nativeFilePath,
+        completedAt: info.addedAt,
+        updatedAt: info.lastAccessed,
+        segments: [],
+      };
+    }
+    if (info) {
+      return {
+        key,
+        state: 'complete',
+        totalBytes: info.size,
+        downloadedBytes: info.size,
+        mimeType: info.mimeType,
+        completedAt: info.addedAt,
+        updatedAt: info.lastAccessed,
+        segments: [],
+      };
+    }
+
+    return { key, state: 'empty', downloadedBytes: 0, segments: [] };
+  }
+
+  async saveMediaAssetMeta(key: string, meta: Partial<MediaAssetMeta>): Promise<MediaAssetMeta> {
+    const current = await this.getMediaAssetMeta(key);
+    const segments = meta.segments
+      ? this.normalizeSegments(meta.segments)
+      : this.normalizeSegments(current.segments);
+    const downloadedBytes = meta.downloadedBytes ?? this.coverageBytes(segments) ?? current.downloadedBytes;
+    const updated: MediaAssetMeta = {
+      ...current,
+      ...meta,
+      key,
+      state: meta.state || current.state || 'empty',
+      downloadedBytes,
+      segments,
+      updatedAt: Date.now(),
+    };
+
+    await set(this.mediaAssetMetaKey(key), updated);
+    if (updated.state !== 'empty') {
+      const existing = this.registry.get(key);
+      this.registry.set(key, {
+        key,
+        size: updated.state === 'complete' || updated.state === 'native'
+          ? Number(updated.totalBytes || updated.downloadedBytes || existing?.size || 0)
+          : Number(updated.downloadedBytes || existing?.size || 0),
+        mimeType: updated.mimeType || existing?.mimeType || 'application/octet-stream',
+        type: 'media',
+        addedAt: existing?.addedAt ?? Date.now(),
+        lastAccessed: Date.now(),
+        nativeFilePath: updated.nativeFilePath || existing?.nativeFilePath,
+      });
+      await this.saveRegistry();
+    }
+    return updated;
+  }
+
+  async saveMediaSegment(key: string, offset: number, buffer: ArrayBuffer | Uint8Array | any): Promise<MediaAssetMeta> {
+    await this.ensureRegistryLoaded();
+    const normalizedBuffer = this.toArrayBuffer(buffer);
+    const normalizedOffset = Math.max(0, Number(offset) || 0);
+    const length = normalizedBuffer.byteLength;
+    if (length <= 0) return this.getMediaAssetMeta(key);
+
+    await set(this.mediaSegmentKey(key, normalizedOffset, length), normalizedBuffer);
+    const current = await this.getMediaAssetMeta(key);
+    const segments = this.normalizeSegments([...(current.segments || []), { offset: normalizedOffset, length }]);
+    const downloadedBytes = this.coverageBytes(segments);
+
+    return this.saveMediaAssetMeta(key, {
+      state: 'partial',
+      downloadedBytes,
+      segments,
+    });
+  }
+
+  async getMediaSegment(key: string, offset: number, length: number): Promise<ArrayBuffer | null> {
+    const full = await this.getMediaBuffer(key);
+    const normalizedOffset = Math.max(0, Number(offset) || 0);
+    const normalizedLength = Math.max(0, Number(length) || 0);
+    if (normalizedLength <= 0) return new ArrayBuffer(0);
+    if (full && normalizedOffset + normalizedLength <= full.byteLength) {
+      return full.slice(normalizedOffset, normalizedOffset + normalizedLength);
+    }
+
+    const meta = await this.getMediaAssetMeta(key);
+    const segments = this.normalizeSegments(meta.segments);
+    let cursor = normalizedOffset;
+    const end = normalizedOffset + normalizedLength;
+    const parts: Uint8Array[] = [];
+
+    for (const segment of segments) {
+      const segmentStart = segment.offset;
+      const segmentEnd = segment.offset + segment.length;
+      if (segmentEnd <= cursor) continue;
+      if (segmentStart > cursor) break;
+
+      const segmentBuffer = await get<ArrayBuffer | Uint8Array | any>(this.mediaSegmentKey(key, segment.offset, segment.length));
+      if (!segmentBuffer) break;
+      const bytes = new Uint8Array(this.toArrayBuffer(segmentBuffer));
+      const sliceStart = cursor - segmentStart;
+      const sliceEnd = Math.min(bytes.byteLength, end - segmentStart);
+      if (sliceEnd <= sliceStart) continue;
+
+      parts.push(bytes.slice(sliceStart, sliceEnd));
+      cursor += sliceEnd - sliceStart;
+      if (cursor >= end) break;
+    }
+
+    if (cursor < end) return null;
+
+    const merged = new Uint8Array(normalizedLength);
+    let writeOffset = 0;
+    for (const part of parts) {
+      merged.set(part, writeOffset);
+      writeOffset += part.byteLength;
+    }
+    return merged.buffer;
+  }
+
+  async finalizeMediaSegments(key: string, mimeType?: string): Promise<string | null> {
+    const meta = await this.getMediaAssetMeta(key);
+    const totalBytes = Number(meta.totalBytes || 0);
+    if (totalBytes <= 0) return null;
+
+    const fullBuffer = await this.getMediaSegment(key, 0, totalBytes);
+    if (!fullBuffer || fullBuffer.byteLength < totalBytes) return null;
+
+    const url = await this.saveMedia(key, fullBuffer, mimeType || meta.mimeType);
+    await Promise.all(this.normalizeSegments(meta.segments).map(segment =>
+      del(this.mediaSegmentKey(key, segment.offset, segment.length)).catch(() => {})
+    ));
+    await this.saveMediaAssetMeta(key, {
+      state: 'complete',
+      totalBytes,
+      downloadedBytes: totalBytes,
+      mimeType: mimeType || meta.mimeType,
+      completedAt: Date.now(),
+      segments: [],
+    });
+    return url;
+  }
+
   // --- Message Cache ---
   async getMessages(chatId: string): Promise<any[]> {
     await this.ensureRegistryLoaded();
+
+    const native = await this.getNativeMessages(chatId);
+    if (native) {
+      const key = `msgs_${chatId}`;
+      const info = this.registry.get(key);
+      if (info) {
+        info.lastAccessed = Date.now();
+        this.saveRegistry().catch(() => {});
+      }
+      return native.messages;
+    }
 
     try {
       const msgs = await get<any[]>(`msgs_${chatId}`);
@@ -201,12 +578,32 @@ export class MediaCacheService {
     }
   }
 
-  async saveMessages(chatId: string, messages: any[]): Promise<void> {
+  async getMessagePageMeta(chatId: string): Promise<MessageCacheMeta> {
+    const nativeMeta = await this.getNativeMessageMeta(chatId);
+    if (nativeMeta) return nativeMeta;
+
+    try {
+      return await get<MessageCacheMeta>(`msgs_${chatId}_meta`) || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  async saveMessages(chatId: string, messages: any[], meta?: MessageCacheMeta): Promise<void> {
     await this.ensureRegistryLoaded();
+    const nativeSaved = await this.saveNativeMessages(chatId, messages, meta);
 
     try {
       const key = `msgs_${chatId}`;
-      await set(key, messages);
+      if (!nativeSaved) {
+        await set(key, messages);
+      }
+      if (meta) {
+        const currentMeta = await this.getMessagePageMeta(chatId);
+        if (!nativeSaved) {
+          await set(`${key}_meta`, { ...currentMeta, ...meta });
+        }
+      }
 
       const size = JSON.stringify(messages).length;
       this.registry.set(key, {
@@ -342,6 +739,11 @@ export class MediaCacheService {
       if (totalSize <= settings.maxCacheSize) break;
 
       debugLog(`[MediaCacheService] Evicting cached media: ${item.key} (size=${item.size} bytes)`);
+      const meta = await this.getMediaAssetMeta(item.key);
+      await Promise.all(this.normalizeSegments(meta.segments).map(segment =>
+        del(this.mediaSegmentKey(item.key, segment.offset, segment.length)).catch(() => {})
+      ));
+      await del(this.mediaAssetMetaKey(item.key));
       await del(item.key);
       await del(`${item.key}_mime`);
       

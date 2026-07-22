@@ -4,16 +4,15 @@ import { appStorage } from "../shared/storage/appStorage";
 import { AppShell, type AppTab } from "./AppShell";
 import { LoginScreen } from "./LoginScreen";
 import { useWebviewLogger } from "./useWebviewLogger";
-import { runtimeCapabilities } from "../shared/platform/runtime";
 import {
   SHARED_DOWNLOAD_URL_EVENT,
   queueSharedDownloadUrl,
   takePendingSharedDownloadUrl,
 } from "../shared/platform/sharedDownloadIntent";
+import { debugWarn } from "../shared/debug/logger";
 import "../styles/App.css";
 
 const SKIP_LOGIN_KEY = "skip_login";
-const TELEGRAM_SESSION_KEY = "telegram_session";
 const TELEGRAM_TDLIB_SESSION_KEY = "telegram_tdlib_session";
 
 async function getTelegramService() {
@@ -48,7 +47,7 @@ function App() {
   const [code, setCode] = useState("");
   const [phoneCodeHash, setPhoneCodeHash] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState(
-    () => appStorage.getBoolean(SKIP_LOGIN_KEY) || Boolean(appStorage.get(runtimeCapabilities.isAndroid ? TELEGRAM_TDLIB_SESSION_KEY : TELEGRAM_SESSION_KEY)),
+    () => appStorage.getBoolean(SKIP_LOGIN_KEY) || Boolean(appStorage.get(TELEGRAM_TDLIB_SESSION_KEY)),
   );
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -80,8 +79,7 @@ function App() {
     let cancelled = false;
     const checkLoginStatus = async () => {
       if (skipLogin) return;
-      const sessionKey = runtimeCapabilities.isAndroid ? TELEGRAM_TDLIB_SESSION_KEY : TELEGRAM_SESSION_KEY;
-      const savedSession = appStorage.get(sessionKey);
+      const savedSession = appStorage.get(TELEGRAM_TDLIB_SESSION_KEY);
       if (!savedSession) {
         setIsLoggedIn(false);
         setIsLoading(false);
@@ -91,11 +89,11 @@ function App() {
         const telegramService = await getTelegramService();
         telegramService.skipLogin = skipLogin;
         const res = await telegramService.checkAuth();
-        if (!cancelled && appStorage.get(sessionKey) === savedSession) {
+        if (!cancelled && appStorage.get(TELEGRAM_TDLIB_SESSION_KEY) === savedSession) {
           setIsLoggedIn(res.isAuthorized);
         }
       } catch (caughtError) {
-        console.error("Failed to check auth status", caughtError);
+        debugWarn("Failed to check auth status", caughtError);
         if (!cancelled) setIsLoggedIn(false);
       }
     };
@@ -165,7 +163,6 @@ function App() {
   };
 
   const handleClearCache = () => {
-    appStorage.remove(TELEGRAM_SESSION_KEY);
     appStorage.remove(TELEGRAM_TDLIB_SESSION_KEY);
     appStorage.remove(SKIP_LOGIN_KEY);
     window.location.reload();

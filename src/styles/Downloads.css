@@ -386,6 +386,10 @@
   color: var(--danger);
 }
 
+.download-icon.canceled {
+  color: var(--text-3);
+}
+
 .download-thumbnail-container {
   position: relative;
   overflow: hidden;
@@ -418,6 +422,10 @@
 
 .download-status-overlay.failed {
   color: var(--danger);
+}
+
+.download-status-overlay.canceled {
+  color: var(--text-3);
 }
 
 .download-status-overlay.downloading {
@@ -470,6 +478,10 @@
   color: var(--danger);
 }
 
+.download-percentage.status-canceled {
+  color: var(--text-3);
+}
+
 .progress-bar-container {
   width: 100%;
   height: 3px;
@@ -491,6 +503,11 @@
 
 .progress-bar-container.failed .progress-bar-fill {
   background: var(--danger);
+}
+
+.progress-bar-container.canceled .progress-bar-fill {
+  background: var(--text-3);
+  opacity: 0.6;
 }
 
 .download-stats {
@@ -522,6 +539,10 @@
 
 .error-text {
   color: var(--danger);
+}
+
+.muted-text {
+  color: var(--text-3);
 }
 
 .empty-state {

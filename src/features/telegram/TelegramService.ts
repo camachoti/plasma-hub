@@ -1,14 +1,8 @@
 // @ts-nocheck
-import { TelegramClient, Api } from 'telegram';
-import { StringSession } from 'telegram/sessions';
-import { NewMessage } from 'telegram/events';
 import { convertFileSrc, invokeCommand as invoke } from '../../shared/platform/tauri';
-import bigInt from 'big-integer';
 
 import { downloadUrlInBrowser } from '../../shared/platform/browserDownload';
 import { openDialog as open, saveDialog as save } from '../../shared/platform/dialog';
-import { getDownloadDir, joinPath as joinSystemPath } from '../../shared/platform/files';
-import { platformFetch as tauriFetch } from '../../shared/platform/http';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { canUseServiceWorker } from '../../shared/platform/serviceWorker';
 import { appStorage } from '../../shared/storage/appStorage';
@@ -17,20 +11,12 @@ import { downloadService } from '../downloader/DownloadService';
 import { mediaCache } from './MediaCacheService';
 import {
   basename,
-  formatTelegramMessage,
-  getMessageDownloadFilename,
-  getMessageGroupedId,
-  getMessageText,
-  isDownloadableMedia,
-  isLikelyAlbumSeparator,
   joinPath,
   messageCacheKey,
   nextFrame,
-  sanitizeForAlbumFolderName,
   sanitizeForFilename,
   sanitizeForFolderName,
   toNumberValue,
-  toUint8Array,
 } from './TelegramMessageUtils';
 import {
   readTwitterFakeChats,
@@ -41,17 +27,20 @@ import {
 import { telegramApiCredentials } from './TelegramConfig';
 import { TelegramTdlibBridge } from './TelegramTdlibBridge';
 import { TelegramTwitterFakeBridge } from './TelegramTwitterFakeBridge';
+import { telegramFileStorage } from './TelegramFileStorage';
 
 class TelegramService {
-  private client: TelegramClient | null = null;
-  private connectPromise: Promise<void> | null = null;
-  private session: StringSession;
+  private static readonly MESSAGE_CACHE_FRESH_MS = 30 * 1000;
+  private static readonly MAX_THUMBNAIL_DOWNLOADS = 4;
+  private static readonly MAX_AVATAR_DOWNLOADS = 4;
+  private static readonly MAX_FULL_MEDIA_DOWNLOADS = 2;
+  private static readonly STREAM_RANGE_BYTES = 512 * 1024;
+  private static readonly INITIAL_PLAYBACK_BUFFER_BYTES = 1024 * 1024;
   private mediaProgressCallbacks: Set<Function> = new Set();
   private downloadProgressCallbacks: Set<Function> = new Set();
   private saveMultipleProgressCallbacks: Set<Function> = new Set();
   private sendProgressCallbacks: Set<Function> = new Set();
   private newMessageCallbacks: Set<Function> = new Set();
-  private newMessageHandlerRegistered = false;
   private activeDownloadAborted = false;
   private saveMultipleAborted = false;
   private serviceWorkerMessageHandler: (event: MessageEvent) => void;
@@ -59,19 +48,41 @@ class TelegramService {
   private twitterFakeBridge = new TelegramTwitterFakeBridge(data => {
     this.mediaProgressCallbacks.forEach(cb => cb(data));
   });
+  private fileStorage = telegramFileStorage;
+  private mediaFileRequests = new Map<string, Promise<any>>();
+  private mediaThumbRequests = new Map<string, Promise<any>>();
+  private activeNativeMediaDownloads = new Map<string, { chatId: string; messageId: number; priority: 'user' | 'background' }>();
+  private avatarRequests = new Map<string, Promise<any>>();
+  private sharedMediaCache = new Map<string, { loadedAt: number; media: any[] }>();
+  private activeThumbnailDownloads = 0;
+  private activeAvatarDownloads = 0;
+  private activeFullMediaDownloads = 0;
+  private thumbnailQueue: Array<{
+    key: string;
+    chatId: string;
+    messageId: number;
+    run: () => void;
+    cancel: () => void;
+    priority: 'visible' | 'background';
+  }> = [];
+  private avatarQueue: Array<{
+    key: string;
+    run: () => void;
+    cancel: () => void;
+    priority: 'visible' | 'background';
+  }> = [];
+  private fullMediaQueue: Array<{
+    key: string;
+    chatId: string;
+    messageId: number;
+    run: () => void;
+    cancel: () => void;
+    priority: 'user' | 'background';
+  }> = [];
   public skipLogin: boolean = false;
   private readonly tdlibSessionKey = 'telegram_tdlib_session';
 
   constructor() {
-    const savedSession = appStorage.get('telegram_session') || '';
-    this.session = new StringSession(savedSession);
-    
-    if (!savedSession) {
-      // Define DC 4 (Américas) como padrão inicial usando DOMÍNIO em vez de IP
-      // Isso é obrigatório no Tauri (Linux/WebKit) para não dar erro de certificado SSL
-      this.session.setDC(4, "vesta.web.telegram.org", 443);
-    }
-
     this.serviceWorkerMessageHandler = this.handleServiceWorkerMessage.bind(this);
 
     if (canUseServiceWorker()) {
@@ -86,24 +97,29 @@ class TelegramService {
         navigator.serviceWorker.startMessages();
       }
     }
+
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
+      this.tdlibBridge.onNativeMediaProgress((data: any) => {
+        this.emitMediaProgress(data);
+      }).catch(error => {
+        debugWarn('[TelegramService] Failed to listen to native media progress:', error);
+      });
+    }
   }
 
   resetSession() {
-    appStorage.remove('telegram_session');
     appStorage.remove(this.tdlibSessionKey);
-    if (this.client) {
-      Promise.resolve(this.client.disconnect()).catch(error => {
-        debugWarn('[TelegramService] Failed to disconnect old client while resetting session:', error);
-      });
-    }
-    this.client = null;
-    this.connectPromise = null;
-    this.newMessageHandlerRegistered = false;
-    this.session = new StringSession('');
-    this.session.setDC(4, "vesta.web.telegram.org", 443);
   }
 
-  private streamIterators = new Map<string, { iter: AsyncIterator<any>, message: any, fileSize: number, mimeType: string, offset: number }>();
+  private mediaStreamSessions = new Map<string, {
+    chatId: any;
+    messageId: any;
+    cacheKey: string;
+    message?: any;
+    totalSize: number;
+    mimeType: string;
+    fileName?: string;
+  }>();
 
   private isTwitterFakeChat(chatId: any) {
     return this.twitterFakeBridge.isFakeChat(chatId);
@@ -121,188 +137,175 @@ class TelegramService {
     return this.twitterFakeBridge.downloadFakeMedia(chatId, messageId, message);
   }
 
-  private async handleServiceWorkerMessage(event: MessageEvent) {
-    const { type, chatId, messageId, requestId, offset, streamId } = event.data;
-    const streamKey = `${chatId}_${messageId}_${streamId}`; // Unique per video stream instance
+  private fullMediaCacheKey(chatId: any, messageId: any) {
+    return this.findTwitterFakeMessage(chatId, messageId)
+      ? `twitter_fake_${chatId}_${messageId}_full`
+      : `media_${chatId}_${messageId}_full`;
+  }
 
-    debugLog(`[TelegramService] Received message from SW: type=${type}, streamId=${streamId}, offset=${offset}`);
+  private mimeTypeFromFileName(fileName?: string | null) {
+    const lower = String(fileName || '').toLowerCase();
+    if (/\.(jpe?g|jfif)(?:$|[?#])/.test(lower)) return 'image/jpeg';
+    if (/\.png(?:$|[?#])/.test(lower)) return 'image/png';
+    if (/\.webp(?:$|[?#])/.test(lower)) return 'image/webp';
+    if (/\.gif(?:$|[?#])/.test(lower)) return 'image/gif';
+    if (/\.mp4(?:$|[?#])/.test(lower)) return 'video/mp4';
+    if (/\.webm(?:$|[?#])/.test(lower)) return 'video/webm';
+    if (/\.(mov|qt)(?:$|[?#])/.test(lower)) return 'video/quicktime';
+    if (/\.mp3(?:$|[?#])/.test(lower)) return 'audio/mpeg';
+    if (/\.m4a(?:$|[?#])/.test(lower)) return 'audio/mp4';
+    if (/\.ogg(?:$|[?#])/.test(lower)) return 'audio/ogg';
+    return null;
+  }
 
-    if (type === 'init_stream') {
-      try {
-        // Handle Twitter fake chats stream initialization from local cache
-        const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
-        if (fakeMessage) {
-          debugLog(`[TelegramService] Initializing stream for Twitter fake message: ${chatId}/${messageId}`);
-          const cacheKey = `twitter_fake_${chatId}_${messageId}_full`;
-          const buffer = await mediaCache.getMediaBuffer(cacheKey);
-          if (!buffer) {
-            throw new Error("Twitter media buffer not found in cache");
-          }
-          
-          const fileSize = buffer.byteLength;
-          const mimeType = 'video/mp4';
-          const startOffset = offset || 0;
-          
-          debugLog(`[TelegramService] Creating buffer iterator for Twitter video: streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
-          
-          let currentOffset = startOffset;
-          const chunkSize = 512 * 1024; // 512KB chunks
-          const iter = {
-            async next() {
-              if (currentOffset >= fileSize) {
-                return { done: true, value: undefined };
-              }
-              const end = Math.min(currentOffset + chunkSize, fileSize);
-              const chunk = buffer.slice(currentOffset, end);
-              currentOffset = end;
-              return { done: false, value: new Uint8Array(chunk) };
-            }
-          };
+  private getMessageMediaMimeType(message: any, fileName?: string | null) {
+    const explicitMimeType = message?.media?.document?.mimeType
+      || message?.document?.mimeType
+      || message?.file?.mimeType
+      || message?.file?.mime;
+    if (explicitMimeType) return explicitMimeType;
 
-          this.streamIterators.set(streamKey, {
-            iter,
-            message: fakeMessage,
-            fileSize,
-            mimeType,
-            offset: startOffset
-          });
-
-          const response = { type: 'chunk_response', requestId, totalSize: fileSize, mimeType };
-          debugLog(`[TelegramService] Sending Twitter init_stream success: size=${fileSize}, mime=${mimeType}`);
-          navigator.serviceWorker.controller?.postMessage(response);
-          return;
-        }
-
-        if (!this.client) throw new Error("Client not connected");
-        debugLog(`[TelegramService] Fetching message ${messageId} for stream...`);
-        const entity = await this.client.getEntity(chatId);
-        const messages = await this.client.getMessages(entity, { ids: [Number(messageId)] });
-        if (!messages || messages.length === 0 || !messages[0].media) {
-          throw new Error("Message or media not found");
-        }
-        
-        const message = messages[0];
-        
-        let rawSize = message.media?.document?.size || message.media?.photo?.sizes?.slice(-1)[0]?.size || 0;
-        let fileSize = typeof rawSize === 'number' ? rawSize : (rawSize.toJSNumber ? rawSize.toJSNumber() : Number(rawSize));
-        
-        const mimeType = message.media?.document?.mimeType || 'video/mp4';
-        const startOffset = offset || 0;
-
-        debugLog(`[TelegramService] Creating iterDownload for streamKey=${streamKey}, offset=${startOffset}, totalSize=${fileSize}`);
-        const iter = this.client.iterDownload({
-          file: message.media,
-          requestSize: 512 * 1024, // 512KB chunks
-          offset: bigInt(startOffset),
-        });
-
-        this.streamIterators.set(streamKey, { 
-          iter: iter[Symbol.asyncIterator](), 
-          message, 
-          fileSize, 
-          mimeType,
-          offset: startOffset
-        });
-
-        const response = { type: 'chunk_response', requestId, totalSize: fileSize, mimeType };
-        debugLog(`[TelegramService] Sending init_stream success response: size=${fileSize}, mime=${mimeType}`);
-        if (navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage(response);
-        } else {
-          debugWarn("[TelegramService] No service worker controller found to send init_stream success response");
-        }
-      } catch (err: any) {
-        console.error(`[TelegramService] Error in init_stream:`, err);
-        navigator.serviceWorker.controller?.postMessage({ type: 'chunk_response', requestId, error: err.message });
-      }
-    } 
-    else if (type === 'get_chunk') {
-      try {
-        const streamData = this.streamIterators.get(streamKey);
-        if (!streamData) throw new Error("Stream not initialized");
-
-        debugLog(`[TelegramService] Fetching next chunk for streamKey=${streamKey}...`);
-        const next = await streamData.iter.next();
-        if (next.done) {
-          debugLog(`[TelegramService] Iterator done for streamKey=${streamKey}`);
-          this.streamIterators.delete(streamKey);
-          navigator.serviceWorker.controller?.postMessage({ type: 'chunk_response', requestId, done: true });
-        } else {
-          const chunk = next.value;
-          debugLog(`[TelegramService] Iterator yielded chunk of size=${chunk.length} for streamKey=${streamKey}`);
-          // Ensure we send a clean ArrayBuffer that is exactly the size of the chunk
-          const chunkArray = new Uint8Array(chunk);
-          const chunkBuffer = chunkArray.buffer.slice(chunkArray.byteOffset, chunkArray.byteOffset + chunkArray.byteLength);
-
-          const response = { type: 'chunk_response', requestId, chunk: chunkBuffer };
-          if (navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage(response, [chunkBuffer]);
-          } else {
-            debugWarn("[TelegramService] No service worker controller found to send chunk response");
-          }
-        }
-      } catch (err: any) {
-        console.error(`[TelegramService] Error in get_chunk for streamKey=${streamKey}:`, err);
-        navigator.serviceWorker.controller?.postMessage({ type: 'chunk_response', requestId, error: err.message });
-      }
+    if (message?.media?.photo || message?.photo || message?.media?.className === 'MessageMediaPhoto') {
+      return 'image/jpeg';
     }
-    else if (type === 'cancel_stream') {
+
+    if (message?.video || message?.media?.video) return 'video/mp4';
+
+    return this.mimeTypeFromFileName(fileName) || 'application/octet-stream';
+  }
+
+  private emitMediaProgress(data: any) {
+    this.mediaProgressCallbacks.forEach(cb => cb(data));
+  }
+
+  private streamUrlForMessage(chatId: any, messageId: any) {
+    return `/stream_media/${chatId}/${messageId}`;
+  }
+
+  private async getMediaDescriptor(chatId: any, messageId: any) {
+    const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+    const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
+    if (fakeMessage) {
+      if (!fakeMessage.url) throw new Error('Mídia sem URL.');
+      const cached = await this.downloadTwitterFakeMedia(chatId, messageId, fakeMessage);
+      if (!cached.success) throw new Error(cached.error || 'Falha ao preparar mídia.');
+      const buffer = await mediaCache.getMediaBuffer(cacheKey);
+      const totalSize = buffer?.byteLength || toNumberValue(fakeMessage.mediaSize || 0);
+      return {
+        cacheKey,
+        fakeMessage,
+        totalSize,
+        mimeType: fakeMessage.isVideo ? 'video/mp4' : 'image/jpeg',
+        fileName: sanitizeForFilename(`media_${messageId}${fakeMessage.isVideo ? '.mp4' : '.jpg'}`),
+      };
+    }
+
+    throw new Error('Descritor de mídia disponível apenas pelo TDLib nativo.');
+  }
+
+  private async downloadMediaRange({ chatId, messageId, offset, length, session }: any) {
+    const descriptor = session || await this.getMediaDescriptor(chatId, messageId);
+    const cacheKey = descriptor.cacheKey;
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    const safeLength = Math.max(0, Number(length) || 0);
+    if (safeLength <= 0) return new ArrayBuffer(0);
+
+    const cached = await mediaCache.getMediaSegment(cacheKey, safeOffset, safeLength);
+    if (cached) return cached;
+
+    if (descriptor.fakeMessage) {
+      const fakeRange = await mediaCache.getMediaSegment(cacheKey, safeOffset, safeLength);
+      if (fakeRange) return fakeRange;
+      throw new Error('Mídia fake não encontrada no cache.');
+    }
+
+    throw new Error('Streaming legado indisponível. Use playback/cache TDLib nativo.');
+  }
+
+  private async completeMediaFromRanges({ chatId, messageId, descriptor, priority = 'user' }: any) {
+    const cacheKey = descriptor.cacheKey;
+    const totalSize = Number(descriptor.totalSize || 0);
+    if (totalSize <= 0) return { success: false, error: 'Tamanho da mídia indisponível.' };
+
+    for (let offset = 0; offset < totalSize; offset += TelegramService.STREAM_RANGE_BYTES) {
+      const length = Math.min(TelegramService.STREAM_RANGE_BYTES, totalSize - offset);
+      const cached = await mediaCache.getMediaSegment(cacheKey, offset, length);
+      if (!cached) {
+        await this.downloadMediaRange({ chatId, messageId, offset, length, session: descriptor });
+      }
+      if (priority === 'background') await nextFrame();
+    }
+
+    const filePath = await mediaCache.finalizeMediaSegments(cacheKey, descriptor.mimeType);
+    if (!filePath) return { success: false, error: 'Não foi possível finalizar o cache da mídia.' };
+    return { success: true, filePath };
+  }
+
+  private async handleServiceWorkerMessage(event: MessageEvent) {
+    const { type, chatId, messageId, requestId, offset, length, streamId } = event.data || {};
+    const streamKey = `${chatId}_${messageId}_${streamId}`;
+
+    debugLog(`[TelegramService] Received message from SW: type=${type}, streamId=${streamId}, offset=${offset}, length=${length}`);
+
+    if (type === 'prepare_stream') {
+      try {
+        const descriptor = await this.getMediaDescriptor(chatId, messageId);
+        if (!descriptor.totalSize || descriptor.totalSize <= 0) {
+          throw new Error('Tamanho da mídia indisponível.');
+        }
+
+        this.mediaStreamSessions.set(streamKey, {
+          chatId,
+          messageId,
+          cacheKey: descriptor.cacheKey,
+          message: descriptor.message,
+          totalSize: descriptor.totalSize,
+          mimeType: descriptor.mimeType,
+          fileName: descriptor.fileName,
+        });
+
+        await mediaCache.saveMediaAssetMeta(descriptor.cacheKey, {
+          state: 'partial',
+          totalBytes: descriptor.totalSize,
+          mimeType: descriptor.mimeType,
+          fileName: descriptor.fileName,
+        });
+
+        navigator.serviceWorker.controller?.postMessage({
+          type: 'stream_response',
+          requestId,
+          totalSize: descriptor.totalSize,
+          mimeType: descriptor.mimeType,
+        });
+      } catch (err: any) {
+        debugWarn(`[TelegramService] Error in prepare_stream:`, err);
+        navigator.serviceWorker.controller?.postMessage({ type: 'stream_response', requestId, error: err.message || String(err) });
+      }
+    } else if (type === 'get_range') {
+      try {
+        const session = this.mediaStreamSessions.get(streamKey) || await this.getMediaDescriptor(chatId, messageId);
+        const chunk = await this.downloadMediaRange({ chatId, messageId, offset, length, session });
+        const chunkBuffer = chunk.slice(0);
+        navigator.serviceWorker.controller?.postMessage(
+          { type: 'range_response', requestId, chunk: chunkBuffer },
+          [chunkBuffer]
+        );
+      } catch (err: any) {
+        debugWarn(`[TelegramService] Error in get_range for streamKey=${streamKey}:`, err);
+        navigator.serviceWorker.controller?.postMessage({ type: 'range_response', requestId, error: err.message || String(err) });
+      }
+    } else if (type === 'cancel_stream') {
       debugLog(`[TelegramService] Cancelling stream for streamKey=${streamKey}`);
-      this.streamIterators.delete(streamKey);
+      this.mediaStreamSessions.delete(streamKey);
     }
   }
 
   async connect() {
-    if (this.client && this.client.connected) {
-      this.setupNewMessageHandler();
-      return;
-    }
-    if (this.connectPromise) return this.connectPromise;
-    
-    if (!telegramApiCredentials.apiId || !telegramApiCredentials.apiHash) {
-      debugWarn("API_ID and API_HASH are required in .env");
-      throw new Error("Credenciais do Telegram ausentes. Crie um arquivo .env com VITE_API_ID e VITE_API_HASH.");
-    }
-
-    this.connectPromise = (async () => {
-      if (!this.client) {
-        this.client = new TelegramClient(this.session, telegramApiCredentials.apiId, telegramApiCredentials.apiHash, {
-          connectionRetries: 5,
-          useWSS: true,
-        });
-      }
-
-      await this.client.connect();
-      this.setupNewMessageHandler();
-    })();
-
-    try {
-      await this.connectPromise;
-    } finally {
-      this.connectPromise = null;
-    }
+    throw new Error('Use TDLib nativo.');
   }
 
   private setupNewMessageHandler() {
-    if (!this.client || this.newMessageHandlerRegistered) return;
-    this.newMessageHandlerRegistered = true;
-
-    this.client.addEventHandler(async (event: any) => {
-      try {
-        const rawMessage = event.message;
-        if (!rawMessage || rawMessage.action || rawMessage.className === 'MessageService') return;
-
-        const chatId = event.chatId?.toString?.() || rawMessage.chatId?.toString?.();
-        if (!chatId) return;
-
-        const message = formatTelegramMessage(rawMessage);
-        const topicId = message.topicId || undefined;
-        await this.mergeMessageIntoCache(chatId, message, topicId);
-        this.newMessageCallbacks.forEach(cb => cb({ chatId, topicId, message }));
-      } catch (error) {
-        debugWarn('[TelegramService] Failed to handle new message update:', error);
-      }
-    }, new NewMessage({}));
+    // New-message updates should be wired through TDLib native events.
   }
 
   private async mergeMessageIntoCache(chatId: string, message: any, topicId?: number) {
@@ -319,8 +322,277 @@ class TelegramService {
     }
   }
 
+  private isMessageCacheFresh(meta: any) {
+    const lastFetchedAt = Number(meta?.lastFetchedAt || 0);
+    return lastFetchedAt > 0 && Date.now() - lastFetchedAt < TelegramService.MESSAGE_CACHE_FRESH_MS;
+  }
+
+  private useTdlibOnly() {
+    return runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib;
+  }
+
+  private enqueueThumbnailRequest<T>(
+    key: string,
+    chatId: any,
+    messageId: any,
+    task: () => Promise<T>,
+    priority: 'visible' | 'background' = 'visible',
+    cancelResult: T,
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        this.activeThumbnailDownloads++;
+        task()
+          .then(resolve, reject)
+          .finally(() => {
+            this.activeThumbnailDownloads = Math.max(0, this.activeThumbnailDownloads - 1);
+            this.drainThumbnailQueue();
+          });
+      };
+      const cancel = () => resolve(cancelResult);
+      const queueItem = { key, chatId: String(chatId), messageId: Number(messageId), run, cancel, priority };
+
+      if (priority === 'visible') {
+        this.thumbnailQueue.unshift(queueItem);
+      } else {
+        this.thumbnailQueue.push(queueItem);
+      }
+      this.drainThumbnailQueue();
+    });
+  }
+
+  private promoteQueuedThumbnail(key: string) {
+    const existingIndex = this.thumbnailQueue.findIndex(item => item.key === key);
+    if (existingIndex < 0) return;
+
+    const [existing] = this.thumbnailQueue.splice(existingIndex, 1);
+    existing.priority = 'visible';
+    this.thumbnailQueue.unshift(existing);
+  }
+
+  private drainThumbnailQueue() {
+    while (
+      this.activeThumbnailDownloads < TelegramService.MAX_THUMBNAIL_DOWNLOADS &&
+      this.thumbnailQueue.length > 0
+    ) {
+      const next = this.thumbnailQueue.shift();
+      next?.run();
+    }
+  }
+
+  cancelQueuedThumbnails({ activeChatId, keepMessageIds }: { activeChatId?: any; keepMessageIds?: Iterable<number> } = {}) {
+    const activeKey = activeChatId == null ? null : String(activeChatId);
+    const keepIds = keepMessageIds ? new Set(Array.from(keepMessageIds, id => Number(id))) : null;
+    const keep: typeof this.thumbnailQueue = [];
+
+    for (const item of this.thumbnailQueue) {
+      const keepChat = activeKey && item.chatId === activeKey;
+      const keepVisible = keepIds?.has(item.messageId) ?? false;
+      const shouldKeep = keepChat && (keepIds ? keepVisible : item.priority === 'visible');
+      if (shouldKeep) {
+        keep.push(item);
+      } else {
+        item.cancel();
+      }
+    }
+
+    this.thumbnailQueue = keep;
+  }
+
+  private enqueueAvatarRequest<T>(
+    key: string,
+    task: () => Promise<T>,
+    priority: 'visible' | 'background' = 'visible',
+    cancelResult: T,
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        this.activeAvatarDownloads++;
+        task()
+          .then(resolve, reject)
+          .finally(() => {
+            this.activeAvatarDownloads = Math.max(0, this.activeAvatarDownloads - 1);
+            this.drainAvatarQueue();
+          });
+      };
+      const cancel = () => resolve(cancelResult);
+      const queueItem = { key, run, cancel, priority };
+
+      if (priority === 'visible') {
+        this.avatarQueue.unshift(queueItem);
+      } else {
+        this.avatarQueue.push(queueItem);
+      }
+      this.drainAvatarQueue();
+    });
+  }
+
+  private drainAvatarQueue() {
+    while (
+      this.activeAvatarDownloads < TelegramService.MAX_AVATAR_DOWNLOADS &&
+      this.avatarQueue.length > 0
+    ) {
+      const next = this.avatarQueue.shift();
+      next?.run();
+    }
+  }
+
+  cancelQueuedAvatarsExcept(keepIds: Iterable<any> = []) {
+    const keepKeys = new Set(Array.from(keepIds, id => `avatar_${id}`));
+    const keep: typeof this.avatarQueue = [];
+
+    for (const item of this.avatarQueue) {
+      if (item.priority === 'visible' || keepKeys.has(item.key)) {
+        keep.push(item);
+      } else {
+        item.cancel();
+      }
+    }
+
+    this.avatarQueue = keep;
+  }
+
+  private async getEntityCached(chatId: any) {
+    throw new Error('Entity cache legado indisponível. Use TDLib nativo.');
+  }
+
+  private pruneEntityCache() {
+    // No-op: entity cache legado indisponível.
+  }
+
+  invalidateSharedMedia(chatId: any) {
+    const prefix = `${chatId}:`;
+    for (const key of Array.from(this.sharedMediaCache.keys())) {
+      if (key.startsWith(prefix)) this.sharedMediaCache.delete(key);
+    }
+  }
+
+  private enqueueFullMediaRequest<T>(
+    key: string,
+    chatId: any,
+    messageId: any,
+    task: () => Promise<T>,
+    priority: 'user' | 'background' = 'user',
+    cancelResult: T,
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        this.activeFullMediaDownloads++;
+        task()
+          .then(resolve, reject)
+          .finally(() => {
+            this.activeFullMediaDownloads = Math.max(0, this.activeFullMediaDownloads - 1);
+            this.drainFullMediaQueue();
+          });
+      };
+      const cancel = () => resolve(cancelResult);
+      const queueItem = { key, chatId: String(chatId), messageId: Number(messageId), run, cancel, priority };
+
+      if (priority === 'user') {
+        this.fullMediaQueue.unshift(queueItem);
+      } else {
+        this.fullMediaQueue.push(queueItem);
+      }
+      this.drainFullMediaQueue();
+    });
+  }
+
+  private drainFullMediaQueue() {
+    while (
+      this.activeFullMediaDownloads < TelegramService.MAX_FULL_MEDIA_DOWNLOADS &&
+      this.fullMediaQueue.length > 0
+    ) {
+      const next = this.fullMediaQueue.shift();
+      next?.run();
+    }
+  }
+
+  cancelQueuedFullMediaExceptChat(activeChatId: any, keepMessageIds?: Iterable<number>) {
+    const activeKey = activeChatId == null ? null : String(activeChatId);
+    const keepIds = keepMessageIds ? new Set(Array.from(keepMessageIds, id => Number(id))) : null;
+    const keep: typeof this.fullMediaQueue = [];
+
+    for (const item of this.fullMediaQueue) {
+      const keepChat = activeKey && item.chatId === activeKey;
+      const keepVisible = keepIds?.has(item.messageId) ?? false;
+      const shouldKeep = keepChat && (item.priority === 'user' || !keepIds || keepVisible);
+      if (shouldKeep) {
+        keep.push(item);
+      } else {
+        item.cancel();
+      }
+    }
+
+    this.fullMediaQueue = keep;
+
+    for (const [key, item] of Array.from(this.activeNativeMediaDownloads.entries())) {
+      if (item.priority !== 'background') continue;
+      if (activeKey && item.chatId === activeKey && (!keepIds || keepIds.has(item.messageId))) continue;
+      this.activeNativeMediaDownloads.delete(key);
+      void this.tdlibBridge.cancelNativeMedia({
+        chatId: item.chatId,
+        messageId: item.messageId,
+      }).catch(debugWarn);
+    }
+  }
+
+  cancelBackgroundMessageMedia({ chatId, messageId }: any) {
+    const key = `${chatId}_${messageId}`;
+    const keepFull: typeof this.fullMediaQueue = [];
+    for (const item of this.fullMediaQueue) {
+      if (item.key === key && item.priority === 'background') {
+        item.cancel();
+      } else {
+        keepFull.push(item);
+      }
+    }
+    this.fullMediaQueue = keepFull;
+
+    const keepThumbs: typeof this.thumbnailQueue = [];
+    for (const item of this.thumbnailQueue) {
+      if (item.key === key && item.priority === 'background') {
+        item.cancel();
+      } else {
+        keepThumbs.push(item);
+      }
+    }
+    this.thumbnailQueue = keepThumbs;
+
+    const active = this.activeNativeMediaDownloads.get(key);
+    if (active?.priority === 'background') {
+      this.activeNativeMediaDownloads.delete(key);
+      void this.tdlibBridge.cancelNativeMedia({ chatId, messageId }).catch(debugWarn);
+    }
+  }
+
+  async cancelMessageMediaDownload({ chatId, messageId }: any) {
+    const key = `${chatId}_${messageId}`;
+    const keepFull: typeof this.fullMediaQueue = [];
+
+    for (const item of this.fullMediaQueue) {
+      if (item.key === key) {
+        item.cancel();
+      } else {
+        keepFull.push(item);
+      }
+    }
+    this.fullMediaQueue = keepFull;
+
+    this.activeNativeMediaDownloads.delete(key);
+    await this.tdlibBridge.cancelNativeMedia({ chatId, messageId }).catch(debugWarn);
+    this.emitMediaProgress({
+      chatId,
+      messageId,
+      progress: 0,
+      downloadedBytes: undefined,
+      totalBytes: undefined,
+      stage: 'canceled',
+    });
+    return { success: true, canceled: true };
+  }
+
   async checkAuth() {
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
         await this.tdlibInit();
         const status: any = await this.tdlibStatus();
@@ -329,20 +601,11 @@ class TelegramService {
         else appStorage.remove(this.tdlibSessionKey);
         return { isAuthorized };
       } catch (e) {
-        console.error("TDLib auth check failed:", e);
+        debugWarn("TDLib auth check failed:", e);
         return { isAuthorized: false };
       }
     }
-
-    try {
-      await this.connect();
-      if (!this.client) return { isAuthorized: false };
-      const isAuth = await this.client.checkAuthorization();
-      return { isAuthorized: isAuth };
-    } catch (e) {
-      console.error("Auth check failed:", e);
-      return { isAuthorized: false };
-    }
+    return { isAuthorized: false };
   }
 
   async tdlibInit() {
@@ -373,6 +636,10 @@ class TelegramService {
     return this.tdlibBridge.downloadMessageMedia({ chatId, messageId, folderPath });
   }
 
+  async tdlibCacheMessageMedia({ chatId, messageId }: any) {
+    return this.tdlibBridge.cacheMessageMedia({ chatId, messageId });
+  }
+
   async tdlibStartMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: any) {
     return this.tdlibBridge.startMassDownload({ chatId, folderPath, topicId, splitByUser });
   }
@@ -390,7 +657,7 @@ class TelegramService {
   }
 
   async sendCode(phoneNumber: string) {
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
         await this.tdlibInit();
         const res: any = await this.tdlibSetPhone(phoneNumber);
@@ -399,33 +666,15 @@ class TelegramService {
         }
         return { success: false, error: res?.error || 'Falha ao enviar telefone para TDLib.' };
       } catch (error: any) {
-        console.error("Error sending TDLib code:", error);
+        debugWarn("Error sending TDLib code:", error);
         return { success: false, error: error?.message || String(error) };
       }
     }
-
-    try {
-      await this.connect();
-      
-      let cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
-      if (!cleanPhone.startsWith('+')) {
-        cleanPhone = '+' + cleanPhone;
-      }
-      
-      const result: any = await this.client!.sendCode(
-        { apiId: telegramApiCredentials.apiId, apiHash: telegramApiCredentials.apiHash },
-        cleanPhone
-      );
-
-      return { success: true, phoneCodeHash: result.phoneCodeHash };
-    } catch (error: any) {
-      console.error("Error sending code:", error);
-      return { success: false, error: error?.message || String(error) };
-    }
+    return { success: false, error: 'TDLib nativo indisponível.' };
   }
 
   async signIn(phoneNumber: string, phoneCodeHash: string, phoneCode: string) {
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
         const codeRes: any = await this.tdlibCheckCode(phoneCode);
         if (codeRes?.ready || codeRes?.state === 'ready') {
@@ -440,33 +689,14 @@ class TelegramService {
         return { success: false, error: error.message };
       }
     }
-
-    try {
-      let cleanPhone = phoneNumber.replace(/[^0-9+]/g, '');
-      if (!cleanPhone.startsWith('+')) {
-        cleanPhone = '+' + cleanPhone;
-      }
-
-      await this.client!.invoke(new Api.auth.SignIn({
-        phoneNumber: cleanPhone,
-        phoneCodeHash,
-        phoneCode,
-      }));
-      
-      const savedSessionString = this.client!.session.save() as unknown as string;
-      appStorage.set('telegram_session', savedSessionString);
-      
-      return { success: true };
-    } catch (error: any) {
-      return { success: false, error: error.message };
-    }
+    return { success: false, error: 'TDLib nativo indisponível.' };
   }
 
   async getDialogs() {
     const fakeDialogs = twitterFakeDialogs();
     if (this.skipLogin) return { success: true, dialogs: fakeDialogs };
 
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
         await this.tdlibInit();
         const nativeRes: any = await this.tdlibBridge.getChats(100);
@@ -479,48 +709,13 @@ class TelegramService {
             ],
           };
         }
-        debugWarn('[TelegramService] TDLib chats unavailable, falling back to GramJS:', nativeRes?.error);
+        return { success: false, error: nativeRes?.error || 'TDLib não retornou chats.' };
       } catch (error) {
-        debugWarn('[TelegramService] TDLib chats failed, falling back to GramJS:', error);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
       }
     }
 
-    try {
-      if (!this.client || !this.client.connected) {
-        const savedSession = appStorage.get('telegram_session');
-        if (!savedSession) return { success: true, dialogs: fakeDialogs };
-        await this.connect();
-      }
-
-      const isAuthorized = await this.client.checkAuthorization();
-      if (!isAuthorized) return { success: true, dialogs: fakeDialogs };
-
-      const dialogs = await this.client.getDialogs();
-      return {
-        success: true,
-        dialogs: [
-          ...fakeDialogs,
-          ...dialogs.map(d => ({
-          id: d.id?.toString(),
-          title: d.title,
-          date: d.date,
-          unreadCount: d.unreadCount,
-          isGroup: d.isGroup,
-          isChannel: d.isChannel,
-          hasTopics: (d.entity as any)?.forum || false,
-          lastMessageText: d.message?.message || (d.message?.media ? '' : 'Sem mensagem'),
-          lastMessageDate: d.message?.date,
-          lastMessageHasMedia: !!d.message?.media,
-          lastMessageIsVideo: !!(d.message?.media?.document?.mimeType && typeof d.message.media.document.mimeType === 'string' && d.message.media.document.mimeType.includes('video')),
-          lastMessageIsPhoto: !!(d.message?.media?.photo || d.message?.media?.className === 'MessageMediaPhoto')
-          }))
-        ]
-      };
-    } catch (e: any) {
-      console.error("Failed to get dialogs:", e);
-      if (fakeDialogs.length > 0) return { success: true, dialogs: fakeDialogs };
-      return { success: false, error: e.message || "Failed to fetch dialogs" };
-    }
+    return { success: true, dialogs: fakeDialogs };
   }
 
   async getCachedMessages({ chatId, limit = 50, topicId = undefined }: any) {
@@ -528,14 +723,22 @@ class TelegramService {
     if (fakeChat) return this.getMessages({ chatId, limit, topicId });
 
     const cached = await mediaCache.getMessages(messageCacheKey(chatId, topicId));
+    const cacheMeta = await mediaCache.getMessagePageMeta(messageCacheKey(chatId, topicId));
     const ordered = [...cached].sort((a, b) => Number(a.id) - Number(b.id));
     const page = ordered.slice(-limit);
+    const newestMessageDate = ordered.reduce((newest, message) => {
+      const date = Number(message?.date || 0);
+      return date > newest ? date : newest;
+    }, 0);
     return {
       success: true,
       messages: page,
       hasMore: ordered.length > page.length,
       oldestMessageId: page[0]?.id ?? null,
       fromCache: true,
+      cacheMeta,
+      isFresh: this.isMessageCacheFresh(cacheMeta),
+      newestMessageDate,
     };
   }
 
@@ -571,121 +774,78 @@ class TelegramService {
       };
     }
 
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
+        const cacheKey = messageCacheKey(chatId, topicId);
+        if (!offsetId && !refresh) {
+          const cached = await this.getCachedMessages({ chatId, limit, topicId });
+          const hasMissingSenderNames = cached.messages?.some((message: any) => !message.out && !message.senderName);
+          if (cached.messages?.length && cached.isFresh && !hasMissingSenderNames) return cached;
+        }
+
         await this.tdlibInit();
         const nativeRes: any = await this.tdlibBridge.getMessages({ chatId, limit, offsetId, topicId });
         if (nativeRes?.success) {
-          const cacheKey = messageCacheKey(chatId, topicId);
           if (!offsetId && Array.isArray(nativeRes.messages)) {
-            await mediaCache.saveMessages(cacheKey, nativeRes.messages);
+            await mediaCache.saveMessages(cacheKey, nativeRes.messages, { lastFetchedAt: Date.now() });
           }
           return nativeRes;
         }
-        debugWarn('[TelegramService] TDLib messages unavailable, falling back to GramJS:', nativeRes?.error);
+        return { success: false, messages: [], hasMore: false, oldestMessageId: null, error: nativeRes?.error || 'TDLib não retornou mensagens.' };
       } catch (error) {
-        debugWarn('[TelegramService] TDLib messages failed, falling back to GramJS:', error);
+        return { success: false, messages: [], hasMore: false, oldestMessageId: null, error: error instanceof Error ? error.message : String(error) };
       }
     }
 
-    if (!this.client) return { messages: [] };
-    try {
-      const entity = await this.client.getEntity(chatId);
-      let allValidMessages: any[] = [];
-      let currentOffsetId = offsetId || undefined;
-      let lastMessageId = null;
-      let hasMore = true;
-
-      const cacheKey = messageCacheKey(chatId, topicId);
-      const isFirstPage = !offsetId;
-
-      // 1. Fetch Local Cached Messages. Keep this separate per topic so stale
-      // topic history cannot be mistaken for the main chat timeline.
-      const localMessages = await mediaCache.getMessages(cacheKey);
-
-      while (allValidMessages.length < limit) {
-        const batch = await this.client.getMessages(entity, {
-          limit,
-          offsetId: currentOffsetId,
-          replyTo: topicId
-        });
-        const messagesBatch = Array.isArray(batch) ? batch : batch ? [batch] : [];
-        if (messagesBatch.length === 0) {
-          hasMore = false;
-          break;
-        }
-
-        lastMessageId = messagesBatch[messagesBatch.length - 1].id;
-        currentOffsetId = lastMessageId;
-
-        const valid = messagesBatch.filter((m: any) => !m.action && m.className !== 'MessageService');
-        allValidMessages = allValidMessages.concat(valid);
-
-        if (messagesBatch.length < limit) {
-          hasMore = false;
-          break;
-        }
-      }
-
-      // 2. Map formatted messages
-      const formattedMessages = allValidMessages.map(formatTelegramMessage);
-
-      // 3. Anti-Delete Logic
-      // Find the ID range of the fetched messages
-      if (formattedMessages.length > 0) {
-        const maxId = Math.max(...formattedMessages.map(m => m.id));
-        const minId = Math.min(...formattedMessages.map(m => m.id));
-
-        // Find messages in local cache that belong to this ID range but are NOT in the fetched messages
-        const fetchedIds = new Set(formattedMessages.map(m => m.id));
-        const deletedMessages = localMessages.filter(localMsg => 
-          localMsg.id >= minId && localMsg.id <= maxId && !fetchedIds.has(localMsg.id)
-        ).map(msg => ({ ...msg, isDeleted: true }));
-
-        // Merge and sort chronologically for the virtualized timeline.
-        formattedMessages.push(...deletedMessages);
-        formattedMessages.sort((a, b) => Number(a.id) - Number(b.id));
-      }
-
-      // 4. Save merged result to local cache
-      // We merge with all existing local messages outside this range
-      const mergedById = new Map<number, any>();
-      localMessages.forEach(message => mergedById.set(Number(message.id), message));
-      formattedMessages.forEach(fm => {
-        mergedById.set(Number(fm.id), fm);
-      });
-      const mergedLocal = Array.from(mergedById.values()).sort((a, b) => Number(a.id) - Number(b.id));
-      await mediaCache.saveMessages(cacheKey, mergedLocal);
-
-      return {
-        success: true,
-        messages: formattedMessages,
-        hasMore,
-        oldestMessageId: formattedMessages[0]?.id ?? lastMessageId
-      };
-    } catch (e) {
-      console.error("Failed to get messages:", e);
-      return { messages: [], hasMore: false, oldestMessageId: null };
-    }
+    return { success: false, messages: [], hasMore: false, oldestMessageId: null, error: 'TDLib nativo indisponível.' };
   }
 
-  async getAvatar(id: any) {
+  async getAvatar(id: any, options: { priority?: 'visible' | 'background' } = {}) {
     const fakeChat = this.getTwitterFakeChat(id);
     if (fakeChat?.avatarUrl) return { success: true, dataUrl: fakeChat.avatarUrl };
-    if (!this.client) return { success: false, error: "Not connected" };
-    try {
-      const cacheKey = `avatar_${id}`;
-      const cachedUrl = await mediaCache.getMedia(cacheKey, 'image/jpeg');
-      if (cachedUrl) return { success: true, dataUrl: cachedUrl };
 
-      const buffer = await this.client.downloadProfilePhoto(id, { isBig: false });
-      if (buffer && buffer.length > 0) {
-        const url = await mediaCache.saveMedia(cacheKey, buffer, 'image/jpeg');
-        return { success: true, dataUrl: url };
+    const cacheKey = `avatar_${id}`;
+    const cachedInfo = await mediaCache.getCacheItemInfo(cacheKey);
+    const settings = await mediaCache.getCacheSettings();
+    const refreshMs = Math.max(1, settings.avatarRefreshHours || 24) * 60 * 60 * 1000;
+    const isFresh = cachedInfo?.addedAt && Date.now() - cachedInfo.addedAt < refreshMs;
+    const cachedUrl = await mediaCache.getMedia(cacheKey, 'image/jpeg');
+    if (cachedUrl && isFresh) return { success: true, dataUrl: cachedUrl };
+    const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
+    if (cachedNativeUrl && isFresh) return { success: true, dataUrl: cachedNativeUrl };
+
+    if (this.useTdlibOnly()) {
+      const priority = options.priority || 'visible';
+      const request = this.enqueueAvatarRequest(
+        cacheKey,
+        () => this.getAvatarInner(id, cacheKey),
+        priority,
+        cachedUrl || cachedNativeUrl
+          ? { success: true, dataUrl: cachedUrl || cachedNativeUrl, canceled: true }
+          : { success: false, canceled: true }
+      );
+      return request;
+    }
+    return cachedUrl
+      ? { success: true, dataUrl: cachedUrl }
+      : { success: false, error: 'Avatar nativo via TDLib ainda não disponível.' };
+  }
+
+  private async getAvatarInner(id: any, cacheKey: string, fallbackUrl?: string | null) {
+    if (fallbackUrl) return { success: true, dataUrl: fallbackUrl };
+    try {
+      await this.tdlibInit();
+      const nativeRes: any = await this.tdlibBridge.downloadChatAvatar(id);
+      const nativeFilePath = nativeRes?.filePath || nativeRes?.file_path;
+      if (nativeRes?.success && nativeFilePath) {
+        const filePath = convertFileSrc(nativeFilePath);
+        mediaCache.cacheUrlInMemory(cacheKey, filePath);
+        await mediaCache.saveNativeFileReference(cacheKey, nativeFilePath, 'image/jpeg');
+        return { success: true, dataUrl: filePath };
       }
-      return { success: false, error: "No photo" };
-    } catch (e: any) {
-      return { success: false, error: e.message };
+      return { success: false, error: nativeRes?.error || 'TDLib não retornou avatar.' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
   async getFullChat(chatId: any) {
@@ -706,41 +866,18 @@ class TelegramService {
   async resolveLink(url: string) { return { success: false, chat: null }; }
   async readHistory(chatId: any) { return { success: true }; }
   async getForumTopics(chatId: any) {
-    if (runtimeCapabilities.isAndroid && runtimeCapabilities.supportsTdlib) {
+    if (this.useTdlibOnly()) {
       try {
         await this.tdlibInit();
         const nativeRes: any = await this.tdlibBridge.getForumTopics(chatId, 100);
         if (nativeRes?.success) return nativeRes;
-        debugWarn('[TelegramService] TDLib forum topics unavailable, falling back to GramJS:', nativeRes?.error);
+        return { success: false, topics: [], error: nativeRes?.error || 'TDLib não retornou tópicos.' };
       } catch (error) {
-        debugWarn('[TelegramService] TDLib forum topics failed, falling back to GramJS:', error);
+        return { success: false, topics: [], error: error instanceof Error ? error.message : String(error) };
       }
     }
 
-    if (!this.client) return { success: false, topics: [] };
-    try {
-      const channel = await this.client.getInputEntity(chatId);
-      const result: any = await this.client.invoke(new Api.channels.GetForumTopics({
-        channel,
-        offsetDate: 0,
-        offsetId: 0,
-        offsetTopic: 0,
-        limit: 100,
-      }));
-      return {
-        success: true,
-        topics: result.topics.map((t: any) => ({
-          id: t.id,
-          title: t.title,
-          isClosed: t.closed,
-          isPinned: t.pinned,
-          unreadCount: t.unreadCount || 0,
-        }))
-      };
-    } catch (e) {
-      console.error(e);
-      return { success: false, topics: [] };
-    }
+    return { success: false, topics: [], error: 'TDLib nativo indisponível.' };
   }
   private emitDownloadProgress(data: any) {
     this.downloadProgressCallbacks.forEach(cb => cb(data));
@@ -758,74 +895,136 @@ class TelegramService {
     await invoke('ensure_dir', { path });
   }
 
-  private async saveBytesToFile(filePath: string, data: any) {
-    const bytes = toUint8Array(data);
-    const chunkSize = 512 * 1024;
+  private async getCachedNativeFileUrl(cacheKey: string) {
+    const info = await mediaCache.getCacheItemInfo(cacheKey);
+    const nativeFilePath = info?.nativeFilePath;
+    if (!nativeFilePath) return null;
 
-    if (bytes.byteLength === 0) {
-      throw new Error('Download sem bytes.');
-    }
-
-    await invoke('begin_download_file', { filePath });
     try {
-      for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
-        const chunk = bytes.slice(offset, offset + chunkSize);
-        await invoke('append_download_file_chunk', { filePath, data: Array.from(chunk) });
-        await nextFrame();
+      const exists = await this.pathExists(nativeFilePath);
+      if (!exists) return null;
+    } catch {
+      // If path checks are unavailable, let the webview try the converted URL.
+    }
+
+    const url = convertFileSrc(nativeFilePath);
+    mediaCache.cacheUrlInMemory(cacheKey, url);
+    return url;
+  }
+
+  private async cacheMessageMediaWithTdlib({ chatId, messageId }: any) {
+    try {
+      await this.tdlibInit();
+      const nativeRes: any = await this.tdlibBridge.cacheMessageMedia({ chatId, messageId });
+      const nativeFilePath = nativeRes?.filePath || nativeRes?.file_path;
+      if (!nativeRes?.success || !nativeFilePath) return nativeRes || { success: false };
+
+      const fileName = nativeRes.fileName || nativeRes.file_name || undefined;
+      const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+      const mimeType = nativeRes.mimeType
+        || nativeRes.mime_type
+        || this.mimeTypeFromFileName(fileName)
+        || 'application/octet-stream';
+      await mediaCache.saveNativeFileReference(cacheKey, nativeFilePath, mimeType);
+      await mediaCache.saveMediaAssetMeta(cacheKey, {
+        state: 'native',
+        totalBytes: nativeRes.size || undefined,
+        downloadedBytes: nativeRes.size || undefined,
+        mimeType,
+        fileName,
+        nativeFilePath,
+        completedAt: Date.now(),
+      });
+
+      const filePath = convertFileSrc(nativeFilePath);
+      mediaCache.cacheUrlInMemory(cacheKey, filePath);
+      this.emitMediaProgress({
+        chatId,
+        messageId,
+        progress: 100,
+        downloadedBytes: nativeRes.size || undefined,
+        totalBytes: nativeRes.size || undefined,
+        stage: 'ready',
+      });
+      return { success: true, filePath, nativeFilePath, fileName, size: nativeRes.size, mimeType };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  private nativeMediaResultToFile(result: any) {
+    const playbackUrl = result?.url || result?.playbackUrl || result?.playback_url;
+    const nativeFilePath = result?.nativeFilePath || result?.native_file_path || result?.filePath || result?.file_path || playbackUrl;
+    if (!result?.success || !nativeFilePath) return null;
+    const filePath = typeof playbackUrl === 'string' && /^[a-z][a-z0-9+.-]*:\/\//i.test(playbackUrl)
+      ? playbackUrl
+      : convertFileSrc(nativeFilePath);
+    return {
+      success: true,
+      filePath,
+      nativeFilePath,
+      fileName: result.fileName || result.file_name,
+      size: result.totalBytes || result.total_bytes || result.size,
+      mimeType: result.mimeType || result.mime_type,
+      cacheState: result.state || result.cacheState || result.cache_state || 'complete',
+    };
+  }
+
+  private async getNativeCachedMessageMediaFile({ chatId, messageId }: any) {
+    if (!runtimeCapabilities.isTauri || !runtimeCapabilities.supportsTdlib || this.findTwitterFakeMessage(chatId, messageId)) {
+      return null;
+    }
+
+    try {
+      const meta: any = await this.tdlibBridge.getNativeMediaMeta({ chatId, messageId });
+      const file = this.nativeMediaResultToFile(meta);
+      if (file && (meta.state === 'complete' || meta.state === 'native')) {
+        await mediaCache.saveNativeFileReference(this.fullMediaCacheKey(chatId, messageId), file.nativeFilePath, file.mimeType);
+        return file;
       }
-      await invoke('finish_download_file', { filePath });
     } catch (error) {
-      await invoke('abort_download_file', { filePath }).catch(() => {});
-      throw error;
+      debugWarn('[TelegramService] Native media meta unavailable:', error);
     }
+    return null;
   }
 
-  private async appendBytesToFile(filePath: string, data: any) {
-    const bytes = toUint8Array(data);
-    const chunkSize = 256 * 1024;
-
-    if (bytes.byteLength === 0) return;
-
-    for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
-      const chunk = bytes.slice(offset, offset + chunkSize);
-      await invoke('append_download_file_chunk', { filePath, data: Array.from(chunk) });
-      await nextFrame();
-    }
-  }
-
-  private async downloadUrlToFile(url: string, filePath: string, onProgress?: (percent: number) => void) {
-    const response = await tauriFetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    onProgress?.(20);
-    const buffer = await response.arrayBuffer();
-    onProgress?.(80);
-    await this.saveBytesToFile(filePath, buffer);
-    onProgress?.(100);
-  }
-
-  private async bufferFromUrl(url: string) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Falha ao ler mídia baixada (${response.status}).`);
-    return response.arrayBuffer();
-  }
-
-  private async saveCachedMediaToPath(cacheKey: string, fallbackUrl: string | undefined, filePath: string) {
-    let buffer = await mediaCache.getMediaBuffer(cacheKey);
-    if ((!buffer || buffer.byteLength === 0) && fallbackUrl) {
-      buffer = await this.bufferFromUrl(fallbackUrl);
-    }
-    if (!buffer || buffer.byteLength === 0) {
-      throw new Error('Mídia baixada sem bytes. Tente abrir a mídia e baixar novamente.');
+  private async ensureNativeMessageMediaCached({ chatId, messageId, priority = 'user' }: any) {
+    if (!runtimeCapabilities.isTauri || !runtimeCapabilities.supportsTdlib || this.findTwitterFakeMessage(chatId, messageId)) {
+      return null;
     }
 
-    await this.saveBytesToFile(filePath, buffer);
-    return filePath;
-  }
-
-  private async saveCachedMediaToDownloads(cacheKey: string, fileName: string, fallbackUrl?: string) {
-    const downloadDir = await getDownloadDir();
-    const filePath = await joinSystemPath(downloadDir, sanitizeForFilename(fileName));
-    return this.saveCachedMediaToPath(cacheKey, fallbackUrl, filePath);
+    const requestKey = `${chatId}_${messageId}`;
+    try {
+      this.activeNativeMediaDownloads.set(requestKey, {
+        chatId: String(chatId),
+        messageId: Number(messageId),
+        priority: priority === 'background' ? 'background' : 'user',
+      });
+      const nativeRes: any = await this.tdlibBridge.ensureNativeMediaCached({ chatId, messageId, priority });
+      const file = this.nativeMediaResultToFile(nativeRes);
+      if (file) {
+        await mediaCache.saveNativeFileReference(this.fullMediaCacheKey(chatId, messageId), file.nativeFilePath, file.mimeType);
+        await mediaCache.saveMediaAssetMeta(this.fullMediaCacheKey(chatId, messageId), {
+          state: 'native',
+          totalBytes: file.size || undefined,
+          downloadedBytes: file.size || undefined,
+          mimeType: file.mimeType,
+          fileName: file.fileName,
+          nativeFilePath: file.nativeFilePath,
+          completedAt: Date.now(),
+        });
+        return file;
+      }
+      if (nativeRes?.state === 'partial' && !nativeRes?.error) {
+        return { success: false, canceled: true, error: 'Download cancelado.' };
+      }
+      if (nativeRes?.error) debugWarn('[TelegramService] Native media cache failed:', nativeRes.error);
+    } catch (error) {
+      debugWarn('[TelegramService] Native media cache command failed:', error);
+    } finally {
+      this.activeNativeMediaDownloads.delete(requestKey);
+    }
+    return null;
   }
 
   private getDownloadWorkersFallback() {
@@ -853,50 +1052,10 @@ class TelegramService {
         senderName = `ID_${message.senderId.toString()}`;
       }
     } catch (e) {
-      console.error('Error getting sender for splitting media:', e);
+      debugWarn('Error getting sender for splitting media:', e);
       if (message.senderId) senderName = `ID_${message.senderId.toString()}`;
     }
     return sanitizeForFolderName(senderName);
-  }
-
-  private async saveTelegramMessageToFile(message: any, filePath: string, workers: number, onProgress?: (percent: number) => void) {
-    let lastProgressPercent = -1;
-    let lastProgressAt = 0;
-    const rawSize = message.document?.size || message.media?.document?.size || message.photo?.sizes?.slice(-1)?.[0]?.size || 0;
-    const totalBytes = toNumberValue(rawSize);
-    let downloadedBytes = 0;
-
-    await invoke('begin_download_file', { filePath });
-    try {
-      const iter = this.client!.iterDownload({
-        file: message.media,
-        requestSize: 512 * 1024,
-      });
-
-      for await (const chunk of iter) {
-        if (this.activeDownloadAborted || this.saveMultipleAborted) throw new Error('STOP_ABORTED');
-        const bytes = toUint8Array(chunk);
-        await this.appendBytesToFile(filePath, bytes);
-        downloadedBytes += bytes.byteLength;
-
-        const percent = totalBytes > 0
-          ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
-          : 0;
-        const now = Date.now();
-        if (percent !== lastProgressPercent && (percent === 100 || now - lastProgressAt > 250)) {
-          lastProgressPercent = percent;
-          lastProgressAt = now;
-          onProgress?.(percent);
-        }
-      }
-      if (downloadedBytes === 0) {
-        throw new Error('Telegram não retornou bytes para esta mídia.');
-      }
-      await invoke('finish_download_file', { filePath });
-    } catch (error) {
-      await invoke('abort_download_file', { filePath }).catch(() => {});
-      throw error;
-    }
   }
 
   private async tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum, chatMeta }: any) {
@@ -1007,12 +1166,15 @@ class TelegramService {
         unsubscribe();
       }
     } catch (error) {
-      debugWarn('[TelegramService] TDLib mass download unavailable, falling back to GramJS:', error);
+      if (this.useTdlibOnly()) {
+        return { success: false, error: error instanceof Error ? error.message : String(error), native: true };
+      }
+      debugWarn('[TelegramService] TDLib mass download unavailable:', error);
       return null;
     }
   }
 
-  async startDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum = false, albumSplitMode = 'separator', chatMeta }: any) {
+  async startDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum = false, chatMeta }: any) {
     try {
       this.activeDownloadAborted = false;
       this.saveMultipleAborted = false;
@@ -1024,270 +1186,14 @@ class TelegramService {
 
       const nativeResult = await this.tryStartTdlibDownload({ chatId, folderPath, topic, splitByUser, splitByAlbum, chatMeta });
       if (nativeResult) return nativeResult;
-
-      if (!this.client) return { success: false, error: 'Telegram não conectado.' };
-
-      const entity = await this.client.getEntity(chatId);
-      const downloadFolder = topic?.title ? joinPath(folderPath, sanitizeForFolderName(topic.title)) : folderPath;
-      await this.ensureDir(downloadFolder);
-
-      let downloadedCount = 0;
-      let skippedCount = 0;
-      let failedCount = 0;
-      let current = 0;
-      let totalMedia = 0;
-      const runId = Date.now();
-      const batchId = `telegram_mass_${chatId}_${topic?.id || 'all'}_${runId}`;
-      const batchTitle = topic?.title
-        ? `${chatMeta?.title || 'Telegram'} · ${topic.title}`
-        : `${chatMeta?.title || 'Telegram'} · Mass Download`;
-      const processedItems: any[] = [];
-      const batchDownloadIds = new Set<string>();
-      const workers = await this.getDownloadWorkers();
-      const shouldSplitByAlbum = !!splitByAlbum;
-      const splitAlbumByComment = shouldSplitByAlbum && albumSplitMode === 'comment';
-      const splitAlbumBySeparator = shouldSplitByAlbum && !splitAlbumByComment;
-      let albumIndex = splitAlbumBySeparator ? 1 : 0;
-      let currentAlbumFolder: string | null = splitAlbumBySeparator ? joinPath(downloadFolder, '001') : null;
-      let currentAlbumHasMedia = false;
-      let messagesForAlbumDownload: any[] | null = null;
-      const commentAlbumFolders = new Map<string, string>();
-      if (currentAlbumFolder) await this.ensureDir(currentAlbumFolder);
-
-      this.emitDownloadProgress({
-        chatId,
-        total: 0,
-        downloaded: 0,
-        currentFile: splitAlbumByComment ? 'Escaneando comentários de álbum...' : shouldSplitByAlbum ? 'Escaneando separadores de álbum...' : 'Contando mídias...',
-        topicTitle: topic?.title || null,
-        isScanning: true,
-        items: processedItems
-      });
-
-      if (shouldSplitByAlbum) {
-        messagesForAlbumDownload = [];
-        let scanned = 0;
-        const scanIter = this.client.iterMessages(entity, {
-          limit: undefined,
-          replyTo: topic?.id || undefined
-        });
-
-        for await (const message of scanIter) {
-          if (this.activeDownloadAborted) break;
-          scanned++;
-          messagesForAlbumDownload.push(message);
-          if (isDownloadableMedia(message)) totalMedia++;
-          if (scanned % 100 === 0) {
-            this.emitDownloadProgress({
-              chatId,
-              total: totalMedia,
-              downloaded: 0,
-              currentFile: splitAlbumByComment
-                ? `Escaneando comentários... ${totalMedia} mídias`
-                : `Escaneando separadores... ${totalMedia} mídias`,
-              topicTitle: topic?.title || null,
-              isScanning: true,
-              items: processedItems
-            });
-            await nextFrame();
-          }
-        }
-
-        messagesForAlbumDownload.reverse();
-        if (splitAlbumByComment) {
-          const groupedAlbums = new Map<string, any[]>();
-          for (const message of messagesForAlbumDownload) {
-            if (!isDownloadableMedia(message)) continue;
-            const groupedId = getMessageGroupedId(message);
-            if (!groupedId) continue;
-            if (!groupedAlbums.has(groupedId)) groupedAlbums.set(groupedId, []);
-            groupedAlbums.get(groupedId)!.push(message);
-          }
-
-          let commentAlbumIndex = 1;
-          for (const [groupedId, albumMessages] of groupedAlbums) {
-            const comment = albumMessages.map(getMessageText).find(Boolean);
-            const folderName = comment
-              ? `${String(commentAlbumIndex).padStart(3, '0')} ${comment}`
-              : String(commentAlbumIndex).padStart(3, '0');
-            const folderPathForAlbum = joinPath(downloadFolder, sanitizeForAlbumFolderName(folderName));
-            commentAlbumFolders.set(groupedId, folderPathForAlbum);
-            await this.ensureDir(folderPathForAlbum);
-            commentAlbumIndex++;
-          }
-        }
-      } else {
-        try {
-          const countRes: any = await this.client.getMessages(entity, {
-            filter: new Api.InputMessagesFilterPhotoVideo(),
-            limit: 1,
-            replyTo: topic?.id || undefined
-          });
-          totalMedia = countRes?.total || 0;
-        } catch (err) {
-          console.error('Error fetching media count:', err);
-        }
-      }
-
-      if (this.activeDownloadAborted) return { success: true, aborted: true };
-
-      const sendProgressUpdate = (currentFile: string, partialDownloaded?: number) => {
-        this.emitDownloadProgress({
-          chatId,
-          total: totalMedia,
-          downloaded: Math.min(totalMedia || Number.MAX_SAFE_INTEGER, partialDownloaded ?? (downloadedCount + skippedCount)),
-          currentFile,
-          topicTitle: topic?.title || null,
-          isScanning: false,
-          items: processedItems
-        });
+      return {
+        success: false,
+        error: splitByAlbum
+          ? 'Separação por álbum ainda não está disponível no TDLib nativo.'
+          : 'TDLib nativo indisponível para este download.',
       };
-      const batchMeta = (partialDownloaded?: number) => ({
-        batchTotal: totalMedia,
-        batchDownloaded: Math.min(totalMedia || Number.MAX_SAFE_INTEGER, partialDownloaded ?? (downloadedCount + skippedCount)),
-        batchCompleted: downloadedCount,
-        batchSkipped: skippedCount,
-        batchFailed: failedCount,
-      });
-      const updateBatchDownloads = (partialDownloaded?: number) => {
-        const updates = batchMeta(partialDownloaded);
-        batchDownloadIds.forEach(id => downloadService.updateDownload(id, updates));
-      };
-
-      const messagesIter = messagesForAlbumDownload || this.client.iterMessages(entity, {
-        filter: new Api.InputMessagesFilterPhotoVideo(),
-        limit: undefined,
-        replyTo: topic?.id || undefined
-      });
-
-      for await (const message of messagesIter) {
-        if (this.activeDownloadAborted) break;
-        if (splitAlbumBySeparator) {
-          const text = getMessageText(message);
-          if (isLikelyAlbumSeparator(message)) {
-            if (currentAlbumHasMedia) {
-              albumIndex++;
-              currentAlbumHasMedia = false;
-            }
-            const albumName = sanitizeForAlbumFolderName(String(albumIndex).padStart(3, '0'));
-            currentAlbumFolder = joinPath(downloadFolder, albumName);
-            await this.ensureDir(currentAlbumFolder);
-            sendProgressUpdate(`Álbum ${albumName}: ${text}`);
-            continue;
-          }
-        }
-        if (!isDownloadableMedia(message)) continue;
-
-        current++;
-        const safeName = getMessageDownloadFilename(message);
-        const itemSize = Number(message.document?.size || message.photo?.sizes?.slice(-1)?.[0]?.size || 0);
-        let currentFolder = downloadFolder;
-
-        if (splitAlbumByComment) {
-          const groupedId = getMessageGroupedId(message);
-          if (groupedId && commentAlbumFolders.has(groupedId)) {
-            currentFolder = commentAlbumFolders.get(groupedId)!;
-          } else if (currentAlbumFolder) {
-            currentFolder = currentAlbumFolder;
-          }
-        } else if (splitAlbumBySeparator && currentAlbumFolder) {
-          currentFolder = currentAlbumFolder;
-          currentAlbumHasMedia = true;
-        } else if (splitByUser && !topic) {
-          currentFolder = joinPath(downloadFolder, await this.getSenderFolderName(message));
-          await this.ensureDir(currentFolder);
-        }
-
-        const filePath = joinPath(currentFolder, safeName);
-        const downloadId = `telegram_mass_${chatId}_${message.id}_${runId}`;
-        if (await this.pathExists(filePath)) {
-          skippedCount++;
-          processedItems.push({ name: safeName, status: 'skipped', progress: 100, size: itemSize });
-          updateBatchDownloads();
-          if (skippedCount % 10 === 0 || current === totalMedia) {
-            sendProgressUpdate(`Ignorando arquivos já baixados... (${skippedCount} ignorados)`);
-          }
-          continue;
-        }
-
-        let thumbnailUrl: string | undefined;
-        try {
-          const thumbRes: any = await this.getMessageMedia({ chatId, messageId: message.id });
-          if (thumbRes?.success && thumbRes.filePath) thumbnailUrl = thumbRes.filePath;
-        } catch {
-          // Thumbnail is best-effort; mass download should not wait on preview failures.
-        }
-
-        const item = { name: safeName, status: 'downloading', progress: 0, size: itemSize };
-        processedItems.push(item);
-        downloadService.addDownload({
-          id: downloadId,
-          chatId,
-          messageId: message.id,
-          fileName: safeName,
-          filePath,
-          fileSize: itemSize || undefined,
-          progress: 0,
-          status: 'downloading',
-          platform: 'telegram',
-          thumbnailUrl,
-          chatTitle: chatMeta?.title,
-          chatKind: chatMeta?.kind,
-          topicTitle: topic?.title || undefined,
-          sourceLabel: topic?.title ? `${chatMeta?.title || 'Telegram'} / ${topic.title}` : chatMeta?.title,
-          batchId,
-          batchTitle,
-          batchKind: 'mass',
-          ...batchMeta(),
-        });
-        batchDownloadIds.add(downloadId);
-        sendProgressUpdate(safeName);
-
-        try {
-          await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
-            if (this.activeDownloadAborted) throw new Error('STOP_ABORTED');
-            item.progress = percent;
-            const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
-            downloadService.updateDownload(downloadId, { progress: percent, ...batchMeta(partialDownloaded) });
-            sendProgressUpdate(`${safeName} (${percent}%)`, partialDownloaded);
-          });
-
-          if (this.activeDownloadAborted) break;
-          downloadedCount++;
-          item.status = 'completed';
-          item.progress = 100;
-          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, ...batchMeta() });
-          sendProgressUpdate(safeName);
-        } catch (err: any) {
-          if (err?.message === 'STOP_ABORTED' || this.activeDownloadAborted) break;
-          console.error(`Failed to download ${safeName}:`, err);
-          failedCount++;
-          item.status = 'failed';
-          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err), ...batchMeta() });
-          sendProgressUpdate(`Falhou: ${safeName}`);
-        }
-        await nextFrame();
-      }
-
-      const finalStatus = this.activeDownloadAborted
-        ? `Parado: ${downloadedCount} baixados, ${skippedCount} ignorados`
-        : totalMedia === 0
-          ? 'Nenhuma mídia encontrada'
-          : `Concluído: ${downloadedCount} baixados, ${skippedCount} ignorados, ${failedCount} falharam`;
-
-      this.emitDownloadProgress({
-        chatId,
-        total: totalMedia,
-        downloaded: this.activeDownloadAborted ? Math.min(totalMedia, downloadedCount + skippedCount) : totalMedia,
-        currentFile: finalStatus,
-        topicTitle: topic?.title || null,
-        isScanning: false,
-        items: processedItems
-      });
-
-      return { success: true, downloadedCount, skippedCount, failedCount, total: totalMedia, aborted: this.activeDownloadAborted };
     } catch (error: any) {
-      console.error('Download error:', error);
+      debugWarn('Download error:', error);
       return { success: false, error: error?.message || String(error) };
     }
   }
@@ -1355,7 +1261,8 @@ class TelegramService {
       });
       batchDownloadIds.add(downloadId);
       try {
-        await this.downloadUrlToFile(message.url!, filePath, (percent) => {
+        await this.fileStorage.downloadUrlToFile(message.url!, filePath, (payload) => {
+          const percent = payload.percent;
           item.progress = percent;
           const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
           downloadService.updateDownload(downloadId, { progress: percent, ...batchMeta(partialDownloaded) });
@@ -1366,7 +1273,7 @@ class TelegramService {
         item.progress = 100;
         downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, ...batchMeta() });
       } catch (err) {
-        console.error(`Failed to download ${safeName}:`, err);
+        debugWarn(`Failed to download ${safeName}:`, err);
         failedCount++;
         item.status = 'failed';
         downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err), ...batchMeta() });
@@ -1397,107 +1304,258 @@ class TelegramService {
     this.downloadProgressCallbacks.add(cb);
     return () => this.downloadProgressCallbacks.delete(cb);
   }
-  async getMessageMedia({ chatId, messageId }: any) {
+  async getMessageMedia({ chatId, messageId, priority = 'visible' }: any) {
+    const requestKey = `${chatId}_${messageId}`;
+    const pendingRequest = this.mediaThumbRequests.get(requestKey);
+    if (pendingRequest) {
+      if (priority === 'visible') this.promoteQueuedThumbnail(requestKey);
+      return pendingRequest;
+    }
+
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (fakeMessage) {
       if (!fakeMessage.url) return { success: false };
       return { success: true, filePath: fakeMessage.thumbnailUrl || null };
     }
 
-    if (!this.client) return { success: false };
-    try {
-      const cacheKey = `media_${chatId}_${messageId}_thumb`;
-      const cachedUrl = await mediaCache.getMedia(cacheKey, 'image/jpeg');
-      if (cachedUrl) return { success: true, filePath: cachedUrl };
-
-      const entity = await this.client.getEntity(chatId);
-      const messages = await this.client.getMessages(entity, { ids: [messageId] });
-      if (messages && messages.length > 0 && messages[0].media) {
-        const buffer = await this.client.downloadMedia(messages[0], { thumb: 1 });
-        if (buffer) {
-          const url = await mediaCache.saveMedia(cacheKey, buffer, 'image/jpeg');
-          return { success: true, filePath: url };
+    const cacheKey = `media_${chatId}_${messageId}_thumb`;
+    const cachedUrl = await mediaCache.getMedia(cacheKey, 'image/jpeg');
+    if (cachedUrl) return { success: true, filePath: cachedUrl };
+    const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
+    if (cachedNativeUrl) return { success: true, filePath: cachedNativeUrl };
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
+      try {
+        const meta: any = await this.tdlibBridge.getNativeMediaMeta({ chatId, messageId });
+        const nativeThumbPath = meta?.thumbnailPath || meta?.thumbnail_path;
+        if (nativeThumbPath) {
+          const filePath = convertFileSrc(nativeThumbPath);
+          mediaCache.cacheUrlInMemory(cacheKey, filePath);
+          await mediaCache.saveNativeFileReference(cacheKey, nativeThumbPath, 'image/jpeg');
+          return { success: true, filePath };
         }
+
+        const nativeMediaPath = meta?.nativeFilePath || meta?.native_file_path;
+        const mimeType = meta?.mimeType || meta?.mime_type;
+        if (nativeMediaPath && typeof mimeType === 'string' && mimeType.startsWith('image/')) {
+          const filePath = convertFileSrc(nativeMediaPath);
+          mediaCache.cacheUrlInMemory(cacheKey, filePath);
+          await mediaCache.saveNativeFileReference(cacheKey, nativeMediaPath, mimeType);
+          return { success: true, filePath };
+        }
+      } catch {
+        // Native metadata is best-effort before asking TDLib for a thumbnail.
       }
-      return { success: false };
-    } catch (e: any) {
-      return { success: false, error: e.message };
+    }
+    const pendingAfterCacheCheck = this.mediaThumbRequests.get(requestKey);
+    if (pendingAfterCacheCheck) return pendingAfterCacheCheck;
+
+    const request = this.enqueueThumbnailRequest(
+      requestKey,
+      chatId,
+      messageId,
+      () => this.getMessageMediaInner({ chatId, messageId }),
+      priority,
+      { success: false, canceled: true }
+    );
+    this.mediaThumbRequests.set(requestKey, request);
+    try {
+      return await request;
+    } finally {
+      this.mediaThumbRequests.delete(requestKey);
     }
   }
 
-  async getMessageMediaFile({ chatId, messageId }: any) {
+  private async getMessageMediaInner({ chatId, messageId }: any) {
+    const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
+    if (fakeMessage) {
+      if (!fakeMessage.url) return { success: false };
+      return { success: true, filePath: fakeMessage.thumbnailUrl || null };
+    }
+
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibInit();
+        const nativeRes: any = await this.tdlibBridge.downloadMessageThumbnail({ chatId, messageId });
+        if (nativeRes?.success && nativeRes.filePath) {
+          const cacheKey = `media_${chatId}_${messageId}_thumb`;
+          const filePath = convertFileSrc(nativeRes.filePath);
+          mediaCache.cacheUrlInMemory(cacheKey, filePath);
+          await mediaCache.saveNativeFileReference(cacheKey, nativeRes.filePath, 'image/jpeg');
+          return { success: true, filePath };
+        }
+        return { success: false, error: nativeRes?.error || 'TDLib não retornou thumbnail.' };
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    return { success: false, error: 'TDLib nativo indisponível para carregar thumbnail.' };
+  }
+
+  async getCachedMessageMediaFile({ chatId, messageId, mimeType }: any) {
+    const nativeCached = await this.getNativeCachedMessageMediaFile({ chatId, messageId });
+    if (nativeCached) return nativeCached;
+
+    const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+    const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
+    if (cachedNativeUrl) return { success: true, filePath: cachedNativeUrl };
+    const cachedUrl = await mediaCache.getMedia(cacheKey, mimeType);
+    if (cachedUrl) return { success: true, filePath: cachedUrl };
+    return { success: false };
+  }
+
+  async isMessageMediaFileCached({ chatId, messageId, mimeType }: any) {
+    const cached = await this.getCachedMessageMediaFile({ chatId, messageId, mimeType });
+    return Boolean(cached?.success);
+  }
+
+  async ensureMessageMediaCached({ chatId, messageId, priority = 'user', mimeType }: any) {
+    const requestKey = `${chatId}_${messageId}`;
+    const pendingRequest = this.mediaFileRequests.get(requestKey);
+    if (pendingRequest) return pendingRequest;
+
+    const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+    const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
+    if (cachedNativeUrl) return { success: true, filePath: cachedNativeUrl };
+    const cachedUrl = await mediaCache.getMedia(cacheKey, mimeType);
+    if (cachedUrl) return { success: true, filePath: cachedUrl };
+
+    const request = this.enqueueFullMediaRequest(
+      requestKey,
+      chatId,
+      messageId,
+      () => this.getMessageMediaFileInner({ chatId, messageId, priority, mimeType }),
+      priority,
+      { success: false, canceled: true, error: 'Download cancelado antes de iniciar.' }
+    );
+    this.mediaFileRequests.set(requestKey, request);
+    try {
+      return await request;
+    } finally {
+      this.mediaFileRequests.delete(requestKey);
+    }
+  }
+
+  async getMessageMediaFile(opts: any) {
+    return this.ensureMessageMediaCached(opts);
+  }
+
+  prefetchMessageMediaFile({ chatId, messageId }: any) {
+    if (this.findTwitterFakeMessage(chatId, messageId)) return;
+
+    const requestKey = `${chatId}_${messageId}`;
+    if (this.mediaFileRequests.has(requestKey)) return;
+
+    void this.getMessageMediaFile({ chatId, messageId, priority: 'background' }).then((res: any) => {
+      if (!res?.success && !res?.canceled) {
+        debugWarn(`[TelegramService] prefetchMessageMediaFile failed for ${chatId}/${messageId}: ${res?.error || 'unknown error'}`);
+      }
+    }).catch((error: any) => {
+      debugWarn(`[TelegramService] prefetchMessageMediaFile failed for ${chatId}/${messageId}: ${error?.message || error}`);
+    });
+  }
+
+  private async getMessageMediaFileInner({ chatId, messageId, priority = 'user', mimeType }: any) {
+    const cacheKey = this.fullMediaCacheKey(chatId, messageId);
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (fakeMessage) {
       if (!fakeMessage.url) return { success: false };
       return this.downloadTwitterFakeMedia(chatId, messageId, fakeMessage);
     }
 
-    if (!this.client) return { success: false };
     try {
-      const cacheKey = `media_${chatId}_${messageId}_full`;
-      const cachedUrl = await mediaCache.getMedia(cacheKey);
+      const nativeCached = await this.ensureNativeMessageMediaCached({ chatId, messageId, priority });
+      if (nativeCached) return nativeCached;
+
+      const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
+      if (cachedNativeUrl) return { success: true, filePath: cachedNativeUrl };
+      const cachedUrl = await mediaCache.getMedia(cacheKey, mimeType);
       if (cachedUrl) return { success: true, filePath: cachedUrl };
 
-      const entity = await this.client.getEntity(chatId);
-      const messages = await this.client.getMessages(entity, { ids: [messageId] });
-      if (messages && messages.length > 0 && messages[0].media) {
-        const buffer = await this.client.downloadMedia(messages[0], {
-          progressCallback: (downloaded, total) => {
-            if (total) {
-              const progress = Math.round((Number(downloaded) / Number(total)) * 100);
-              this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
-            }
-          }
-        });
-        if (buffer) {
-          const mimeType = (messages[0].media as any)?.document?.mimeType || undefined;
-          const url = await mediaCache.saveMedia(cacheKey, buffer, mimeType);
-          return { success: true, filePath: url };
-        }
-      }
-      return { success: false };
+      const nativeRes = await this.cacheMessageMediaWithTdlib({ chatId, messageId });
+      if (nativeRes?.success) return nativeRes;
+      return { success: false, error: nativeRes?.error || 'TDLib não retornou mídia.' };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
 
-  async getMessageMediaStream(opts: any): Promise<{ success: boolean; streamUrl?: string; filePath?: string; error?: any }> {
-    const { chatId, messageId } = opts;
-    const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
-    if (fakeMessage) {
-      if (!fakeMessage.url) return { success: false };
-      const downloadRes = await this.downloadTwitterFakeMedia(chatId, messageId, fakeMessage);
-      if (!downloadRes.success) return downloadRes;
-      
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        debugLog(`[TelegramService] getMessageMediaStream using service worker stream for Twitter video ${chatId}/${messageId}`);
-        return { success: true, streamUrl: `/stream_media/${chatId}/${messageId}` };
+  async prepareMessageMediaPlayback({ chatId, messageId, mode = 'inline' }: any) {
+    const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib && !this.findTwitterFakeMessage(chatId, messageId)) {
+      try {
+        const nativeRes: any = await this.tdlibBridge.prepareNativeMediaPlayback({ chatId, messageId, mode });
+        const file = this.nativeMediaResultToFile(nativeRes);
+        debugLog('[TelegramService] Native playback response', {
+          chatId,
+          messageId,
+          mode,
+          nativeRes,
+          normalized: file,
+        });
+        if (file) {
+          await mediaCache.saveNativeFileReference(cacheKey, file.nativeFilePath, file.mimeType);
+          return {
+            success: true,
+            source: 'native',
+            cacheState: file.cacheState || 'native',
+            playbackUrl: file.filePath,
+            filePath: file.filePath,
+            nativeFilePath: file.nativeFilePath,
+            mimeType: file.mimeType,
+            totalBytes: file.size,
+          };
+        }
+        if ((nativeRes?.state === 'partial' || nativeRes?.cacheState === 'partial') && !nativeRes?.error) {
+          return { success: false, canceled: true, cacheState: 'partial', error: 'Download cancelado.' };
+        }
+        return { success: false, error: nativeRes?.error || 'TDLib não preparou a reprodução.' };
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
       }
-      return downloadRes;
     }
 
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      // Prefer range-capable streaming for video playback. Blob URLs from the
-      // full-media cache are still useful as a fallback, but they can be less
-      // reliable for media seeking/playback in WebView.
-      debugLog(`[TelegramService] getMessageMediaStream using service worker stream for ${chatId}/${messageId}`);
-      return { success: true, streamUrl: `/stream_media/${chatId}/${messageId}` };
+    const cached = await this.getCachedMessageMediaFile({ chatId, messageId, mimeType: 'video/mp4' });
+    if (cached.success && cached.filePath) {
+      return {
+        success: true,
+        source: 'cache',
+        cacheState: 'complete',
+        playbackUrl: cached.filePath,
+        filePath: cached.filePath,
+      };
     }
 
-    const cacheKey = `media_${chatId}_${messageId}_full`;
-    const cachedUrl = await mediaCache.getMedia(cacheKey, 'video/mp4');
-    if (cachedUrl) {
-      debugLog(`[TelegramService] getMessageMediaStream using cached blob fallback for ${chatId}/${messageId}`);
-      return { success: true, streamUrl: cachedUrl };
+    if (this.useTdlibOnly()) {
+      const nativeRes = await this.ensureMessageMediaCached({ chatId, messageId, priority: 'user' });
+      if (nativeRes?.success && nativeRes.filePath) {
+        return {
+          success: true,
+          source: 'native',
+          cacheState: 'native',
+          playbackUrl: nativeRes.filePath,
+          filePath: nativeRes.filePath,
+        };
+      }
+      return nativeRes;
     }
 
-    // Fallback: download full file
-    debugLog(`[TelegramService] getMessageMediaStream downloading full media fallback for ${chatId}/${messageId}`);
-    const res = await this.getMessageMediaFile(opts);
-    if (res.success && res.filePath) {
-      return { success: true, streamUrl: res.filePath };
+    const fullRes = await this.ensureMessageMediaCached({ chatId, messageId, priority: mode === 'background' ? 'background' : 'user' });
+    if (fullRes?.success && fullRes.filePath) {
+      return {
+        success: true,
+        source: 'cache',
+        cacheState: 'complete',
+        playbackUrl: fullRes.filePath,
+        filePath: fullRes.filePath,
+      };
     }
-    debugWarn(`[TelegramService] getMessageMediaStream failed for ${chatId}/${messageId}: ${res.error || 'unknown error'}`);
+    return fullRes;
+  }
+
+  async getMessageMediaStream(opts: any): Promise<{ success: boolean; streamUrl?: string; filePath?: string; error?: any }> {
+    const res = await this.prepareMessageMediaPlayback(opts);
+    if (res.success && res.playbackUrl) return { ...res, streamUrl: res.playbackUrl };
     return res;
   }
 
@@ -1543,72 +1601,7 @@ class TelegramService {
       };
     }
 
-    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
-
-    const peerIdToString = (value: any): string => {
-      if (value == null) return '';
-      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
-        return String(value);
-      }
-      if (typeof value.toString === 'function' && value.toString !== Object.prototype.toString) {
-        const str = value.toString();
-        if (str && str !== '[object Object]') return str;
-      }
-      return String(value.userId ?? value.channelId ?? value.chatId ?? value.value ?? value.id ?? '');
-    };
-    const normalizePeerId = (value: any) => peerIdToString(value).replace(/[^\d-]/g, '');
-    const targetUserId = normalizePeerId(userId);
-
-    const mapMediaMessage = (m: any) => ({
-      id: m.id,
-      isVideo: !!(m.media?.document?.mimeType && typeof m.media.document.mimeType === 'string' && m.media.document.mimeType.includes('video')),
-      mediaSize: m.media?.document?.size ? Number(m.media.document.size) : (m.media?.photo?.sizes?.slice(-1)[0]?.size || null),
-    });
-
-    try {
-      const entity = await this.client.getEntity(chatId);
-      let fromUser: any = userId;
-      try {
-        fromUser = await this.client.getEntity(userId);
-      } catch {
-        // Numeric sender IDs still work as a fallback in some GramJS paths.
-      }
-
-      let messages: any[] = [];
-      try {
-        messages = await this.client.getMessages(entity, {
-          limit,
-          filter: new Api.InputMessagesFilterPhotoVideo(),
-          fromUser,
-        });
-      } catch (searchErr) {
-        debugWarn('Telegram fromUser media search failed, falling back to scan:', searchErr);
-      }
-
-      let mediaMessages = (Array.isArray(messages) ? messages : []).filter((m: any) => m?.media);
-
-      if (mediaMessages.length === 0) {
-        const scanLimit = Math.max(limit * 10, 1000);
-        messages = await this.client.getMessages(entity, {
-          limit: scanLimit,
-          filter: new Api.InputMessagesFilterPhotoVideo(),
-        });
-        mediaMessages = (Array.isArray(messages) ? messages : [])
-          .filter((m: any) => {
-            const senderId = normalizePeerId(m.senderId ?? m.fromId);
-            return m?.media && senderId && senderId === targetUserId;
-          })
-          .slice(0, limit);
-      }
-
-      return {
-        success: true,
-        media: mediaMessages.map(mapMediaMessage),
-      };
-    } catch (e: any) {
-      console.error('Failed to search user media:', e);
-      return { success: false, error: e.message || 'Falha ao buscar mídias do usuário.' };
-    }
+    return this.tdlibBridge.searchUserMedia({ chatId, userId, limit });
   }
   async selectFolder() {
     try {
@@ -1621,7 +1614,7 @@ class TelegramService {
       if (!selected || Array.isArray(selected)) return { success: false, folderPath: '' };
       return { success: true, folderPath: selected };
     } catch (e: any) {
-      console.error('Failed to select folder:', e);
+      debugWarn('Failed to select folder:', e);
       return { success: false, folderPath: '', error: e?.message || String(e) };
     }
   }
@@ -1636,85 +1629,79 @@ class TelegramService {
         return this.saveMultipleFakeMediaFiles({ chatId, messageIds, folderPath, fakeChat });
       }
 
-      if (!this.client) return { success: false, error: 'Telegram não conectado.' };
-
-      const entity = await this.client.getEntity(chatId);
       const total = messageIds.length;
       let downloadedCount = 0;
       let failedCount = 0;
       const runId = Date.now();
-      const workers = await this.getDownloadWorkers();
+      const activeDownloadIds = new Map<number, string>();
+      const unsubscribe = this.onMediaProgress((data: any) => {
+        if (String(data.chatId) !== String(chatId)) return;
+        const downloadId = activeDownloadIds.get(Number(data.messageId));
+        if (!downloadId) return;
+        downloadService.updateDownload(downloadId, { progress: data.progress || 0 });
+      });
 
-      const batchResult = await this.client.getMessages(entity, { ids: messageIds });
-      const messages = Array.isArray(batchResult) ? batchResult : (batchResult ? [batchResult] : []);
-      const messageMap = new Map();
-      for (const msg of messages) {
-        if (msg?.id) messageMap.set(msg.id, msg);
-      }
-
-      for (let i = 0; i < messageIds.length; i++) {
-        if (this.saveMultipleAborted) break;
-
-        const messageId = messageIds[i];
-        const message = messageMap.get(messageId);
-        if (!message?.media) {
-          failedCount++;
-          continue;
-        }
-
-        const filename = getMessageDownloadFilename(message);
-        const filePath = joinPath(folderPath, filename);
-        const downloadId = `telegram_bulk_${chatId}_${messageId}_${runId}`;
-
-        if (await this.pathExists(filePath)) {
-          downloadedCount++;
-          this.emitSaveMultipleProgress({
-            chatId,
-            total,
-            downloaded: downloadedCount,
-            currentFile: `Ignorado (já existe): ${filename}`,
-            status: 'progress'
-          });
-          continue;
-        }
-
-        downloadService.addDownload({
-          id: downloadId,
-          chatId,
-          messageId,
-          fileName: filename,
-          filePath,
-          progress: 0,
-          status: 'downloading',
-          platform: 'telegram',
-        });
-        this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'downloading' });
-
-        try {
-          await this.saveTelegramMessageToFile(message, filePath, workers, (percent) => {
-            if (this.saveMultipleAborted) throw new Error('STOP_ABORTED');
-            downloadService.updateDownload(downloadId, { progress: percent });
-            this.emitSaveMultipleProgress({
-              chatId,
-              total,
-              downloaded: downloadedCount + (percent / 100),
-              currentFile: `${filename} (${percent}%)`,
-              status: 'progress'
-            });
-          });
-
+      try {
+        for (const rawMessageId of messageIds) {
           if (this.saveMultipleAborted) break;
-          downloadedCount++;
-          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
-        } catch (err: any) {
-          if (err?.message === 'STOP_ABORTED' || this.saveMultipleAborted) break;
-          console.error(`Error downloading media for message ${messageId}:`, err);
-          failedCount++;
-          downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
-        }
+          const messageId = Number(rawMessageId);
+          let filename = sanitizeForFilename(`media_${messageId}`);
+          try {
+            const meta: any = await this.tdlibBridge.getNativeMediaMeta({ chatId, messageId });
+            if (meta?.fileName) filename = sanitizeForFilename(meta.fileName);
+          } catch {
+            // Metadata is best-effort; TDLib save can still resolve the final name.
+          }
 
-        this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'progress' });
-        await nextFrame();
+          const downloadId = `telegram_bulk_${chatId}_${messageId}_${runId}`;
+          activeDownloadIds.set(messageId, downloadId);
+          downloadService.addDownload({
+            id: downloadId,
+            chatId,
+            messageId,
+            fileName: filename,
+            progress: 0,
+            status: 'downloading',
+            platform: 'telegram',
+          });
+          this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'downloading' });
+
+          try {
+            const cached: any = await this.tdlibBridge.ensureNativeMediaCached({ chatId, messageId, priority: 'user' });
+            if (!cached?.success) {
+              throw new Error(cached?.error || 'Falha ao preparar mídia.');
+            }
+            if (cached.fileName) filename = sanitizeForFilename(cached.fileName);
+            const filePath = joinPath(folderPath, filename);
+            downloadService.updateDownload(downloadId, { fileName: filename, filePath });
+
+            const res: any = await this.tdlibBridge.saveNativeMedia({ chatId, messageId, destinationPath: filePath });
+            if (this.saveMultipleAborted || res?.canceled) break;
+            if (res?.success) {
+              downloadedCount++;
+              downloadService.updateDownload(downloadId, {
+                status: 'completed',
+                progress: 100,
+                fileName: res.fileName || filename,
+                filePath: res.filePath || filePath,
+              });
+            } else {
+              failedCount++;
+              downloadService.updateDownload(downloadId, { status: 'failed', error: res?.error || 'Falha ao salvar mídia.' });
+            }
+          } catch (error: any) {
+            if (this.saveMultipleAborted || String(error).includes('STOP_ABORTED')) break;
+            failedCount++;
+            downloadService.updateDownload(downloadId, { status: 'failed', error: error?.message || String(error) });
+          } finally {
+            activeDownloadIds.delete(messageId);
+          }
+
+          this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'progress' });
+          await nextFrame();
+        }
+      } finally {
+        unsubscribe();
       }
 
       this.emitSaveMultipleProgress({
@@ -1722,12 +1709,12 @@ class TelegramService {
         total,
         downloaded: downloadedCount,
         currentFile: this.saveMultipleAborted ? 'Cancelado pelo usuário' : 'Concluído!',
-        status: 'completed'
+        status: 'completed',
       });
 
       return { success: true, downloadedCount, failedCount, aborted: this.saveMultipleAborted };
     } catch (error: any) {
-      console.error('Error in saveMultipleMediaFiles:', error);
+      debugWarn('Error in saveMultipleMediaFiles:', error);
       return { success: false, error: error?.message || String(error) };
     }
   }
@@ -1768,14 +1755,15 @@ class TelegramService {
           status: 'downloading',
           platform: 'telegram',
         });
-        await this.downloadUrlToFile(message.url, filePath, (percent) => {
+        await this.fileStorage.downloadUrlToFile(message.url, filePath, (payload) => {
+          const percent = payload.percent;
           downloadService.updateDownload(downloadId, { progress: percent });
           this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount + (percent / 100), currentFile: `${filename} (${percent}%)`, status: 'progress' });
         });
         downloadedCount++;
         downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
       } catch (err) {
-        console.error(`Error downloading fake media for message ${messageId}:`, err);
+        debugWarn(`Error downloading fake media for message ${messageId}:`, err);
         failedCount++;
         downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
@@ -1806,80 +1794,21 @@ class TelegramService {
     return { success: true, filePath: selected, fileName: basename(selected) };
   }
 
-  async sendMedia({ chatId, filePath, caption = '', replyToId, topicId }: any) {
-    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
-
-    try {
-      const entity = await this.client.getEntity(chatId);
-      let lastProgress = -1;
-      const replyTo = replyToId || topicId || undefined;
-      const message = await this.client.sendFile(entity, {
-        file: filePath,
-        caption: caption || '',
-        replyTo,
-        progressCallback: (uploaded: any, total: any) => {
-          const totalNumber = toNumberValue(total);
-          const progress = totalNumber > 0
-            ? Math.min(100, Math.round((toNumberValue(uploaded) / totalNumber) * 100))
-            : 0;
-          if (progress !== lastProgress) {
-            lastProgress = progress;
-            this.emitSendProgress({ chatId, progress });
-          }
-        },
-      });
-      this.emitSendProgress({ chatId, progress: 100 });
-      return { success: true, message };
-    } catch (error: any) {
-      console.error('Failed to send media:', error);
-      return { success: false, error: error?.message || String(error) };
-    }
+  async sendMedia(opts: any) {
+    const res = await this.tdlibBridge.sendMedia(opts);
+    if (res?.success) this.emitSendProgress({ chatId: opts.chatId, progress: 100 });
+    return res;
   }
 
-  async sendMessage({ chatId, text, replyToId, topicId }: any) {
-    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+  async sendMessage(opts: any) {
+    const { text } = opts;
     if (!String(text || '').trim()) return { success: false, error: 'Mensagem vazia.' };
-
-    try {
-      const entity = await this.client.getEntity(chatId);
-      const replyTo = replyToId || topicId || undefined;
-      const message = await this.client.sendMessage(entity, {
-        message: String(text),
-        replyTo,
-      });
-      return { success: true, message };
-    } catch (error: any) {
-      console.error('Failed to send message:', error);
-      return { success: false, error: error?.message || String(error) };
-    }
+    return this.tdlibBridge.sendMessage(opts);
   }
-  async forwardMessage({ chatId, messageId, toChatId = chatId, topicId }: any) {
-    if (!this.client) return { success: false, error: 'Telegram não conectado.' };
+  async forwardMessage(opts: any) {
+    const { messageId } = opts;
     if (!messageId) return { success: false, error: 'Mensagem inválida.' };
-
-    try {
-      const fromEntity = await this.client.getEntity(chatId);
-      const toEntity = await this.client.getEntity(toChatId);
-
-      if (topicId) {
-        const result = await this.client.invoke(new Api.messages.ForwardMessages({
-          fromPeer: await this.client.getInputEntity(fromEntity),
-          id: [Number(messageId)],
-          toPeer: await this.client.getInputEntity(toEntity),
-          topMsgId: Number(topicId),
-        } as any));
-        return { success: true, result };
-      }
-
-      const messages = await this.client.forwardMessages(toEntity, {
-        messages: [Number(messageId)],
-        fromPeer: fromEntity,
-      });
-      return { success: true, messages };
-    } catch (error: any) {
-      console.error('Failed to forward message:', error);
-      return { success: false, error: error?.message || String(error) };
-    }
+    return this.tdlibBridge.forwardMessage(opts);
   }
   async createTopic(opts: any) { return { success: true }; }
   async getOriginalMessage(opts: any) { return { success: true, message: null }; }
@@ -1888,20 +1817,17 @@ class TelegramService {
   async joinChat(chatId: any) { return { success: true }; }
   async saveMessageMediaFile({ chatId, messageId, downloadMeta = {}, saveAs = false }: any) {
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
-    if (!this.client && !fakeMessage) return { success: false };
-    let message: any = null;
+    if (!runtimeCapabilities.isTauri && !fakeMessage) return { success: false, error: 'TDLib nativo indisponível.' };
     let suggestedName = `media_${messageId}`;
 
     if (fakeMessage) {
       suggestedName = sanitizeForFilename(`media_${messageId}${fakeMessage.isVideo ? '.mp4' : '.jpg'}`);
-    } else {
+    } else if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
       try {
-        const entity = await this.client!.getEntity(chatId);
-        const messages = await this.client!.getMessages(entity, { ids: [messageId] });
-        message = Array.isArray(messages) ? messages[0] : messages;
-        if (message) suggestedName = getMessageDownloadFilename(message);
-      } catch (e) {
-        console.error('Failed to load media before Save As:', e);
+        const meta: any = await this.tdlibBridge.getNativeMediaMeta({ chatId, messageId });
+        if (meta?.fileName) suggestedName = sanitizeForFilename(meta.fileName);
+      } catch {
+        // Native metadata is best-effort before opening the save dialog.
       }
     }
 
@@ -1946,31 +1872,75 @@ class TelegramService {
         }
       });
 
+      if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib && !fakeMessage) {
+        try {
+          const nativeSave: any = await this.tdlibBridge.saveNativeMedia({
+            chatId,
+            messageId,
+            destinationPath: saveAs && saveAsPath ? saveAsPath : null,
+          });
+
+          if (nativeSave?.success && nativeSave.filePath) {
+            unsub();
+            downloadService.updateDownload(id, {
+              status: 'completed',
+              progress: 100,
+              fileName: nativeSave.fileName || basename(nativeSave.filePath),
+              filePath: nativeSave.filePath,
+            });
+            return { success: true, filePath: nativeSave.filePath };
+          }
+
+          if (nativeSave?.error === 'STOP_ABORTED' || nativeSave?.canceled) {
+            unsub();
+            downloadService.updateDownload(id, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
+            return { success: false, canceled: true };
+          }
+
+          if (this.useTdlibOnly()) {
+            unsub();
+            const error = nativeSave?.error || 'TDLib não salvou a mídia.';
+            downloadService.updateDownload(id, { status: 'failed', error });
+            return { success: false, error };
+          }
+
+          debugWarn('[TelegramService] Native Save failed:', nativeSave?.error || nativeSave);
+        } catch (error) {
+          if (String(error).includes('STOP_ABORTED')) {
+            unsub();
+            downloadService.updateDownload(id, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
+            return { success: false, canceled: true };
+          }
+          if (this.useTdlibOnly()) {
+            unsub();
+            const message = error instanceof Error ? error.message : String(error);
+            downloadService.updateDownload(id, { status: 'failed', error: message });
+            return { success: false, error: message };
+          }
+          debugWarn('[TelegramService] Native Save command failed:', error);
+        }
+      }
+
       if (saveAs && saveAsPath) {
-        if (fakeMessage) {
+        const cacheKey = this.fullMediaCacheKey(chatId, messageId);
+        const cachedOrPending = await this.getMessageMediaFile({ chatId, messageId, priority: 'user' });
+        if (cachedOrPending.canceled) {
+          downloadService.updateDownload(id, { status: 'canceled', progress: 0, error: 'Cancelado antes de iniciar.' });
+          unsub();
+          return { success: false, canceled: true };
+        }
+
+        if (cachedOrPending.success && cachedOrPending.filePath) {
+          await this.fileStorage.saveCachedMediaToPath(cacheKey, cachedOrPending.filePath, saveAsPath);
+        } else if (fakeMessage) {
           if (!fakeMessage.url) throw new Error('Mídia sem URL.');
-          await this.downloadUrlToFile(fakeMessage.url, saveAsPath, (progress) => {
+          await this.fileStorage.downloadUrlToFile(fakeMessage.url, saveAsPath, (payload) => {
+            const progress = payload.percent;
             downloadService.updateDownload(id, { progress });
-            this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
+            this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, downloadedBytes: payload.downloadedBytes, totalBytes: payload.totalBytes, stage: 'downloading' }));
           });
         } else {
-          if (!message) {
-            const entity = await this.client!.getEntity(chatId);
-            const messages = await this.client!.getMessages(entity, { ids: [messageId] });
-            message = Array.isArray(messages) ? messages[0] : messages;
-          }
-          if (!message?.media) throw new Error('Mídia não encontrada.');
-          try {
-            await this.saveTelegramMessageToFile(message, saveAsPath, await this.getDownloadWorkers(), (progress) => {
-              downloadService.updateDownload(id, { progress });
-              this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'downloading' }));
-            });
-          } catch (directError) {
-            debugWarn('[TelegramService] Direct Save As failed, trying cached media fallback:', directError);
-            const res = await this.getMessageMediaFile({ chatId, messageId });
-            if (!res.success || !res.filePath) throw directError;
-            await this.saveCachedMediaToPath(`media_${chatId}_${messageId}_full`, res.filePath, saveAsPath);
-          }
+          throw new Error('Download legado indisponível. Use TDLib nativo.');
         }
         unsub();
         downloadService.updateDownload(id, {
@@ -1981,21 +1951,26 @@ class TelegramService {
         return { success: true, filePath: saveAsPath };
       }
 
-      const res = await this.getMessageMediaFile({ chatId, messageId });
+      const res = await this.getMessageMediaFile({ chatId, messageId, priority: 'user' });
       unsub();
+
+      if (res.canceled) {
+        downloadService.updateDownload(id, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado antes de iniciar.',
+        });
+        return { success: false, canceled: true };
+      }
 
       if (res.success && res.filePath) {
         let savedFilePath: string | undefined;
         if (runtimeCapabilities.isAndroid) {
           if (fakeMessage?.url) {
-            const downloadDir = await getDownloadDir();
-            savedFilePath = await joinSystemPath(downloadDir, suggestedName);
-            await this.downloadUrlToFile(fakeMessage.url, savedFilePath, (progress) => {
-              downloadService.updateDownload(id, { progress });
-              this.mediaProgressCallbacks.forEach(cb => cb({ chatId, messageId, progress, stage: 'saving' }));
-            });
+            savedFilePath = await this.fileStorage.pathForDownload(suggestedName);
+            await this.fileStorage.saveCachedMediaToPath(this.fullMediaCacheKey(chatId, messageId), res.filePath, savedFilePath);
           } else {
-            savedFilePath = await this.saveCachedMediaToDownloads(`media_${chatId}_${messageId}_full`, suggestedName, res.filePath);
+            savedFilePath = await this.fileStorage.saveCachedMediaToDownloads(this.fullMediaCacheKey(chatId, messageId), suggestedName, res.filePath);
           }
         }
 
@@ -2033,7 +2008,7 @@ class TelegramService {
     }
     return { success: true };
   }
-  async getSharedMedia({ chatId, limit = 12 }: any) {
+  async getCachedSharedMedia({ chatId, limit = 12 }: any) {
     const fakeChat = this.getTwitterFakeChat(chatId);
     if (fakeChat) {
       return {
@@ -2046,28 +2021,65 @@ class TelegramService {
       };
     }
 
-    if (!this.client) return { success: false };
+    const cacheKey = `${chatId}:${limit}`;
+    const cached = this.sharedMediaCache.get(cacheKey);
+    if (cached && Date.now() - cached.loadedAt < 60 * 1000) {
+      return { success: true, media: cached.media, fromCache: true };
+    }
+
+    const messageCache = messageCacheKey(String(chatId));
+    const cachedSharedMedia = await mediaCache.getSharedMediaMessages(messageCache, limit);
+    if (cachedSharedMedia.length > 0) {
+      this.sharedMediaCache.set(cacheKey, { loadedAt: Date.now(), media: cachedSharedMedia });
+      return { success: true, media: cachedSharedMedia, fromCache: true };
+    }
+
+    return { success: true, media: [], fromCache: true };
+  }
+
+  async refreshSharedMedia({ chatId, limit = 12 }: any) {
+    const fakeChat = this.getTwitterFakeChat(chatId);
+    if (fakeChat) return this.getCachedSharedMedia({ chatId, limit });
+
+    const cacheKey = `${chatId}:${limit}`;
     try {
-      const entity = await this.client.getEntity(chatId);
-      const messages = await this.client.getMessages(entity, {
-        limit,
-        filter: new Api.InputMessagesFilterPhotoVideo()
-      });
-      return {
-        success: true,
-        media: messages.map(m => ({
-          id: m.id,
-          isVideo: !!m.video,
-          mediaSize: m.document?.size ? Number(m.document.size) : null
-        }))
-      };
-    } catch (e: any) {
-      return { success: false, error: e.message };
+      await this.tdlibInit();
+      const nativeRes: any = await this.tdlibBridge.getSharedMedia(chatId, limit);
+      if (nativeRes?.success) {
+        this.sharedMediaCache.set(cacheKey, { loadedAt: Date.now(), media: nativeRes.media || [] });
+        return nativeRes;
+      }
+      return { success: false, media: [], error: nativeRes?.error || 'TDLib não retornou mídia compartilhada.' };
+    } catch (error) {
+      return { success: false, media: [], error: error instanceof Error ? error.message : String(error) };
     }
   }
 
+  async getSharedMedia({ chatId, limit = 12, refresh = true }: any) {
+    const cached = await this.getCachedSharedMedia({ chatId, limit });
+    if (cached.media?.length || !refresh) return cached;
+    return this.refreshSharedMedia({ chatId, limit });
+  }
+
   async getCacheStats() {
-    return mediaCache.getCacheStats();
+    const stats: any = await mediaCache.getCacheStats();
+    if (!runtimeCapabilities.isTauri || !runtimeCapabilities.supportsTdlib) return stats;
+
+    try {
+      const nativeStats: any = await this.tdlibBridge.getNativeMediaCacheStats();
+      if (nativeStats?.success) {
+        return {
+          ...stats,
+          totalSize: Number(stats.totalSize || 0) + Number(nativeStats.totalSize || 0),
+          mediaCount: Number(stats.mediaCount || 0) + Number(nativeStats.mediaCount || 0),
+          nativeTotalSize: Number(nativeStats.totalSize || 0),
+          nativeMediaCount: Number(nativeStats.mediaCount || 0),
+        };
+      }
+    } catch (error) {
+      debugWarn('[TelegramService] Native cache stats unavailable:', error);
+    }
+    return stats;
   }
 
   async getCacheSettings() {
@@ -2082,11 +2094,25 @@ class TelegramService {
 
   async setCacheSettings(settings: any) {
     const success = await mediaCache.setCacheSettings(settings);
+    if (success && runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibBridge.evictNativeMediaCache(Number(settings.maxCacheSize || 0));
+      } catch (error) {
+        debugWarn('[TelegramService] Native cache eviction failed:', error);
+      }
+    }
     return { success };
   }
 
   async clearCache() {
     await mediaCache.clearCache();
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
+      try {
+        await this.tdlibBridge.clearNativeMediaCache();
+      } catch (error) {
+        debugWarn('[TelegramService] Native cache clear failed:', error);
+      }
+    }
     return { success: true };
   }
 }

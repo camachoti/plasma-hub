@@ -4,7 +4,7 @@ export interface DownloadItem {
   messageId?: number; // Optional, for Telegram
   fileName: string;
   progress: number;
-  status: 'downloading' | 'completed' | 'failed';
+  status: 'downloading' | 'completed' | 'failed' | 'canceled';
   error?: string;
   filePath?: string;
   fileSize?: number;

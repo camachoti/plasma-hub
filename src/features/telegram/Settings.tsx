@@ -10,6 +10,8 @@ interface CacheStats {
   messageCount: number;
   mediaCount: number;
   avatarCount: number;
+  nativeTotalSize?: number;
+  nativeMediaCount?: number;
 }
 
 interface CacheSettings {
@@ -343,6 +345,10 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                       <div className="settings-stat">
                         <span className="settings-stat-value">{stats.mediaCount.toLocaleString()}</span>
                         <span className="settings-stat-label">Arquivos de mídia</span>
+                      </div>
+                      <div className="settings-stat">
+                        <span className="settings-stat-value">{formatBytes(stats.nativeTotalSize || 0)}</span>
+                        <span className="settings-stat-label">Cache nativo</span>
                       </div>
                       <div className="settings-stat">
                         <span className="settings-stat-value">{stats.avatarCount.toLocaleString()}</span>

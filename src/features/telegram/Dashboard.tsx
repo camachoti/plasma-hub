@@ -1,5 +1,6 @@
 // @ts-nocheck
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { invokeCommand as invoke } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
@@ -16,56 +17,25 @@ import { appStorage } from '../../shared/storage/appStorage';
 import { writeClipboardText } from '../../shared/platform/clipboard';
 import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { QUICK_REACTIONS, TOPIC_ICON_COLORS, hashColor } from './TelegramDashboardConstants';
-import type { Chat, ChatFullInfo, ForumTopic, Message, TimelineItem } from './TelegramDashboardTypes';
-
-const getTimelineItems = (msgs: Message[]): TimelineItem[] => {
-  const items: TimelineItem[] = [];
-  let currentAlbum: { id: string; messages: Message[] } | null = null;
-
-  for (const m of msgs) {
-    if (m.groupedId) {
-      if (currentAlbum && currentAlbum.id === m.groupedId) {
-        currentAlbum.messages.push(m);
-      } else {
-        if (currentAlbum) {
-          items.push({
-            type: 'album',
-            id: currentAlbum.messages[0].id,
-            message: currentAlbum.messages.find(msg => msg.text) || currentAlbum.messages[0],
-            messages: [...currentAlbum.messages]
-          });
-        }
-        currentAlbum = { id: m.groupedId, messages: [m] };
-      }
-    } else {
-      if (currentAlbum) {
-        items.push({
-          type: 'album',
-          id: currentAlbum.messages[0].id,
-          message: currentAlbum.messages.find(msg => msg.text) || currentAlbum.messages[0],
-          messages: [...currentAlbum.messages]
-        });
-        currentAlbum = null;
-      }
-      items.push({
-        type: 'message',
-        id: m.id,
-        message: m
-      });
-    }
-  }
-
-  if (currentAlbum) {
-    items.push({
-      type: 'album',
-      id: currentAlbum.messages[0].id,
-      message: currentAlbum.messages.find(msg => msg.text) || currentAlbum.messages[0],
-      messages: [...currentAlbum.messages]
-    });
-  }
-
-  return items;
-};
+import type { Chat, ChatFullInfo, ForumTopic, Message } from './TelegramDashboardTypes';
+import { getTimelineItems, getTopicColor, ListContainer } from './DashboardHelpers';
+import { DashboardChatList } from './DashboardChatList';
+import { DashboardInfoPanel } from './DashboardInfoPanel';
+import { DashboardMassDownloadPanel } from './DashboardMassDownloadPanel';
+import { JoinChannelBar, MessageComposer, SelectionActionBar } from './DashboardComposer';
+import {
+  IconBack,
+  IconBell,
+  IconCheck,
+  IconDownload,
+  IconLogOut,
+  IconMagic,
+  IconMore,
+  IconPanel,
+  IconPlus,
+  IconSearch,
+  IconTrash,
+} from './DashboardIcons';
 
 interface DownloadItem {
   name: string;
@@ -83,130 +53,6 @@ interface DownloadProgress {
   items?: DownloadItem[];
 }
 
-const formatBytes = (bytes: number) => {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-};
-
-// Icon helpers
-const IconSearch = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="11" cy="11" r="6.5" /><path d="m20 20-3.5-3.5" />
-  </svg>
-);
-const IconMore = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="6" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="18" cy="12" r="1.2" />
-  </svg>
-);
-const IconPanel = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" />
-  </svg>
-);
-const IconPlus = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 5v14M5 12h14" />
-  </svg>
-);
-const IconBack = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M15 18 9 12l6-6" />
-  </svg>
-);
-const IconSend = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M4 12 20 5l-4 15-4-7-8-1Z" />
-  </svg>
-);
-const IconAttach = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M20 11.5 11.5 20a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8" />
-  </svg>
-);
-const IconEmoji = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="9" /><path d="M8.5 14a4 4 0 0 0 7 0M9 9.5h.01M15 9.5h.01" />
-  </svg>
-);
-const IconSettings = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-    <circle cx="12" cy="12" r="3" />
-  </svg>
-);
-const IconCheck = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M20 6 9 17l-5-5" />
-  </svg>
-);
-const IconBell = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9m4.35 13a2 2 0 0 0 3.3 0" />
-  </svg>
-);
-const IconLogOut = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" />
-  </svg>
-);
-const IconTrash = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-  </svg>
-);
-const IconMagic = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-    <polyline points="12 11 12 19 9 16" />
-    <line x1="15" x2="12" y1="16" y2="19" />
-  </svg>
-);
-const IconDownload = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-    <polyline points="7 10 12 15 17 10" />
-    <line x1="12" x2="12" y1="15" y2="3" />
-  </svg>
-);
-
-const topicColors = [
-  '#5ca9e6, #7d95ff',
-  '#e8786e, #f5a623',
-  '#6ec6b8, #43a047',
-  '#ab7ae6, #e66fa0',
-  '#f5a623, #f7c948',
-  '#5cb8e6, #4fc3f7',
-  '#e66fa0, #ef5350',
-  '#66bb6a, #aed581',
-];
-const getTopicColor = (id: number) => topicColors[Math.abs(id) % topicColors.length];
-
-const ListContainer = React.forwardRef<HTMLDivElement, any>(({ style, children, ...props }, ref) => {
-  const getPadding = (baseVal: any, extraPx: number) => {
-    if (baseVal === undefined || baseVal === null) return `${extraPx}px`;
-    if (typeof baseVal === 'number') return `${baseVal + extraPx}px`;
-    return `calc(${baseVal} + ${extraPx}px)`;
-  };
-
-  return (
-    <div
-      {...props}
-      ref={ref}
-      style={{
-        ...style,
-        paddingTop: getPadding(style?.paddingTop, 18),
-        paddingBottom: getPadding(style?.paddingBottom, 32)
-      }}
-    >
-      {children}
-    </div>
-  );
-});
-
 interface DashboardProps {
   skipLogin?: boolean;
   onTelegramLoginRequest?: () => void;
@@ -218,6 +64,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [loading, setLoading] = useState(true);
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [visibleMediaIds, setVisibleMediaIds] = useState<Set<number>>(new Set());
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -232,6 +79,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const pendingJumpToMsgIdRef = useRef<number | null>(null);
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
   const messagesLoadSeqRef = useRef(0);
+  const sharedMediaLoadSeqRef = useRef(0);
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -313,6 +161,37 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const filteredTopics = forumTopics.filter(topic =>
     topic.title.toLowerCase().includes(topicSearch.trim().toLowerCase())
   );
+  const timelineItems = useMemo(() => getTimelineItems(messages), [messages]);
+  const timelineFirstItemIndex = useMemo(
+    () => Math.max(0, 100000 - timelineItems.length),
+    [timelineItems.length]
+  );
+  const updateVisibleMediaIds = useCallback((range: { startIndex: number; endIndex: number }) => {
+    const rawStart = Number(range.startIndex || 0);
+    const rawEnd = Number(range.endIndex || rawStart);
+    const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
+    const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
+    const ids = new Set<number>();
+
+    for (let index = start; index <= end; index++) {
+      const item = timelineItems[index];
+      if (!item) continue;
+      if (item.type === 'album') {
+        item.messages?.forEach(message => {
+          if (message.hasMedia) ids.add(Number(message.id));
+        });
+      } else if (item.message.hasMedia) {
+        ids.add(Number(item.message.id));
+      }
+    }
+
+    telegramService.cancelQueuedThumbnails({
+      activeChatId: selectedChat?.id,
+      keepMessageIds: ids,
+    });
+    telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
+    setVisibleMediaIds(ids);
+  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
 
   const getChatKind = (chat: Chat) => {
     if (chat.isFakeTwitter || (typeof chat.id === 'string' && chat.id.startsWith('twitter_profile_'))) return 'twitter';
@@ -425,7 +304,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         }
       }
     } catch (err) {
-      console.error('Handle link error:', err);
+      debugWarn('Handle link error:', err);
       telegramService.openExternal(url);
     }
   };
@@ -504,6 +383,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, []);
 
   useEffect(() => {
+    telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null);
+    telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
+
     if (selectedChat) {
       shouldScrollToBottomRef.current = true;
       setIsDownloadModalOpen(false);
@@ -536,8 +418,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setOldestMessageId(null);
         fetchForumTopics(selectedChat);
         fetchFullChat(selectedChat.id);
-        fetchSharedMedia(selectedChat.id);
-        if (!selectedChat.hasTopics) loadMessages(selectedChat.id, 0, undefined, { refresh: true });
+        if (!selectedChat.hasTopics) loadMessages(selectedChat.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat.lastMessageDate });
         else topicListScrollRef.current = 0;
       }
     } else {
@@ -630,6 +511,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [viewingTopic, loadingTopics, selectedChat?.id]);
 
   useEffect(() => {
+    if (!infoOpen || !selectedChat || selectedChat.isInvite) return;
+    if (sharedMedia.length > 0 || loadingSharedMedia) return;
+    fetchSharedMedia(selectedChat.id);
+  }, [infoOpen, selectedChat?.id, sharedMedia.length, loadingSharedMedia]);
+
+  useEffect(() => {
     const handleClickOutside = () => setIsTopicDropdownOpen(false);
     if (isTopicDropdownOpen) {
       document.addEventListener('click', handleClickOutside);
@@ -666,7 +553,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             appStorage.remove('plasma_twitter_pending_fake_chat');
           }
         }
-        // Preload avatars in background so the list feels instant
+        // Preload only the first visible-ish window in the background.
         preloadAvatars(res.dialogs);
       }
       else setError(res.error || 'Failed to fetch chats');
@@ -678,13 +565,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const preloadAvatars = async (dialogs: Chat[]) => {
-    const BATCH_SIZE = 8;
-    const MAX_PRELOAD = 60;
+    const BATCH_SIZE = 4;
+    const MAX_PRELOAD = 24;
     const targets = dialogs.slice(0, MAX_PRELOAD).filter(d => d.id && typeof d.id === 'string' && !d.id.startsWith('invite_'));
+    telegramService.cancelQueuedAvatarsExcept(targets.map(chat => chat.id));
     for (let i = 0; i < targets.length; i += BATCH_SIZE) {
       const batch = targets.slice(i, i + BATCH_SIZE);
       await Promise.all(
-        batch.map(d => telegramService.getAvatar(d.id).catch(() => null))
+        batch.map(d => telegramService.getAvatar(d.id, { priority: 'background' }).catch(() => null))
       );
       if (i + BATCH_SIZE < targets.length) {
         await new Promise(r => setTimeout(r, 80));
@@ -693,12 +581,28 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const fetchSharedMedia = async (chatId: string) => {
-    setLoadingSharedMedia(true);
+    const loadSeq = ++sharedMediaLoadSeqRef.current;
+    let hasCachedMedia = false;
     try {
-      const res = await telegramService.getSharedMedia({ chatId, limit: 12 });
-      if (res.success) setSharedMedia(res.media);
-    } catch (e) { console.error(e); }
-    finally { setLoadingSharedMedia(false); }
+      const cached = await telegramService.getSharedMedia({ chatId, limit: 12, refresh: false });
+      if (loadSeq !== sharedMediaLoadSeqRef.current) return;
+      if (cached.success && cached.media?.length) {
+        hasCachedMedia = true;
+        setSharedMedia(cached.media);
+      }
+
+      if (!hasCachedMedia) setLoadingSharedMedia(true);
+
+      const res = await telegramService.refreshSharedMedia({ chatId, limit: 12 });
+      if (loadSeq !== sharedMediaLoadSeqRef.current) return;
+      if (res.success) {
+        const nextMedia = Array.isArray(res.media) ? res.media : [];
+        setSharedMedia(nextMedia.length > 0 ? nextMedia : cached.media || []);
+      }
+    } catch (e) { debugWarn(e); }
+    finally {
+      if (loadSeq === sharedMediaLoadSeqRef.current) setLoadingSharedMedia(false);
+    }
   };
 
   const fetchForumTopics = async (chat: Chat) => {
@@ -722,7 +626,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       if (res.success && res.fullInfo) {
         setFullChatInfo(res.fullInfo);
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { debugWarn(e); }
     finally { setLoadingFullInfo(false); }
   };
 
@@ -733,7 +637,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     loadMessages(selectedChat!.id, 0, topic.id, { refresh: true });
 
     if (topic.unreadCount > 0) {
-      telegramService.readHistory(selectedChat!.id).catch(console.error);
+      telegramService.readHistory(selectedChat!.id).catch(debugWarn);
       setForumTopics(prev => prev.map(t => t.id === topic.id ? { ...t, unreadCount: 0 } : t));
       // Also update the chat's total unread count if needed, but usually it's better to let the server handle it on next fetch.
       // For now, let's just clear the topic count.
@@ -752,10 +656,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic({ id: 0, title: 'Todos os tópicos', topMessageId: 0, unreadCount: 0, closed: false, pinned: false });
     setSelectedTopicId('all');
-    loadMessages(selectedChat!.id, 0, undefined, { refresh: true });
+    loadMessages(selectedChat!.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat?.lastMessageDate });
   };
 
-  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean } = {}) => {
+  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null } = {}) => {
     const loadSeq = ++messagesLoadSeqRef.current;
     if (!options.silent) setLoadingMessages(true);
     try {
@@ -766,6 +670,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           setMessages(cached.messages);
           setHasMoreMessages(Boolean(cached.hasMore));
           setOldestMessageId(cached.oldestMessageId ?? null);
+          setLoadingMessages(false);
+          const latestKnownMessageDate = Number(options.latestKnownMessageDate || 0);
+          const cacheHasKnownLatest = !latestKnownMessageDate || Number(cached.newestMessageDate || 0) >= latestKnownMessageDate;
+          if (cached.isFresh && cacheHasKnownLatest && !options.forceRefresh) return;
         }
       }
 
@@ -776,8 +684,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setHasMoreMessages(Boolean(res.hasMore));
         setOldestMessageId(res.oldestMessageId ?? null);
       }
-    } catch (e) { console.error(e); }
-    finally { setLoadingMessages(false); }
+    } catch (e) { debugWarn(e); }
+    finally {
+      if (loadSeq === messagesLoadSeqRef.current) setLoadingMessages(false);
+    }
   };
 
   const loadOlderMessages = async () => {
@@ -793,7 +703,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setHasMoreMessages(Boolean(res.hasMore));
         setOldestMessageId(res.oldestMessageId ?? null);
       } else setHasMoreMessages(false);
-    } catch (e) { console.error(e); }
+    } catch (e) { debugWarn(e); }
     finally { setLoadingMoreMessages(false); }
   };
 
@@ -858,10 +768,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           return true;
         }));
       } else {
-        console.error('Failed to search user media:', res.error);
+        debugWarn('Failed to search user media:', res.error);
       }
     } catch (err) {
-      console.error('Error during media search:', err);
+      debugWarn('Error during media search:', err);
     } finally {
       setSearchMediaLoading(false);
     }
@@ -888,7 +798,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         folderPath: folderRes.folderPath
       });
     } catch (err) {
-      console.error('Error during bulk download:', err);
+      debugWarn('Error during bulk download:', err);
       setBulkDownloadActive(false);
       setBulkProgress(null);
     }
@@ -915,7 +825,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       await fetchDialogs();
       await loadMessages(selectedChat.id, 0, undefined, { silent: true });
-      fetchSharedMedia(selectedChat.id);
+      telegramService.invalidateSharedMedia(selectedChat.id);
+      if (infoOpen) fetchSharedMedia(selectedChat.id);
       setConfirmModal({
         title: res.addedCount > 0 ? 'Mensagens atualizadas' : 'Nada novo por aqui',
         body: res.addedCount > 0
@@ -980,7 +891,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       if (res.success) {
         shouldScrollToBottomRef.current = true;
         // Refresh messages silently in background
-        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true });
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true });
       } else {
         setError(res.error || 'Falha ao enviar');
         // Restore input text on error so user doesn't lose it
@@ -1031,7 +942,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       if (res.success) {
         shouldScrollToBottomRef.current = true;
-        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true });
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true });
       } else {
         setError(res.error || 'Falha ao encaminhar mensagem.');
       }
@@ -1076,7 +987,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     try {
       await telegramService.sendReaction({ chatId: selectedChat.id, messageId: msg.id, reaction: emoji });
     } catch (err) {
-      console.error('Failed to send reaction:', err);
+      debugWarn('Failed to send reaction:', err);
       // Revert or fetch messages again if needed
     }
   }, [selectedChat]);
@@ -1087,6 +998,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [emojiPickerMsgId]);
+
+  const handleJoinSelectedChat = async () => {
+    if (!selectedChat) return;
+
+    const res = await telegramService.joinChat(selectedChat.isInvite ? `https://t.me/+${selectedChat.inviteHash}` : selectedChat.id);
+    if (res.success) {
+      setSelectedChat(prev => prev ? { ...prev, isMember: true, isInvite: false } : null);
+      fetchDialogs();
+      setConfirmModal({
+        title: 'Sucesso',
+        body: res.message || 'Você entrou no grupo com sucesso!',
+        onConfirm: () => setConfirmModal(null)
+      });
+    } else {
+      setConfirmModal({
+        title: 'Erro',
+        body: `Erro ao entrar: ${res.error}`,
+        onConfirm: () => setConfirmModal(null)
+      });
+    }
+  };
 
   const triggerJumpScroll = (targetMsgId: number, virtuosoIdx: number) => {
     debugLog('[TelegramEnchanted] Triggering jump scroll to index:', virtuosoIdx, 'for msg ID:', targetMsgId);
@@ -1184,7 +1116,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             setError('A mensagem original não foi encontrada no histórico.');
           }
         } catch (e) {
-          console.error('Error loading older messages for jump:', e);
+          debugWarn('Error loading older messages for jump:', e);
           pendingJumpToMsgIdRef.current = null;
         } finally {
           setLoadingMessages(false);
@@ -1201,8 +1133,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   if (loading) return (
     <div className="full-screen-loader fade-in">
       <div className="loader-content">
-        <div className="spinner large-spinner" />
-        <p>Carregando conversas...</p>
+        <div className="modern-loader" role="status" aria-label="Carregando conversas" />
       </div>
     </div>
   );
@@ -1211,157 +1142,31 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     <>
       <div className={`app ${selectedChat ? 'has-selected-chat' : ''}`} data-palette={palette} data-density={density}>
 
-        {/* ── List ─────────────────────────────────────────────────── */}
-        <div className="list">
-          <div className="list-header">
-            <div className="list-title">
-              <h1>Chats</h1>
-              <div className="list-title-actions">
-                <button
-                  className={`icon-btn ${isSearchOpen ? 'active' : ''}`}
-                  onClick={() => { setIsSearchOpen(v => !v); if (isSearchOpen) setChatSearch(''); }}
-                  title={isSearchOpen ? 'Fechar pesquisa' : 'Pesquisar chats'}
-                >
-                  <IconSearch />
-                </button>
-              </div>
-            </div>
-            {isSearchOpen && (
-              <div className="search">
-                <IconSearch />
-                <input
-                  autoFocus
-                  type="text"
-                  value={chatSearch}
-                  onChange={e => setChatSearch(e.target.value)}
-                  placeholder="Pesquisar..."
-                />
-              </div>
-            )}
-          </div>
-
-          <div className="folders">
-            <div
-              className={`folder ${activeFolder === 'all' ? 'active' : ''}`}
-              onClick={() => setActiveFolder('all')}
-            >
-              Todos
-              <span className="count">{chats.length}</span>
-            </div>
-            <div
-              className={`folder ${activeFolder === 'unread' ? 'active' : ''}`}
-              onClick={() => setActiveFolder('unread')}
-            >
-              Não lidos
-              <span className="count">{chats.filter(c => (c.unreadCount ?? 0) > 0).length}</span>
-            </div>
-          </div>
-
-          {error && (
-            <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--danger)', background: 'color-mix(in oklch, var(--danger) 10%, var(--bg-1))' }}>
-              {error}
-            </div>
-          )}
-
-          <div className="chats">
-            {skipLogin && (
-              <div
-                className="chat-row telegram-login-row"
-                onClick={() => {
-                  setError('');
-                  onTelegramLoginRequest?.();
-                }}
-              >
-                <div className="chat-avatar telegram-login-avatar">
-                  <IconLogOut />
-                </div>
-                <div className="telegram-login-copy">
-                  <div className="chat-name">
-                    <span className="name-text">Logar no Telegram</span>
-                  </div>
-                  <div className="chat-preview">
-                    Conectar sua conta para carregar chats reais
-                  </div>
-                </div>
-              </div>
-            )}
-            {filteredChats.map(chat => {
-              const color = hashColor(chat.id);
-              const hasUnread = (chat.unreadCount ?? 0) > 0;
-              return (
-                <div
-                  key={chat.id}
-                  className={`chat-row ${selectedChat?.id === chat.id ? 'active' : ''} ${hasUnread ? 'unread' : ''}`}
-                  onClick={() => {
-                    setSelectedChat(chat);
-                    setError('');
-                    if (hasUnread) {
-                      telegramService.readHistory(chat.id).catch(console.error);
-                      setChats(prev => prev.map(c => c.id === chat.id ? { ...c, unreadCount: 0 } : c));
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setChatContextMenu({ x: e.clientX, y: e.clientY, chat });
-                  }}
-                >
-                  <div className={`chat-avatar color-${color}`}>
-                    <ChatAvatar chatId={chat.id} title={chat.title} />
-                  </div>
-                  <div className="chat-name">
-                    <span className="name-text">{chat.title || 'Unknown'}</span>
-                    {chat.hasTopics && <span className="badge-icon" title="Fórum">#</span>}
-                  </div>
-                  <span className="chat-meta">
-                    {chat.lastMessageDate ? formatMessageTime(chat.lastMessageDate) : ''}
-                  </span>
-                  <div className="chat-preview" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    {chat.lastMessageIsVideo && <span title="Vídeo">📹</span>}
-                    {chat.lastMessageIsPhoto && <span title="Foto">📷</span>}
-                    {!chat.lastMessageIsVideo && !chat.lastMessageIsPhoto && chat.lastMessageHasMedia && <span title="Mídia">📎</span>}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {chat.lastMessageText || getChatKind(chat)}
-                    </span>
-                  </div>
-                  <div className="chat-flags" style={{ gridColumn: 3 }}>
-                    {hasUnread && (
-                      <span className="chat-badge">
-                        {chat.unreadCount! > 99 ? '99+' : chat.unreadCount}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-            {!filteredChats.length && !loading && !skipLogin && (
-              <div className="messages-empty">Nenhum chat encontrado.</div>
-            )}
-          </div>
-
-          <div className="user-card">
-            <div className="avatar">EU</div>
-            <div>
-              <div className="name">Você</div>
-              <div className="sub"><span className="pip-dot" style={{ background: 'var(--good)', marginRight: 4 }} />online</div>
-            </div>
-            <div className="user-card-actions" style={{ position: 'relative' }}>
-              <button
-                className={`icon-btn ${isSettingsMenuOpen ? 'active' : ''}`}
-                onClick={e => { e.stopPropagation(); setIsSettingsMenuOpen(v => !v); }}
-                title="Configurações e Aparência"
-              >
-                <IconSettings />
-              </button>
-              {isSettingsMenuOpen && (
-                <div className="dropdown-menu" style={{ bottom: 'calc(100% + 8px)', top: 'auto', right: 0 }} onClick={e => e.stopPropagation()}>
-                  <div className="dropdown-item" onClick={() => { setIsSettingsOpen(true); setIsSettingsMenuOpen(false); }}>
-                    <IconSettings /> Configurações Gerais
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <DashboardChatList
+          activeFolder={activeFolder}
+          chatSearch={chatSearch}
+          chats={chats}
+          error={error}
+          filteredChats={filteredChats}
+          isSearchOpen={isSearchOpen}
+          isSettingsMenuOpen={isSettingsMenuOpen}
+          loading={loading}
+          selectedChat={selectedChat}
+          skipLogin={skipLogin}
+          formatMessageTime={formatMessageTime}
+          getChatKind={getChatKind}
+          onTelegramLoginRequest={onTelegramLoginRequest}
+          readChatHistory={telegramService.readHistory.bind(telegramService)}
+          setActiveFolder={setActiveFolder}
+          setChatContextMenu={setChatContextMenu}
+          setChatSearch={setChatSearch}
+          setChats={setChats}
+          setError={setError}
+          setIsSearchOpen={setIsSearchOpen}
+          setIsSettingsMenuOpen={setIsSettingsMenuOpen}
+          setIsSettingsOpen={setIsSettingsOpen}
+          setSelectedChat={setSelectedChat}
+        />
 
         {/* ── Convo ────────────────────────────────────────────────── */}
         <div 
@@ -1497,174 +1302,35 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               {/* Panels */}
               <div className="convo-panels">
                 {isDownloadModalOpen && (
-                  <div className="inline-download-panel">
-                    <div className="inline-panel-header">
-                      <div className="inline-panel-title">
-                        <IconMagic />
-                        <h3>Mass Download</h3>
-                      </div>
-                      <button className="icon-btn" onClick={() => setIsDownloadModalOpen(false)}>✕</button>
-                    </div>
-                    <div className="inline-panel-body">
-                      <div className="mass-download-main-row">
-                        <div className="inline-folder">
-                          <div className="folder-selection">
-                            <input readOnly value={folderPath} placeholder="Selecionar pasta de destino..." />
-                            <button className="browse-btn" onClick={handleSelectFolder}>Procurar</button>
-                          </div>
-                        </div>
-                        {selectedChat.hasTopics && (
-                          <div className="topic-selection mass-download-topic-selection">
-                            <div className={`custom-select ${isTopicDropdownOpen ? 'open' : ''} ${loadingTopics || downloading ? 'disabled' : ''}`}>
-                              <button
-                                type="button"
-                                className="custom-select-trigger"
-                                onClick={e => { e.stopPropagation(); if (!loadingTopics && !downloading) setIsTopicDropdownOpen(v => !v); }}
-                                disabled={loadingTopics || downloading}
-                              >
-                                <span>
-                                  {loadingTopics ? 'Carregando...' : selectedTopicId === 'all' ? 'Todos os tópicos' : forumTopics.find(t => String(t.id) === selectedTopicId)?.title || 'Todos os tópicos'}
-                                </span>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
-                              </button>
-                              {isTopicDropdownOpen && (
-                                <div className="custom-select-options">
-                                  <div className="custom-select-search" onClick={e => e.stopPropagation()}>
-                                    <input type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} autoFocus />
-                                  </div>
-                                  <button type="button" className={`custom-select-option ${selectedTopicId === 'all' ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId('all'); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
-                                    Todos os tópicos
-                                  </button>
-                                  {filteredTopics.map(topic => (
-                                    <button key={topic.id} type="button" className={`custom-select-option ${String(topic.id) === selectedTopicId ? 'selected' : ''}`} onClick={e => { e.stopPropagation(); setSelectedTopicId(String(topic.id)); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
-                                      {topic.pinned && <span className="option-pin">📌</span>}
-                                      {topic.title}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                        {downloading ? (
-                          <button className={`stop-btn ${stopping ? 'disabled' : ''}`} onClick={handleStopDownload} disabled={stopping}>
-                            {stopping ? '⏳ Parando...' : '⏹ Parar'}
-                          </button>
-                        ) : (
-                          <button className="start-btn" onClick={handleStartDownload} disabled={!folderPath || loadingTopics}>
-                            Iniciar
-                          </button>
-                        )}
-                      </div>
-
-                      {!selectedChat.hasTopics && (
-                        <div className="mass-download-options-row">
-                          <div className="split-user-selection">
-                            <label className="switch-label">
-                              <input
-                                type="checkbox"
-                                checked={splitByUser}
-                                onChange={(e) => setSplitByUser(e.target.checked)}
-                                disabled={downloading}
-                              />
-                              <span className="switch-custom" />
-                              <span className="switch-text">Dividir mídias por usuário</span>
-                            </label>
-                          </div>
-                          <div className="split-album-selection">
-                            <label className="switch-label">
-                              <input
-                                type="checkbox"
-                                checked={splitByAlbum}
-                                onChange={(e) => setSplitByAlbum(e.target.checked)}
-                                disabled={downloading}
-                              />
-                              <span className="switch-custom" />
-                              <span className="switch-text">Dividir mídias por álbum</span>
-                            </label>
-                            {splitByAlbum && (
-                              <div className="album-mode-toggle" role="group" aria-label="Modo de divisão por álbum">
-                                <button
-                                  type="button"
-                                  className={albumSplitMode === 'separator' ? 'active' : ''}
-                                  onClick={() => setAlbumSplitMode('separator')}
-                                  disabled={downloading}
-                                >
-                                  Separador
-                                </button>
-                                <button
-                                  type="button"
-                                  className={albumSplitMode === 'comment' ? 'active' : ''}
-                                  onClick={() => setAlbumSplitMode('comment')}
-                                  disabled={downloading}
-                                >
-                                  Comentário
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    {progress && (
-                      <div 
-                        className={`inline-progress-container ${showDetailedProgress ? 'expanded' : ''}`}
-                        onClick={() => setShowDetailedProgress(!showDetailedProgress)}
-                        style={{ cursor: 'pointer', userSelect: 'none' }}
-                      >
-                        <div className="progress-header">
-                          <span className="progress-status">
-                            {progress.topicTitle ? `${progress.topicTitle} · ${progress.currentFile}` : progress.currentFile}
-                          </span>
-                          <span className="progress-count" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            {progress.isScanning ? 'Escaneando...' : `${Math.floor(progress.downloaded)} / ${progress.total}`}
-                            <span style={{ fontSize: '10px', transition: 'transform 0.2s', transform: showDetailedProgress ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-                              ▼
-                            </span>
-                          </span>
-                        </div>
-                        <div className="progress-bar">
-                          <div
-                            className={`progress-fill ${downloading ? 'animated-stripes' : ''} ${progress.isScanning ? 'scanning-fill' : ''}`}
-                            style={{ width: (progress.total > 0 && !progress.isScanning) ? `${Math.min(100, (progress.downloaded / progress.total) * 100)}%` : '100%' }}
-                          />
-                        </div>
-                        {showDetailedProgress && progress.items && progress.items.length > 0 && (
-                          <div ref={progressDetailsListRef} className="progress-details-list" onClick={e => e.stopPropagation()}>
-                            {progress.items.map((item, idx) => (
-                              <div key={idx} className={`progress-item-row ${item.status}`}>
-                                <div className="progress-item-info">
-                                  <span className="progress-item-name" title={item.name}>{item.name}</span>
-                                  {item.size > 0 && (
-                                    <span className="progress-item-size">
-                                      {formatBytes(item.size)}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="progress-item-status-col">
-                                  {item.status === 'downloading' && (
-                                    <span className="item-badge downloading">
-                                      <span className="spinner small-spinner inline-spinner" style={{ width: 10, height: 10, borderWidth: 1.5, display: 'inline-block', marginRight: 4 }} />
-                                      {item.progress}%
-                                    </span>
-                                  )}
-                                  {item.status === 'completed' && (
-                                    <span className="item-badge completed">✓ Salvo</span>
-                                  )}
-                                  {item.status === 'skipped' && (
-                                    <span className="item-badge skipped">⌥ Já existe</span>
-                                  )}
-                                  {item.status === 'failed' && (
-                                    <span className="item-badge failed">✕ Falhou</span>
-                                  )}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <DashboardMassDownloadPanel
+                    albumSplitMode={albumSplitMode}
+                    downloading={downloading}
+                    filteredTopics={filteredTopics}
+                    folderPath={folderPath}
+                    forumTopics={forumTopics}
+                    hasTopics={Boolean(selectedChat.hasTopics)}
+                    isTopicDropdownOpen={isTopicDropdownOpen}
+                    loadingTopics={loadingTopics}
+                    progress={progress}
+                    progressDetailsListRef={progressDetailsListRef}
+                    selectedTopicId={selectedTopicId}
+                    showDetailedProgress={showDetailedProgress}
+                    splitByAlbum={splitByAlbum}
+                    splitByUser={splitByUser}
+                    stopping={stopping}
+                    topicSearch={topicSearch}
+                    handleSelectFolder={handleSelectFolder}
+                    handleStartDownload={handleStartDownload}
+                    handleStopDownload={handleStopDownload}
+                    setAlbumSplitMode={setAlbumSplitMode}
+                    setIsDownloadModalOpen={setIsDownloadModalOpen}
+                    setIsTopicDropdownOpen={setIsTopicDropdownOpen}
+                    setSelectedTopicId={setSelectedTopicId}
+                    setShowDetailedProgress={setShowDetailedProgress}
+                    setSplitByAlbum={setSplitByAlbum}
+                    setSplitByUser={setSplitByUser}
+                    setTopicSearch={setTopicSearch}
+                  />
                 )}
 
                 {isCreatingTopic && selectedChat.hasTopics && !viewingTopic && (
@@ -1705,7 +1371,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 /* Topic list */
                 <div className="topic-list-panel" ref={topicListRef} onClick={() => isMenuOpen && setIsMenuOpen(false)}>
                   {loadingTopics ? (
-                    <div className="messages-loading"><span className="spinner" /> Carregando tópicos...</div>
+                    <div className="loader-surface" role="status" aria-label="Carregando tópicos">
+                      <span className="modern-loader small" />
+                    </div>
                   ) : forumTopics.length === 0 ? (
                     <div className="messages-empty">Nenhum tópico encontrado.</div>
                   ) : (
@@ -1755,15 +1423,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   <div className="timeline-bg" />
                   <div className="timeline-bg-overlay" />
                   {loadingMessages && messages.length === 0 ? (
-                    <div className="messages-loading" style={{ zIndex: 1 }}><span className="spinner" /> Carregando...</div>
+                    <div className="loader-surface" style={{ zIndex: 1 }} role="status" aria-label="Carregando mensagens">
+                      <span className="modern-loader small" />
+                    </div>
                   ) : messages.length === 0 ? (
                     <div className="messages-empty" style={{ zIndex: 1 }}>Nenhuma mensagem encontrada.</div>
                   ) : (
                     <Virtuoso
                       ref={virtuosoRef}
                       style={{ height: '100%', width: '100%', outline: 'none', zIndex: 1 }}
-                      data={getTimelineItems(messages)}
-                      firstItemIndex={Math.max(0, 100000 - getTimelineItems(messages).length)}
+                      data={timelineItems}
+                      firstItemIndex={timelineFirstItemIndex}
+                      rangeChanged={updateVisibleMediaIds}
                       startReached={loadOlderMessages}
                       components={{
                         List: ListContainer,
@@ -1772,8 +1443,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                           return (
                             <div className="messages-load-more" style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
                               {loadingMoreMessages ? (
-                                <div className="messages-loading-inline" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-3)' }}>
-                                  <span className="spinner small-spinner" /> Carregando mensagens anteriores...
+                                <div className="loader-surface compact" role="status" aria-label="Carregando mensagens anteriores">
+                                  <span className="modern-loader small" />
                                 </div>
                               ) : (
                                 <div style={{ height: '24px' }} />
@@ -1783,9 +1454,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         }
                       }}
                       itemContent={(index, item) => {
-                        const timelineItems = getTimelineItems(messages);
-                        const firstItemIndex = Math.max(0, 100000 - timelineItems.length);
-                        const dataIndex = index - firstItemIndex;
+                        const dataIndex = index - timelineFirstItemIndex;
                         const prevItem = timelineItems[dataIndex - 1];
                         const prev = prevItem?.message;
                         const msg = item.message;
@@ -1907,9 +1576,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                             videoDuration={albumMsg.videoDuration}
                                             messageDate={albumMsg.date}
                                             mediaSize={albumMsg.mediaSize}
+                                            thumbnailUrl={albumMsg.thumbnailUrl}
+                                            mediaPriority={visibleMediaIds.has(albumMsg.id) ? 'visible' : 'background'}
                                             palette={palette}
                                             density={density}
                                             downloadMeta={getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName)}
+                                            selectionMode={isSelectionMode}
                                             onClickOverride={isSelectionMode ? () => {
                                               setSelectedMessageIds(prevIds =>
                                                 prevIds.includes(albumMsg.id)
@@ -1939,9 +1611,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                           videoDuration={msg.videoDuration}
                                           messageDate={msg.date}
                                           mediaSize={msg.mediaSize}
+                                          thumbnailUrl={msg.thumbnailUrl}
+                                          mediaPriority={visibleMediaIds.has(msg.id) ? 'visible' : 'background'}
                                           palette={palette}
                                           density={density}
                                           downloadMeta={getDownloadMeta(msg, displayName)}
+                                          selectionMode={isSelectionMode}
                                           onClickOverride={isSelectionMode ? () => {
                                             setSelectedMessageIds(prevIds =>
                                               prevIds.includes(msg.id)
@@ -2019,7 +1694,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                               downloadMeta: getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName),
                                             });
                                           } catch (err) {
-                                            console.error(err);
+                                            debugWarn(err);
                                           }
                                         }
                                       }
@@ -2054,133 +1729,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               )}
               {/* Composer or Join Bar or Selection Bar */}
               {isSelectionMode ? (
-                <div className="selection-action-bar-wrap">
-                  <div className="selection-action-bar">
-                    <span className="selection-count">
-                      {selectedMessageIds.length} {selectedMessageIds.length === 1 ? 'mídia selecionada' : 'mídias selecionadas'}
-                    </span>
-                    <div className="selection-actions">
-                      <button
-                        className="btn-cancel-selection"
-                        onClick={() => {
-                          setIsSelectionMode(false);
-                          setSelectedMessageIds([]);
-                        }}
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        className="btn-download-selected"
-                        disabled={selectedMessageIds.length === 0}
-                        onClick={() => {
-                          handleBulkDownload(selectedMessageIds);
-                          setIsSelectionMode(false);
-                          setSelectedMessageIds([]);
-                        }}
-                      >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                          <polyline points="7 10 12 15 17 10"/>
-                          <line x1="12" x2="12" y1="15" y2="3"/>
-                        </svg>
-                        <span>Baixar Selecionadas</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                <SelectionActionBar
+                  selectedMessageIds={selectedMessageIds}
+                  handleBulkDownload={handleBulkDownload}
+                  setIsSelectionMode={setIsSelectionMode}
+                  setSelectedMessageIds={setSelectedMessageIds}
+                />
               ) : (
                 showComposer && (
                   selectedChat.isMember !== false ? (
-                    <div className="composer-wrap">
-                      <div className="composer">
-                        {replyTo && (
-                          <div className="reply-strip">
-                            <div className="reply-bar" />
-                            <span className="reply-from">Respondendo</span>
-                            <span className="reply-text">{replyTo.text ? replyTo.text.slice(0, 80) : 'Mídia'}</span>
-                            <button type="button" className="close icon-btn" onClick={() => setReplyTo(null)}>✕</button>
-                          </div>
-                        )}
-                        {selectedFile && (
-                          <div className="composer-file-chip">
-                            <span className="chip">
-                              <IconAttach /> {selectedFile.fileName}
-                              <button type="button" className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => setSelectedFile(null)}>✕</button>
-                            </span>
-                          </div>
-                        )}
-                        {sendProgress !== null && (
-                          <div className="composer-progress">
-                            <div className="composer-progress-fill animated-stripes" style={{ width: `${sendProgress}%` }} />
-                          </div>
-                        )}
-                        <div className="composer-main">
-                          <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending} title="Anexar arquivo">
-                            <IconAttach />
-                          </button>
-                          <textarea
-                            value={inputText}
-                            onChange={e => setInputText(e.target.value)}
-                            onInput={e => {
-                              const ta = e.currentTarget;
-                              ta.style.height = 'auto';
-                              ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
-                            }}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
-                            }}
-                            placeholder="Escreva uma mensagem..."
-                            rows={1}
-                            disabled={isSending}
-                          />
-                          <div className="composer-right-actions">
-                            <button type="button" className="icon-btn" title="Emoji">
-                              <IconEmoji />
-                            </button>
-                            <button
-                              type="button"
-                              className="composer-send"
-                              onClick={handleSend}
-                              disabled={(!inputText.trim() && !selectedFile) || isSending}
-                            >
-                              {isSending ? <span className="spinner small-spinner" /> : <IconSend />}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
+                    <MessageComposer
+                      inputText={inputText}
+                      isSending={isSending}
+                      replyTo={replyTo}
+                      selectedFile={selectedFile}
+                      sendProgress={sendProgress}
+                      handleSelectFile={handleSelectFile}
+                      handleSend={handleSend}
+                      setInputText={setInputText}
+                      setReplyTo={setReplyTo}
+                      setSelectedFile={setSelectedFile}
+                    />
                   ) : (
-                    <div className="join-channel-bar">
-                      <div className="join-channel-info">
-                        <h3>{selectedChat.title}</h3>
-                        {fullChatInfo?.participantsCount !== undefined && (
-                          <span>{fullChatInfo.participantsCount.toLocaleString()} participantes</span>
-                        )}
-                      </div>
-                      <button
-                        className="join-channel-btn"
-                        onClick={async () => {
-                          const res = await telegramService.joinChat(selectedChat.isInvite ? `https://t.me/+${selectedChat.inviteHash}` : selectedChat.id);
-                          if (res.success) {
-                            setSelectedChat(prev => prev ? { ...prev, isMember: true, isInvite: false } : null);
-                            fetchDialogs();
-                            setConfirmModal({
-                              title: 'Sucesso',
-                              body: res.message || 'Você entrou no grupo com sucesso!',
-                              onConfirm: () => setConfirmModal(null)
-                            });
-                          } else {
-                            setConfirmModal({
-                              title: 'Erro',
-                              body: `Erro ao entrar: ${res.error}`,
-                              onConfirm: () => setConfirmModal(null)
-                            });
-                          }
-                        }}
-                      >
-                        ENTRAR NO {selectedChat.isChannel ? 'CANAL' : 'GRUPO'}
-                      </button>
-                    </div>
+                    <JoinChannelBar
+                      fullChatInfo={fullChatInfo}
+                      selectedChat={selectedChat}
+                      onJoin={handleJoinSelectedChat}
+                    />
                   )
                 )
               )}
@@ -2194,96 +1769,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           )}
         </div>
 
-        {/* ── Info panel ───────────────────────────────────────────── */}
-        <div className="info" data-collapsed={!infoOpen}>
-          {selectedChat && (
-            <>
-              <div className="info-header">
-                <span className="title">Informações</span>
-                <button className="icon-btn" onClick={() => setInfoOpen(false)}>✕</button>
-              </div>
-              <div className="info-hero">
-                <div className={`info-avatar color-${hashColor(selectedChat.id)}`}>
-                  <ChatAvatar chatId={selectedChat.id} title={selectedChat.title} />
-                </div>
-                <div className="info-name">{selectedChat.title}</div>
-                <div className="info-sub">{getChatKind(selectedChat)}{selectedChat.hasTopics ? ' · fórum' : ''}</div>
-              </div>
-
-              {fullChatInfo?.about && (
-                <div className="info-section">
-                  <h3>Bio / Descrição</h3>
-                  <div style={{ fontSize: 13, color: 'var(--text-1)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                    {fullChatInfo.about}
-                  </div>
-                </div>
-              )}
-
-              <div className="info-section">
-                <h3>Detalhes</h3>
-                <div className="info-stats-grid">
-                  <div className="info-stat">
-                    <span className="info-stat-value">
-                      {loadingFullInfo ? '...' : fullChatInfo?.participantsCount?.toLocaleString() || '0'}
-                    </span>
-                    <span className="info-stat-label">Membros</span>
-                  </div>
-                  <div className="info-stat">
-                    <span className="info-stat-value">{messages.length}</span>
-                    <span className="info-stat-label">Mensagens</span>
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div className="info-field">
-                    <span className="info-field-label">ID</span>
-                    <span className="info-field-value">{selectedChat.id}</span>
-                  </div>
-                  {fullChatInfo?.username && (
-                    <div className="info-field">
-                      <span className="info-field-label">Username</span>
-                      <span className="info-field-value" style={{ color: 'var(--accent)' }}>@{fullChatInfo.username}</span>
-                    </div>
-                  )}
-                  {selectedChat.hasTopics && (
-                    <div className="info-field">
-                      <span className="info-field-label">Tópicos</span>
-                      <span className="info-field-value">{forumTopics.length}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="info-section">
-                <h3>Mídia Compartilhada</h3>
-                {loadingSharedMedia ? (
-                  <div style={{ padding: '20px 0', textAlign: 'center' }}><span className="spinner small-spinner" /></div>
-                ) : sharedMedia.length > 0 ? (
-                  <div className="info-media-grid">
-                    {sharedMedia.map(m => (
-                      <div key={m.id} className="info-media-item">
-                        <MessageMedia
-                          chatId={selectedChat.id}
-                          messageId={m.id}
-                          isVideo={m.isVideo}
-                          palette={palette}
-                          density={density}
-                          downloadMeta={getDownloadMeta(m as Message)}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="info-media-grid-preview">
-                    <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 12, border: '1px dashed var(--line-soft)', borderRadius: 8 }}>
-                      Nenhuma mídia encontrada
-                    </div>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+        <DashboardInfoPanel
+          density={density}
+          forumTopics={forumTopics}
+          fullChatInfo={fullChatInfo}
+          infoOpen={infoOpen}
+          loadingFullInfo={loadingFullInfo}
+          loadingSharedMedia={loadingSharedMedia}
+          messagesCount={messages.length}
+          palette={palette}
+          selectedChat={selectedChat}
+          sharedMedia={sharedMedia}
+          getChatKind={getChatKind}
+          getDownloadMeta={getDownloadMeta}
+          setInfoOpen={setInfoOpen}
+        />
       </div>
 
       {/* Context menu portal */}
@@ -2417,7 +1917,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           </div>
         </div>
       )}
-      {isSettingsOpen && <Settings onClose={() => setIsSettingsOpen(false)} />}
+      {isSettingsOpen && createPortal(
+        <Settings onClose={() => setIsSettingsOpen(false)} />,
+        document.body
+      )}
       {confirmModal && (
         <div className="confirm-modal-overlay" onClick={() => setConfirmModal(null)}>
           <div className="confirm-modal" onClick={e => e.stopPropagation()}>
@@ -2557,6 +2060,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         messageId={item.id}
                         isVideo={item.isVideo}
                         mediaSize={item.mediaSize}
+                        thumbnailUrl={item.thumbnailUrl}
                         palette={palette}
                         density={density}
                         downloadMeta={getDownloadMeta(item as Message)}

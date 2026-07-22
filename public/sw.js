@@ -1,14 +1,13 @@
-// sw.js - Service Worker for Media Streaming
-console.log('SW v4 - Real-time debug logging active');
+// sw.js - Service Worker for range-safe media streaming
+console.log('SW v5 - range-safe media streaming active');
 
 const STREAM_URL_PREFIX = '/stream_media/';
+const RANGE_CHUNK_SIZE = 512 * 1024;
 const pendingRequests = new Map();
 
 function swLog(level, ...args) {
   const message = args.map(arg => {
-    if (arg instanceof Error) {
-      return `${arg.message}\n${arg.stack}`;
-    }
+    if (arg instanceof Error) return `${arg.message}\n${arg.stack}`;
     if (typeof arg === 'object') {
       try { return JSON.stringify(arg); } catch (_) { return String(arg); }
     }
@@ -26,27 +25,26 @@ function swLog(level, ...args) {
   }).catch(() => {});
 }
 
-self.addEventListener('install', (event) => {
+self.addEventListener('install', () => {
   swLog('INFO', 'Install event triggered');
   self.skipWaiting();
 });
 
-self.addEventListener('activate', (event) => {
+self.addEventListener('activate', event => {
   swLog('INFO', 'Activate event triggered');
   event.waitUntil(self.clients.claim().then(() => {
     swLog('INFO', 'Clients claimed successfully');
   }));
 });
 
-self.addEventListener('message', (event) => {
-  const { type, requestId, error } = event.data;
-  const { chunk, done } = event.data;
-  swLog('DEBUG', `Message received in SW: type=${type}, requestId=${requestId}, done=${done}, hasChunk=${!!chunk}, hasError=${!!error}`);
-  
-  if (type === 'chunk_response' && pendingRequests.has(requestId)) {
+self.addEventListener('message', event => {
+  const { type, requestId, error } = event.data || {};
+  swLog('DEBUG', `Message received in SW: type=${type}, requestId=${requestId}, hasError=${!!error}`);
+
+  if ((type === 'range_response' || type === 'stream_response') && pendingRequests.has(requestId)) {
     const { resolve, reject } = pendingRequests.get(requestId);
     pendingRequests.delete(requestId);
-    
+
     if (error) {
       swLog('ERROR', `Rejecting request ${requestId} due to error: ${error}`);
       reject(new Error(error));
@@ -56,7 +54,7 @@ self.addEventListener('message', (event) => {
   }
 });
 
-self.addEventListener('fetch', (event) => {
+self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
   if (url.pathname.startsWith(STREAM_URL_PREFIX)) {
@@ -64,10 +62,7 @@ self.addEventListener('fetch', (event) => {
     const chatId = parts[2];
     const messageId = parts[3];
 
-    swLog('INFO', `Intercepted stream request: ${url.pathname} (chatId=${chatId}, msgId=${messageId})`);
-
     if (!chatId || !messageId) {
-      swLog('WARN', 'Invalid stream URL format');
       return event.respondWith(new Response('Invalid URL', { status: 400 }));
     }
 
@@ -75,172 +70,153 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+function parseRange(rangeHeader, totalSize) {
+  if (!rangeHeader) return { start: 0, end: totalSize - 1, hasRange: false };
+
+  const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+  if (!match) return { start: 0, end: totalSize - 1, hasRange: false };
+
+  const start = Number.parseInt(match[1], 10);
+  const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
+  const end = Math.min(requestedEnd, totalSize - 1);
+  return { start, end, hasRange: true };
+}
+
 async function handleStreamRequest(request, chatId, messageId) {
-  swLog('INFO', `Starting stream request handler for ${chatId}/${messageId}`);
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  swLog('DEBUG', `Found window clients: count=${clients.length}`);
   const client = clients[0];
-  
-  if (!client) {
-    swLog('ERROR', 'No active client window found to retrieve chunks from!');
-    return new Response('No active client found', { status: 500 });
-  }
+  if (!client) return new Response('No active client found', { status: 500 });
 
-  const rangeHeader = request.headers.get('Range');
-  swLog('INFO', `Range header: ${rangeHeader}`);
-  
-  let requestedStart = 0;
-  let requestedEnd = null;
-  if (rangeHeader) {
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (match) {
-      requestedStart = parseInt(match[1], 10);
-      if (match[2]) {
-        requestedEnd = parseInt(match[2], 10);
-      }
-      swLog('DEBUG', `Parsed range bytes: start=${requestedStart}, end=${requestedEnd}`);
-    }
-  }
-
-  // Generate a unique ID for this specific video stream instance
-  const streamId = Math.random().toString(36).substring(7);
-  swLog('DEBUG', `Generated streamId=${streamId} for range request starting at offset=${requestedStart}`);
-
-  // Initialize stream on main thread with offset
-  swLog('DEBUG', `Requesting init_stream from main thread for streamId=${streamId}`);
-  const initRes = await requestFromMain(client, { 
-    type: 'init_stream', 
-    chatId, 
-    messageId, 
-    offset: requestedStart, 
-    streamId 
+  const streamId = Math.random().toString(36).slice(2);
+  const prepareRes = await requestFromMain(client, {
+    type: 'prepare_stream',
+    chatId,
+    messageId,
+    streamId,
   });
-  
-  if (!initRes) {
-    swLog('ERROR', `No response received from main thread for init_stream request ${streamId}`);
-    return new Response('Failed to init stream (timeout/no response)', { status: 500 });
+
+  if (!prepareRes) {
+    return new Response('Failed to prepare stream', { status: 500 });
   }
-  
-  if (initRes.error) {
-    swLog('ERROR', `Failed to init stream on main thread for streamId=${streamId}: ${initRes.error}`);
-    return new Response(`Failed to init stream: ${initRes.error}`, { status: 500 });
+  if (prepareRes.error) {
+    return new Response(`Failed to prepare stream: ${prepareRes.error}`, { status: 500 });
   }
 
-  const totalSize = Number(initRes.totalSize);
-  const { mimeType } = initRes;
-  swLog('INFO', `Main thread initialized stream: totalSize=${totalSize}, mimeType=${mimeType}`);
-
+  const totalSize = Number(prepareRes.totalSize);
+  const mimeType = prepareRes.mimeType || 'video/mp4';
   if (!Number.isFinite(totalSize) || totalSize <= 0) {
-    swLog('ERROR', `Invalid stream metadata received for streamId=${streamId}: totalSize=${totalSize}, mimeType=${mimeType}`);
     postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
     return new Response('Invalid stream metadata', { status: 500 });
   }
-  
-  const actualEnd = requestedEnd !== null ? requestedEnd : totalSize - 1;
-  const contentLength = actualEnd - requestedStart + 1;
-  swLog('INFO', `Stream dimensions: actualEnd=${actualEnd}, contentLength=${contentLength}`);
 
-  let bytesWritten = 0;
+  const { start, end, hasRange } = parseRange(request.headers.get('Range'), totalSize);
+  if (!Number.isFinite(start) || start < 0 || start >= totalSize || end < start) {
+    postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
+    return new Response('Range Not Satisfiable', {
+      status: 416,
+      headers: {
+        'Content-Range': `bytes */${totalSize}`,
+        'Accept-Ranges': 'bytes',
+      },
+    });
+  }
+
+  const contentLength = end - start + 1;
+  let cursor = start;
 
   const stream = new ReadableStream({
     async pull(controller) {
+      if (cursor > end) {
+        controller.close();
+        postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
+        return;
+      }
+
+      const length = Math.min(RANGE_CHUNK_SIZE, end - cursor + 1);
       try {
-        swLog('DEBUG', `Stream pull requested for streamId=${streamId}, bytesWritten=${bytesWritten}/${contentLength}`);
-        const res = await requestFromMain(client, { type: 'get_chunk', chatId, messageId, streamId });
-        
+        const res = await requestFromMain(client, {
+          type: 'get_range',
+          chatId,
+          messageId,
+          streamId,
+          offset: cursor,
+          length,
+        });
+
         if (!res) {
-          swLog('ERROR', `No response received from main thread for get_chunk streamId=${streamId}`);
-          controller.error(new Error('Chunk retrieval timed out/failed'));
+          controller.error(new Error('Range retrieval timed out'));
           return;
         }
-        
         if (res.error) {
-          swLog('ERROR', `Main thread returned error for get_chunk streamId=${streamId}: ${res.error}`);
           controller.error(new Error(res.error));
           return;
         }
-
-        if (res.done) {
-          swLog('INFO', `Stream completed (done=true) from main thread for streamId=${streamId}`);
+        if (!res.chunk) {
           controller.close();
-        } else if (res.chunk) {
-          const chunk = new Uint8Array(res.chunk);
-          const bytesLeft = contentLength - bytesWritten;
-          swLog('DEBUG', `Received chunk: size=${chunk.length} bytes, bytesLeft=${bytesLeft} bytes`);
-          
-          if (chunk.length <= bytesLeft) {
-            controller.enqueue(chunk);
-            bytesWritten += chunk.length;
-            swLog('DEBUG', `Enqueued full chunk. Total written=${bytesWritten}`);
-          } else {
-            // Slice the chunk to exactly match the requested contentLength
-            const sliced = chunk.slice(0, bytesLeft);
-            controller.enqueue(sliced);
-            bytesWritten += bytesLeft;
-            swLog('INFO', `Enqueued sliced chunk (bytesLeft reached). Total written=${bytesWritten}. Closing stream.`);
-            controller.close();
-            // Cancel the stream on main thread since we reached the end of the Range
-            postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
-          }
-        } else {
-          swLog('WARN', 'get_chunk returned neither done nor chunk! Closing stream.');
-          controller.close();
+          postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
+          return;
         }
-      } catch (err) {
-        swLog('ERROR', `Exception during stream pull for streamId=${streamId}: ${err.message}`);
-        controller.error(err);
+
+        const chunk = new Uint8Array(res.chunk);
+        if (chunk.byteLength === 0) {
+          controller.close();
+          postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
+          return;
+        }
+
+        const safeChunk = chunk.byteLength > length ? chunk.slice(0, length) : chunk;
+        controller.enqueue(safeChunk);
+        cursor += safeChunk.byteLength;
+
+        if (cursor > end) {
+          controller.close();
+          postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
+        }
+      } catch (error) {
+        swLog('ERROR', `Exception during get_range for streamId=${streamId}: ${error.message}`);
+        controller.error(error);
       }
     },
     cancel(reason) {
-      swLog('INFO', `Stream cancelled by browser/consumer for streamId=${streamId}, reason=${reason}`);
+      swLog('INFO', `Stream cancelled for streamId=${streamId}: ${reason}`);
       postToMain(client, { type: 'cancel_stream', chatId, messageId, streamId });
-    }
+    },
   });
 
   const headers = new Headers({
-    'Content-Type': mimeType || 'video/mp4',
+    'Content-Type': mimeType,
     'Accept-Ranges': 'bytes',
-    'Content-Length': `${contentLength}`
+    'Content-Length': String(contentLength),
+    'Cache-Control': 'no-store',
   });
-
-  if (rangeHeader) {
-    headers.set('Content-Range', `bytes ${requestedStart}-${actualEnd}/${totalSize}`);
-  }
-
-  swLog('INFO', `Responding with status ${rangeHeader ? 206 : 200}, headers: Content-Range=${headers.get('Content-Range')}, Content-Length=${headers.get('Content-Length')}`);
+  if (hasRange) headers.set('Content-Range', `bytes ${start}-${end}/${totalSize}`);
 
   return new Response(stream, {
-    status: rangeHeader ? 206 : 200,
-    headers
+    status: hasRange ? 206 : 200,
+    headers,
   });
 }
 
 function requestFromMain(client, payload) {
   return new Promise((resolve, reject) => {
-    const requestId = Math.random().toString(36).substring(7);
-    
-    // Set a timeout of 10 seconds to avoid hanging indefinitely if main thread doesn't reply
+    const requestId = Math.random().toString(36).slice(2);
     const timeout = setTimeout(() => {
       if (pendingRequests.has(requestId)) {
         pendingRequests.delete(requestId);
-        swLog('ERROR', `Timeout waiting for main thread response to ${payload.type} (requestId=${requestId})`);
-        resolve(null); // Resolve with null to let the handler handle it
+        swLog('ERROR', `Timeout waiting for main thread response to ${payload.type} (${requestId})`);
+        resolve(null);
       }
-    }, 10000);
-
-    const resolveWithCleanup = (val) => {
-      clearTimeout(timeout);
-      resolve(val);
-    };
-
-    const rejectWithCleanup = (err) => {
-      clearTimeout(timeout);
-      reject(err);
-    };
+    }, 12000);
 
     pendingRequests.set(requestId, {
-      resolve: resolveWithCleanup,
-      reject: rejectWithCleanup
+      resolve: value => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      reject: error => {
+        clearTimeout(timeout);
+        reject(error);
+      },
     });
 
     client.postMessage({ ...payload, requestId });
@@ -250,7 +226,7 @@ function requestFromMain(client, payload) {
 function postToMain(client, payload) {
   try {
     client.postMessage(payload);
-  } catch (e) {
-    swLog('WARN', `Error posting ${payload.type} to main thread: ${e.message}`);
+  } catch (error) {
+    swLog('WARN', `Error posting ${payload.type} to main thread: ${error.message}`);
   }
 }

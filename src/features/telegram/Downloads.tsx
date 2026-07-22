@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo, StackSimple, CaretDown } from '@phosphor-icons/react';
+import { CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo, StackSimple, CaretDown, XCircle } from '@phosphor-icons/react';
 import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -7,6 +7,7 @@ import type { MediaInfo } from '../downloader/types';
 import { getDownloadDir, joinPath, openSystemPath, revealSystemItem } from '../../shared/platform/files';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { SHARED_DOWNLOAD_URL_EVENT, takePendingSharedDownloadUrl } from '../../shared/platform/sharedDownloadIntent';
+import { debugWarn } from '../../shared/debug/logger';
 
 function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['video'][number]) {
   if (!format || format.id === 'na' || format.id === 'web-limit') return false;
@@ -129,7 +130,7 @@ export const Downloads: React.FC = () => {
         await openSystemPath(dir);
       }
     } catch (e) {
-      console.error('Failed to open folder:', e);
+      debugWarn('Failed to open folder:', e);
     }
   };
 
@@ -194,9 +195,11 @@ export const Downloads: React.FC = () => {
     const total = Math.max(visibleTotal, reportedTotal || 0) || 1;
     const visibleCompleted = items.filter(item => item.status === 'completed').length;
     const visibleFailed = items.filter(item => item.status === 'failed').length;
+    const visibleCanceled = items.filter(item => item.status === 'canceled').length;
     const completed = Math.max(visibleCompleted, ...items.map(item => item.batchCompleted || 0));
     const skipped = Math.max(0, ...items.map(item => item.batchSkipped || 0));
     const failed = Math.max(visibleFailed, ...items.map(item => item.batchFailed || 0));
+    const canceled = visibleCanceled;
     const running = items.filter(item => item.status === 'downloading').length;
     const reportedDownloaded = Math.max(0, ...items.map(item => item.batchDownloaded || 0));
     const progress = reportedTotal > 0
@@ -204,6 +207,7 @@ export const Downloads: React.FC = () => {
       : Math.round(items.reduce((sum, item) => {
         if (item.status === 'completed') return sum + 100;
         if (item.status === 'failed') return sum + 100;
+        if (item.status === 'canceled') return sum + 100;
         return sum + Math.max(0, Math.min(100, item.progress || 0));
       }, 0) / visibleTotal);
     const hasPendingBatchItems = reportedTotal > 0 && reportedDownloaded < total;
@@ -211,9 +215,11 @@ export const Downloads: React.FC = () => {
       ? 'downloading'
       : failed > 0
         ? 'failed'
+        : canceled > 0
+          ? 'canceled'
         : 'completed';
     const thumbnail = items.find(item => item.thumbnailUrl)?.thumbnailUrl;
-    return { total, completed, skipped, failed, running, status, progress, thumbnail };
+    return { total, completed, skipped, failed, canceled, running, status, progress, thumbnail };
   };
 
   const toggleGroup = (id: string) => {
@@ -241,6 +247,7 @@ export const Downloads: React.FC = () => {
               {item.status === 'downloading' && <FileArrowDown size={14} />}
               {item.status === 'completed' && <CheckCircle size={14} />}
               {item.status === 'failed' && <WarningCircle size={14} />}
+              {item.status === 'canceled' && <XCircle size={14} />}
             </div>
           </div>
         ) : (
@@ -248,6 +255,7 @@ export const Downloads: React.FC = () => {
             {item.status === 'downloading' && <FileArrowDown size={20} />}
             {item.status === 'completed' && <CheckCircle size={20} />}
             {item.status === 'failed' && <WarningCircle size={20} />}
+            {item.status === 'canceled' && <XCircle size={20} />}
           </div>
         )}
       </div>
@@ -257,14 +265,15 @@ export const Downloads: React.FC = () => {
           <h3 className="download-name" title={item.fileName}>{item.fileName}</h3>
           <span className={`download-percentage status-${item.status}`}>
             {item.status === 'downloading' ? `${Math.round(item.progress)}%` :
-             item.status === 'completed' ? '100%' : 'Error'}
+             item.status === 'completed' ? '100%' :
+             item.status === 'canceled' ? 'Cancelado' : 'Erro'}
           </span>
         </div>
 
         <div className={`progress-bar-container ${item.status}`}>
           <div
             className="progress-bar-fill"
-            style={{ width: `${item.status === 'completed' ? 100 : item.status === 'failed' ? 100 : item.progress}%` }}
+            style={{ width: `${item.status === 'completed' || item.status === 'failed' || item.status === 'canceled' ? 100 : item.progress}%` }}
           />
         </div>
 
@@ -273,6 +282,7 @@ export const Downloads: React.FC = () => {
             <span key={meta} className="stat-item">{meta}</span>
           ))}
           {item.status === 'completed' && <span className="stat-item success-text">Finalizado</span>}
+          {item.status === 'canceled' && <span className="stat-item muted-text">Cancelado</span>}
           {item.error && <span className="stat-item error-text">{item.error}</span>}
         </div>
       </div>
@@ -401,6 +411,7 @@ export const Downloads: React.FC = () => {
                             {summary.status === 'downloading' && <FileArrowDown size={14} />}
                             {summary.status === 'completed' && <CheckCircle size={14} />}
                             {summary.status === 'failed' && <WarningCircle size={14} />}
+                            {summary.status === 'canceled' && <XCircle size={14} />}
                           </div>
                         </div>
                       ) : (
@@ -416,7 +427,7 @@ export const Downloads: React.FC = () => {
                           {first.batchTitle || 'Mass Download'}
                         </h3>
                         <span className={`download-percentage status-${summary.status}`}>
-                          {summary.status === 'failed' ? 'Error' : `${summary.progress}%`}
+                          {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
                         </span>
                       </div>
 
@@ -430,6 +441,7 @@ export const Downloads: React.FC = () => {
                         {summary.skipped > 0 && <span className="stat-item">{summary.skipped} ignorados</span>}
                         {summary.running > 0 && <span className="stat-item">{summary.running} em andamento</span>}
                         {summary.failed > 0 && <span className="stat-item error-text">{summary.failed} falharam</span>}
+                        {summary.canceled > 0 && <span className="stat-item muted-text">{summary.canceled} cancelados</span>}
                         {meta.map(item => <span key={item} className="stat-item">{item}</span>)}
                       </div>
                     </div>

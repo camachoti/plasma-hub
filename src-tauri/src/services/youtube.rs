@@ -113,7 +113,11 @@ fn player_js_url_from_html(html: &str) -> Option<String> {
         Regex::new(pattern)
             .ok()?
             .captures(html)
-            .and_then(|captures| captures.get(1).map(|value| absolute_youtube_url(value.as_str())))
+            .and_then(|captures| {
+                captures
+                    .get(1)
+                    .map(|value| absolute_youtube_url(value.as_str()))
+            })
     })
 }
 
@@ -262,10 +266,10 @@ async fn format_direct_url(
         return Ok(None);
     };
 
-    let base_url = query_param(cipher, "url")
-        .ok_or_else(|| "Cipher do YouTube sem URL base.".to_string())?;
-    let encrypted_signature = query_param(cipher, "s")
-        .ok_or_else(|| "Cipher do YouTube sem assinatura.".to_string())?;
+    let base_url =
+        query_param(cipher, "url").ok_or_else(|| "Cipher do YouTube sem URL base.".to_string())?;
+    let encrypted_signature =
+        query_param(cipher, "s").ok_or_else(|| "Cipher do YouTube sem assinatura.".to_string())?;
     let signature_param = query_param(cipher, "sp").unwrap_or_else(|| "signature".to_string());
     let player_js = player_js
         .ok_or_else(|| "Player JS do YouTube indisponivel para decifrar assinatura.".to_string())?;
@@ -337,15 +341,15 @@ async fn get_youtube_direct_stream_url(url: &str, format_id: &str) -> Result<Str
 
         if let Some(target_itag) = target_itag {
             if format.get("itag").and_then(|value| value.as_i64()) == Some(target_itag) {
-                return direct_url
-                    .ok_or_else(|| "Formato do YouTube sem URL resolvivel no Android.".to_string());
+                return direct_url.ok_or_else(|| {
+                    "Formato do YouTube sem URL resolvivel no Android.".to_string()
+                });
             }
         }
     }
 
-    first_direct_url.ok_or_else(|| {
-        "Nenhum stream resolvivel do YouTube encontrado no Android.".to_string()
-    })
+    first_direct_url
+        .ok_or_else(|| "Nenhum stream resolvivel do YouTube encontrado no Android.".to_string())
 }
 
 #[cfg(not(target_os = "android"))]
