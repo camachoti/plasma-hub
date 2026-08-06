@@ -13,13 +13,14 @@ use tauri::{
 };
 use tdlib_rs::{
     enums::{
-        AuthorizationState, ChatList, ChatType, InputFile, InputMessageContent,
+        AuthorizationState, ChatList, ChatMemberStatus, ChatType, InputFile, InputMessageContent,
         InputMessageReplyTo, MessageContent, MessageReplyTo, MessageSender, MessageTopic, Update,
     },
     functions,
     types::{
-        File, FormattedText, InputFileLocal, InputMessageDocument, InputMessagePhoto,
-        InputMessageReplyToMessage, InputMessageText, InputMessageVideo, MessageTopicForum, Photo,
+        ChatPermissions, File, FormattedText, InputFileLocal, InputMessageDocument,
+        InputMessagePhoto, InputMessageReplyToMessage, InputMessageText, InputMessageVideo,
+        MessageTopicForum, MessageTopicThread, Photo,
     },
 };
 use tokio::sync::Mutex;
@@ -42,13 +43,14 @@ struct TdlibInner {
 #[derive(Default)]
 pub struct TdlibManager {
     inner: Arc<Mutex<TdlibInner>>,
+    init_lock: Arc<Mutex<()>>,
     media_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     media_abort_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     receiver_started: AtomicBool,
     download_aborted: AtomicBool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TdlibStatus {
     success: bool,
     ready: bool,
@@ -169,6 +171,9 @@ pub struct TdlibChatInfo {
     unread_count: i32,
     is_group: bool,
     is_channel: bool,
+    is_member: bool,
+    can_send_messages: bool,
+    can_send_media: bool,
     has_topics: bool,
     last_message_text: String,
     last_message_date: i32,
@@ -185,7 +190,7 @@ pub struct TdlibChatsResult {
     error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMessageInfo {
     id: i64,
@@ -195,7 +200,8 @@ pub struct TdlibMessageInfo {
     sender_id: String,
     sender_name: String,
     reply_to_msg_id: Option<i64>,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
     media: bool,
     text: String,
     has_media: bool,
@@ -204,6 +210,7 @@ pub struct TdlibMessageInfo {
     grouped_id: Option<String>,
     video_duration: Option<i32>,
     media_size: Option<i64>,
+    thumbnail_path: Option<String>,
     is_deleted: bool,
 }
 
@@ -252,7 +259,8 @@ pub struct TdlibForwardResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibForumTopicInfo {
-    id: i32,
+    id: i64,
+    kind: String,
     title: String,
     is_closed: bool,
     is_pinned: bool,
@@ -267,13 +275,27 @@ pub struct TdlibForumTopicsResult {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibChatCapabilitiesResult {
+    success: bool,
+    chat_id: i64,
+    is_member: bool,
+    can_send_messages: bool,
+    can_send_media: bool,
+    error: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMassDownloadRequest {
     chat_id: i64,
     folder_path: String,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
     split_by_user: bool,
+    split_by_album: bool,
+    album_split_mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +329,15 @@ struct TdlibDownloadProgress {
     current_file: String,
     is_scanning: bool,
     items: Vec<TdlibDownloadItem>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TdlibNewMessageEvent {
+    chat_id: i64,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
+    message: TdlibMessageInfo,
 }
 
 struct PendingMassDownload {
@@ -518,15 +549,6 @@ fn get_plasma_media_response<R: Runtime>(
     app: &AppHandle<R>,
     request: http::Request<Vec<u8>>,
 ) -> Result<http::Response<Cow<'static, [u8]>>, String> {
-    println!(
-        "[plasma-media] request method={} uri={} range={:?}",
-        request.method(),
-        request.uri(),
-        request
-            .headers()
-            .get(http::header::RANGE)
-            .and_then(|value| value.to_str().ok())
-    );
     let Some((chat_id, message_id)) = parse_plasma_media_path(request.uri().path()) else {
         println!("[plasma-media] invalid path={}", request.uri().path());
         return Ok(media_protocol_error(
@@ -551,22 +573,7 @@ fn get_plasma_media_response<R: Runtime>(
         .unwrap_or_else(|| "video/mp4".to_string());
     let mut file = std::fs::File::open(&playback_path).map_err(|error| error.to_string())?;
     let len = file.metadata().map_err(|error| error.to_string())?.len();
-    println!(
-        "[plasma-media] resolved chat_id={} message_id={} path={} len={} content_type={} meta_mime={:?} file_name={:?}",
-        chat_id,
-        message_id,
-        playback_path,
-        len,
-        content_type,
-        meta.mime_type,
-        meta.file_name
-    );
-
     if request.method() == http::Method::HEAD {
-        println!(
-            "[plasma-media] response HEAD chat_id={} message_id={} status=200 len={}",
-            chat_id, message_id, len
-        );
         return http::Response::builder()
             .status(http::StatusCode::OK)
             .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -612,17 +619,6 @@ fn get_plasma_media_response<R: Runtime>(
             .map_err(|error| error.to_string())?;
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
         buffer.truncate(read);
-        println!(
-            "[plasma-media] response RANGE chat_id={} message_id={} status=206 range={}-{} len={} read={} content_type={}",
-            chat_id,
-            message_id,
-            start,
-            end,
-            len,
-            buffer.len(),
-            content_type
-        );
-
         return http::Response::builder()
             .status(http::StatusCode::PARTIAL_CONTENT)
             .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -641,15 +637,6 @@ fn get_plasma_media_response<R: Runtime>(
     let mut buffer = vec![0_u8; max_initial as usize];
     let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
     buffer.truncate(read);
-    println!(
-        "[plasma-media] response INITIAL chat_id={} message_id={} status={} len={} read={} content_type={}",
-        chat_id,
-        message_id,
-        if read as u64 == len { 200 } else { 206 },
-        len,
-        buffer.len(),
-        content_type
-    );
     http::Response::builder()
         .status(if read as u64 == len {
             http::StatusCode::OK
@@ -1203,6 +1190,15 @@ fn message_thumbnail_file(content: MessageContent) -> Option<File> {
     }
 }
 
+fn local_thumbnail_path(thumbnail: Option<File>) -> Option<String> {
+    let thumbnail = thumbnail?;
+    if thumbnail.local.is_downloading_completed && !thumbnail.local.path.is_empty() {
+        Some(thumbnail.local.path)
+    } else {
+        None
+    }
+}
+
 fn tdlib_message_id_from_app_id(message_id: i64) -> i64 {
     if message_id > 0 && message_id < (1_i64 << 20) {
         message_id << 20
@@ -1226,10 +1222,72 @@ fn sender_id_to_string(sender: &MessageSender) -> String {
     }
 }
 
-fn message_topic_id(topic: &Option<MessageTopic>) -> Option<i32> {
+async fn resolve_sender_name(client_id: i32, sender_id: &str) -> String {
+    match sender_id.parse::<i64>() {
+        Ok(sender_id) if sender_id > 0 => match functions::get_user(sender_id, client_id).await {
+            Ok(tdlib_rs::enums::User::User(user)) => {
+                let full_name = format!("{} {}", user.first_name, user.last_name)
+                    .trim()
+                    .to_string();
+                if full_name.is_empty() {
+                    user.usernames
+                        .and_then(|usernames| usernames.active_usernames.into_iter().next())
+                        .unwrap_or_default()
+                } else {
+                    full_name
+                }
+            }
+            Err(_) => String::new(),
+        },
+        Ok(sender_id) => match functions::get_chat(sender_id, client_id).await {
+            Ok(tdlib_rs::enums::Chat::Chat(chat)) => chat.title,
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+}
+
+async fn resolve_sender_folder_name(
+    client_id: i32,
+    sender: &MessageSender,
+    sender_cache: &mut HashMap<String, String>,
+) -> String {
+    let fallback = match sender {
+        MessageSender::User(sender) => format!("ID_{}", sender.user_id),
+        MessageSender::Chat(sender) => format!("Chat_{}", sender.chat_id),
+    };
+    let sender_id = sender_id_to_string(sender);
+    if let Some(cached_name) = sender_cache.get(&sender_id) {
+        return cached_name.clone();
+    }
+
+    let resolved_name = resolve_sender_name(client_id, &sender_id).await;
+    let folder_name = sanitize_folder_name(if resolved_name.trim().is_empty() {
+        &fallback
+    } else {
+        resolved_name.trim()
+    });
+    sender_cache.insert(sender_id, folder_name.clone());
+    folder_name
+}
+
+fn message_topic_id(topic: &Option<MessageTopic>) -> Option<i64> {
     match topic {
-        Some(MessageTopic::Forum(topic)) => Some(topic.forum_topic_id),
+        Some(MessageTopic::Forum(topic)) => Some(i64::from(topic.forum_topic_id)),
+        Some(MessageTopic::Thread(topic)) => {
+            Some(app_message_id_from_tdlib(topic.message_thread_id))
+        }
         _ => None,
+    }
+}
+
+fn message_topic_kind(topic: &Option<MessageTopic>) -> Option<String> {
+    match topic {
+        Some(MessageTopic::Forum(_)) => Some("forum".to_string()),
+        Some(MessageTopic::Thread(_)) => Some("thread".to_string()),
+        Some(MessageTopic::DirectMessages(_)) => Some("direct_messages".to_string()),
+        Some(MessageTopic::SavedMessages(_)) => Some("saved_messages".to_string()),
+        None => None,
     }
 }
 
@@ -1251,6 +1309,40 @@ fn content_text(content: &MessageContent) -> String {
         MessageContent::MessageVoiceNote(content) => content.caption.text.clone(),
         _ => String::new(),
     }
+}
+
+fn is_likely_album_separator_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 48 {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("www.")
+        || lower.contains("t.me/")
+    {
+        return false;
+    }
+
+    let compact: String = trimmed.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if compact.is_empty() {
+        return false;
+    }
+
+    let letters_or_numbers = compact.chars().filter(|ch| ch.is_alphanumeric()).count();
+    let symbols = compact.chars().count().saturating_sub(letters_or_numbers);
+    if letters_or_numbers == 0 {
+        return true;
+    }
+    if compact.chars().count() <= 12 && symbols >= letters_or_numbers {
+        return true;
+    }
+
+    compact.chars().count() <= 16
+        && trimmed.chars().all(|ch| {
+            ch.is_alphanumeric() || ch.is_whitespace() || matches!(ch, '.' | '_' | '#' | '-')
+        })
 }
 
 fn content_media_flags(content: &MessageContent) -> (bool, bool, bool, Option<i32>, Option<i64>) {
@@ -1310,6 +1402,7 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
     let text = content_text(&message.content);
     let (has_media, is_photo, is_video, video_duration, media_size) =
         content_media_flags(&message.content);
+    let thumbnail_path = local_thumbnail_path(message_thumbnail_file(message.content.clone()));
 
     TdlibMessageInfo {
         id: app_message_id_from_tdlib(message.id),
@@ -1320,6 +1413,7 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
         sender_name: String::new(),
         reply_to_msg_id: reply_message_id(&message.reply_to),
         topic_id: message_topic_id(&message.topic_id),
+        topic_kind: message_topic_kind(&message.topic_id),
         media: has_media,
         text,
         has_media,
@@ -1332,6 +1426,7 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
         },
         video_duration,
         media_size,
+        thumbnail_path,
         is_deleted: false,
     }
 }
@@ -1352,8 +1447,16 @@ fn optional_caption(text: &str) -> Option<FormattedText> {
     }
 }
 
-fn message_topic_from_id(topic_id: Option<i32>) -> Option<MessageTopic> {
-    topic_id.map(|forum_topic_id| MessageTopic::Forum(MessageTopicForum { forum_topic_id }))
+fn message_topic_from_id(topic_id: Option<i64>, topic_kind: Option<&str>) -> Option<MessageTopic> {
+    topic_id.and_then(|topic_id| match topic_kind.unwrap_or("forum") {
+        "thread" => Some(MessageTopic::Thread(MessageTopicThread {
+            message_thread_id: tdlib_message_id_from_app_id(topic_id),
+        })),
+        "forum" => i32::try_from(topic_id)
+            .ok()
+            .map(|forum_topic_id| MessageTopic::Forum(MessageTopicForum { forum_topic_id })),
+        _ => None,
+    })
 }
 
 fn reply_to_from_id(reply_to_id: Option<i64>) -> Option<InputMessageReplyTo> {
@@ -1422,12 +1525,75 @@ fn input_content_for_local_media(file_path: &str, caption: &str) -> InputMessage
     }
 }
 
+fn permissions_can_send_media(permissions: &ChatPermissions) -> bool {
+    permissions.can_send_audios
+        || permissions.can_send_documents
+        || permissions.can_send_photos
+        || permissions.can_send_videos
+        || permissions.can_send_video_notes
+        || permissions.can_send_voice_notes
+        || permissions.can_send_other_messages
+}
+
+fn member_status_capabilities(
+    status: &ChatMemberStatus,
+    is_channel: bool,
+    permissions: &ChatPermissions,
+) -> (bool, bool, bool) {
+    match status {
+        ChatMemberStatus::Creator(status) => (status.is_member, true, true),
+        ChatMemberStatus::Administrator(status) => {
+            if is_channel {
+                (
+                    true,
+                    status.rights.can_post_messages,
+                    status.rights.can_post_messages,
+                )
+            } else {
+                (true, true, true)
+            }
+        }
+        ChatMemberStatus::Member(_) => (
+            true,
+            !is_channel && permissions.can_send_basic_messages,
+            !is_channel && permissions_can_send_media(permissions),
+        ),
+        ChatMemberStatus::Restricted(status) => (
+            status.is_member,
+            status.permissions.can_send_basic_messages,
+            permissions_can_send_media(&status.permissions),
+        ),
+        ChatMemberStatus::Left | ChatMemberStatus::Banned(_) => (false, false, false),
+    }
+}
+
+fn chat_send_capabilities(
+    chat_type: &ChatType,
+    permissions: &ChatPermissions,
+) -> (bool, bool, bool) {
+    match chat_type {
+        ChatType::Private(_) | ChatType::Secret(_) => (true, true, true),
+        ChatType::BasicGroup(_) => (
+            true,
+            permissions.can_send_basic_messages,
+            permissions_can_send_media(permissions),
+        ),
+        ChatType::Supergroup(group) => (
+            true,
+            !group.is_channel && permissions.can_send_basic_messages,
+            !group.is_channel && permissions_can_send_media(permissions),
+        ),
+    }
+}
+
 fn tdlib_chat_to_app(chat: tdlib_rs::types::Chat) -> TdlibChatInfo {
     let (is_group, is_channel) = match &chat.r#type {
         ChatType::Private(_) | ChatType::Secret(_) => (false, false),
         ChatType::BasicGroup(_) => (true, false),
         ChatType::Supergroup(chat_type) => (!chat_type.is_channel, chat_type.is_channel),
     };
+    let (is_member, can_send_messages, can_send_media) =
+        chat_send_capabilities(&chat.r#type, &chat.permissions);
 
     let (
         last_message_text,
@@ -1451,6 +1617,9 @@ fn tdlib_chat_to_app(chat: tdlib_rs::types::Chat) -> TdlibChatInfo {
         unread_count: chat.unread_count,
         is_group,
         is_channel,
+        is_member,
+        can_send_messages,
+        can_send_media,
         has_topics: chat.view_as_topics,
         last_message_text,
         last_message_date,
@@ -1478,6 +1647,18 @@ fn emit_mass_progress(
             current_file: current_file.into(),
             is_scanning,
             items: items.to_vec(),
+        },
+    );
+}
+
+fn emit_new_message(app: &AppHandle, chat_id: i64, message: TdlibMessageInfo) {
+    let _ = app.emit(
+        "tdlib-new-message",
+        TdlibNewMessageEvent {
+            chat_id,
+            topic_id: message.topic_id,
+            topic_kind: message.topic_kind.clone(),
+            message,
         },
     );
 }
@@ -1532,6 +1713,40 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                 Ok(Some((Update::AuthorizationState(update), _client_id))) => {
                     set_state(&inner, &app, update.authorization_state).await;
                 }
+                Ok(Some((Update::NewMessage(update), client_id))) => {
+                    if matches!(
+                        &update.message.content,
+                        MessageContent::MessageChatDeleteMember(_)
+                    ) {
+                        continue;
+                    }
+
+                    let chat_id = update.message.chat_id;
+                    let message = tdlib_message_to_app(update.message);
+                    let sender_id = message.sender_id.clone();
+                    if message.out {
+                        emit_new_message(&app, chat_id, message);
+                    } else {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let sender_name = tokio::time::timeout(
+                                Duration::from_millis(800),
+                                resolve_sender_name(client_id, &sender_id),
+                            )
+                            .await
+                            .unwrap_or_default();
+                            let message = if sender_name.trim().is_empty() {
+                                message
+                            } else {
+                                TdlibMessageInfo {
+                                    sender_name,
+                                    ..message
+                                }
+                            };
+                            emit_new_message(&app, chat_id, message);
+                        });
+                    }
+                }
                 Ok(Some((_update, _client_id))) => {}
                 Ok(None) => {
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1551,6 +1766,15 @@ fn td_error(error: tdlib_rs::types::Error) -> TdlibStatus {
         ready: false,
         state: "error".to_string(),
         error: Some(error.message),
+    }
+}
+
+fn td_timeout(message: impl Into<String>) -> TdlibStatus {
+    TdlibStatus {
+        success: false,
+        ready: false,
+        state: "timeout".to_string(),
+        error: Some(message.into()),
     }
 }
 
@@ -1864,6 +2088,7 @@ pub async fn tdlib_init(
     api_hash: String,
 ) -> TdlibCommandResult {
     start_receiver(app.clone(), &state);
+    let _init_guard = state.init_lock.lock().await;
 
     let app_data_dir = match app.path().app_data_dir() {
         Ok(path) => path,
@@ -1908,14 +2133,24 @@ pub async fn tdlib_init(
         client_id
     };
 
-    if let Err(error) = functions::set_log_verbosity_level(2, client_id).await {
-        return Ok(td_error(error));
+    match tokio::time::timeout(
+        Duration::from_secs(4),
+        functions::set_log_verbosity_level(2, client_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Ok(td_error(error)),
+        Err(_) => return Ok(td_timeout("TDLib demorou para configurar logs.")),
     }
 
-    if let Err(error) = configure_if_needed(&state.inner).await {
-        return Ok(td_error(error));
+    match tokio::time::timeout(Duration::from_secs(8), configure_if_needed(&state.inner)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Ok(td_error(error)),
+        Err(_) => return Ok(td_timeout("TDLib demorou para configurar parametros.")),
     }
 
+    drop(_init_guard);
     tdlib_status(state).await
 }
 
@@ -1935,21 +2170,31 @@ pub async fn tdlib_status(state: State<'_, TdlibManager>) -> TdlibCommandResult 
         });
     };
 
-    match functions::get_authorization_state(client_id).await {
-        Ok(auth_state) => {
-            let label = state_label(&auth_state).to_string();
-            {
-                let mut guard = state.inner.lock().await;
-                guard.auth_state = label.clone();
+    match tokio::time::timeout(
+        Duration::from_secs(4),
+        functions::get_authorization_state(client_id),
+    )
+    .await
+    {
+        Err(_) => Ok(td_timeout(
+            "TDLib demorou para retornar estado de autenticacao.",
+        )),
+        Ok(result) => match result {
+            Ok(auth_state) => {
+                let label = state_label(&auth_state).to_string();
+                {
+                    let mut guard = state.inner.lock().await;
+                    guard.auth_state = label.clone();
+                }
+                Ok(TdlibStatus {
+                    success: true,
+                    ready: matches!(auth_state, AuthorizationState::Ready),
+                    state: label,
+                    error: None,
+                })
             }
-            Ok(TdlibStatus {
-                success: true,
-                ready: matches!(auth_state, AuthorizationState::Ready),
-                state: label,
-                error: None,
-            })
-        }
-        Err(error) => Ok(td_error(error)),
+            Err(error) => Ok(td_error(error)),
+        },
     }
 }
 
@@ -2110,7 +2355,8 @@ pub async fn tdlib_get_messages(
     chat_id: i64,
     limit: Option<i32>,
     offset_id: Option<i64>,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
 ) -> Result<TdlibMessagesResult, String> {
     let client_id = match ready_client_id(&state).await {
         Ok(client_id) => client_id,
@@ -2128,15 +2374,28 @@ pub async fn tdlib_get_messages(
     let requested_limit = limit.unwrap_or(50).clamp(1, 100);
     let from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
     let history_result = if let Some(topic_id) = topic_id {
-        functions::get_forum_topic_history(
-            chat_id,
-            topic_id,
-            from_message_id,
-            0,
-            requested_limit,
-            client_id,
-        )
-        .await
+        if topic_kind.as_deref() == Some("thread") {
+            functions::get_message_thread_history(
+                chat_id,
+                tdlib_message_id_from_app_id(topic_id),
+                from_message_id,
+                0,
+                requested_limit,
+                client_id,
+            )
+            .await
+        } else {
+            let forum_topic_id = i32::try_from(topic_id).map_err(|_| "ID de tópico inválido")?;
+            functions::get_forum_topic_history(
+                chat_id,
+                forum_topic_id,
+                from_message_id,
+                0,
+                requested_limit,
+                client_id,
+            )
+            .await
+        }
     } else {
         functions::get_chat_history(
             chat_id,
@@ -2162,13 +2421,31 @@ pub async fn tdlib_get_messages(
         }
     };
 
-    let mut messages: Vec<TdlibMessageInfo> = history
+    let raw_messages: Vec<tdlib_rs::types::Message> = history
         .messages
         .into_iter()
         .flatten()
         .filter(|message| !matches!(message.content, MessageContent::MessageChatDeleteMember(_)))
-        .map(tdlib_message_to_app)
         .collect();
+
+    let mut thumbnail_prefetch_count = 0;
+    for message in raw_messages.iter().rev() {
+        if thumbnail_prefetch_count >= 16 {
+            break;
+        }
+        if local_thumbnail_path(message_thumbnail_file(message.content.clone())).is_some() {
+            continue;
+        }
+        if let Some(thumbnail) = message_thumbnail_file(message.content.clone()) {
+            thumbnail_prefetch_count += 1;
+            tokio::spawn(async move {
+                let _ = download_thumbnail_path(client_id, Some(thumbnail)).await;
+            });
+        }
+    }
+
+    let mut messages: Vec<TdlibMessageInfo> =
+        raw_messages.into_iter().map(tdlib_message_to_app).collect();
 
     let mut sender_names = HashMap::<String, String>::new();
     for message in &mut messages {
@@ -2180,33 +2457,18 @@ pub async fn tdlib_get_messages(
             continue;
         }
 
-        let sender_name = match message.sender_id.parse::<i64>() {
-            Ok(sender_id) if sender_id > 0 => match functions::get_user(sender_id, client_id).await
-            {
-                Ok(tdlib_rs::enums::User::User(user)) => {
-                    let full_name = format!("{} {}", user.first_name, user.last_name)
-                        .trim()
-                        .to_string();
-                    if full_name.is_empty() {
-                        user.usernames
-                            .and_then(|usernames| usernames.active_usernames.into_iter().next())
-                            .unwrap_or_default()
-                    } else {
-                        full_name
-                    }
-                }
-                Err(_) => String::new(),
-            },
-            Ok(sender_id) => match functions::get_chat(sender_id, client_id).await {
-                Ok(tdlib_rs::enums::Chat::Chat(chat)) => chat.title,
-                Err(_) => String::new(),
-            },
-            Err(_) => String::new(),
-        };
+        let sender_name = resolve_sender_name(client_id, &message.sender_id).await;
         sender_names.insert(message.sender_id.clone(), sender_name.clone());
         message.sender_name = sender_name;
     }
-    messages.sort_by_key(|message| message.id);
+    messages.sort_by_key(|message| {
+        let id_order = if message.id < 0 {
+            (1_u8, message.id.unsigned_abs())
+        } else {
+            (0_u8, message.id as u64)
+        };
+        (message.date, id_order)
+    });
     let oldest_message_id = messages.first().map(|message| message.id);
     let has_more = messages.len() as i32 >= requested_limit;
 
@@ -2215,6 +2477,75 @@ pub async fn tdlib_get_messages(
         messages,
         has_more,
         oldest_message_id,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn tdlib_get_chat_capabilities(
+    state: State<'_, TdlibManager>,
+    chat_id: i64,
+) -> Result<TdlibChatCapabilitiesResult, String> {
+    let client_id = match ready_client_id(&state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibChatCapabilitiesResult {
+                success: false,
+                chat_id,
+                is_member: false,
+                can_send_messages: false,
+                can_send_media: false,
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    let chat = match functions::get_chat(chat_id, client_id).await {
+        Ok(tdlib_rs::enums::Chat::Chat(chat)) => chat,
+        Err(error) => {
+            return Ok(TdlibChatCapabilitiesResult {
+                success: false,
+                chat_id,
+                is_member: false,
+                can_send_messages: false,
+                can_send_media: false,
+                error: Some(error.message),
+            });
+        }
+    };
+
+    let (is_member, can_send_messages, can_send_media) = match &chat.r#type {
+        ChatType::BasicGroup(group) => {
+            match functions::get_basic_group(group.basic_group_id, client_id).await {
+                Ok(tdlib_rs::enums::BasicGroup::BasicGroup(group_info)) => {
+                    member_status_capabilities(&group_info.status, false, &chat.permissions)
+                }
+                Err(_) => chat_send_capabilities(&chat.r#type, &chat.permissions),
+            }
+        }
+        ChatType::Supergroup(group) => {
+            match functions::get_supergroup(group.supergroup_id, client_id).await {
+                Ok(tdlib_rs::enums::Supergroup::Supergroup(group_info)) => {
+                    member_status_capabilities(
+                        &group_info.status,
+                        group_info.is_channel,
+                        &chat.permissions,
+                    )
+                }
+                Err(_) => chat_send_capabilities(&chat.r#type, &chat.permissions),
+            }
+        }
+        ChatType::Private(_) | ChatType::Secret(_) => {
+            chat_send_capabilities(&chat.r#type, &chat.permissions)
+        }
+    };
+
+    Ok(TdlibChatCapabilitiesResult {
+        success: true,
+        chat_id,
+        is_member,
+        can_send_messages,
+        can_send_media,
         error: None,
     })
 }
@@ -2380,7 +2711,8 @@ pub async fn tdlib_send_message(
     chat_id: i64,
     text: String,
     reply_to_id: Option<i64>,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
 ) -> Result<TdlibSendResult, String> {
     let client_id = match ready_client_id(&state).await {
         Ok(client_id) => client_id,
@@ -2410,7 +2742,7 @@ pub async fn tdlib_send_message(
 
     match functions::send_message(
         chat_id,
-        message_topic_from_id(topic_id),
+        message_topic_from_id(topic_id, topic_kind.as_deref()),
         reply_to_from_id(reply_to_id),
         None,
         content,
@@ -2438,7 +2770,8 @@ pub async fn tdlib_send_media(
     file_path: String,
     caption: Option<String>,
     reply_to_id: Option<i64>,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
 ) -> Result<TdlibSendResult, String> {
     let client_id = match ready_client_id(&state).await {
         Ok(client_id) => client_id,
@@ -2462,7 +2795,7 @@ pub async fn tdlib_send_media(
     let content = input_content_for_local_media(&file_path, caption.as_deref().unwrap_or(""));
     match functions::send_message(
         chat_id,
-        message_topic_from_id(topic_id),
+        message_topic_from_id(topic_id, topic_kind.as_deref()),
         reply_to_from_id(reply_to_id),
         None,
         content,
@@ -2489,7 +2822,8 @@ pub async fn tdlib_forward_message(
     chat_id: i64,
     message_id: i64,
     to_chat_id: i64,
-    topic_id: Option<i32>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
 ) -> Result<TdlibForwardResult, String> {
     let client_id = match ready_client_id(&state).await {
         Ok(client_id) => client_id,
@@ -2504,7 +2838,7 @@ pub async fn tdlib_forward_message(
 
     match functions::forward_messages(
         to_chat_id,
-        message_topic_from_id(topic_id),
+        message_topic_from_id(topic_id, topic_kind.as_deref()),
         chat_id,
         vec![tdlib_message_id_from_app_id(message_id)],
         None,
@@ -2566,7 +2900,8 @@ pub async fn tdlib_get_forum_topics(
                 .topics
                 .into_iter()
                 .map(|topic| TdlibForumTopicInfo {
-                    id: topic.info.forum_topic_id,
+                    id: i64::from(topic.info.forum_topic_id),
+                    kind: "forum".to_string(),
                     title: topic.info.name,
                     is_closed: topic.info.is_closed,
                     is_pinned: topic.is_pinned,
@@ -2757,15 +3092,6 @@ pub async fn telegram_media_prepare_playback(
 ) -> Result<NativePlaybackSource, String> {
     if let Ok(Some(meta)) = complete_native_media_meta(&app, chat_id, message_id) {
         let (playback_path, playback_mime_type) = ensure_native_playback_file(&app, &meta)?;
-        println!(
-            "[telegram-media] prepare_playback cached chat_id={} message_id={} url={} path={} mime={:?} total={:?}",
-            chat_id,
-            message_id,
-            media_http::playback_url(chat_id, message_id),
-            playback_path,
-            playback_mime_type.as_ref().or(meta.mime_type.as_ref()),
-            meta.total_bytes
-        );
         return Ok(NativePlaybackSource {
             success: true,
             kind: "file".to_string(),
@@ -2801,22 +3127,6 @@ pub async fn telegram_media_prepare_playback(
     let playback_mime_type = playback
         .and_then(|(_, mime_type)| mime_type)
         .or(meta.mime_type.clone());
-    println!(
-        "[telegram-media] prepare_playback ensured chat_id={} message_id={} success={} state={} url={:?} path={:?} mime={:?} total={:?} error={:?}",
-        chat_id,
-        message_id,
-        meta.success,
-        meta.state,
-        if meta.success {
-            Some(media_http::playback_url(chat_id, message_id))
-        } else {
-            playback_path.clone()
-        },
-        playback_path,
-        playback_mime_type,
-        meta.total_bytes,
-        meta.error
-    );
     Ok(NativePlaybackSource {
         success: meta.success,
         kind: if meta.success { "file" } else { "fallback" }.to_string(),
@@ -3211,10 +3521,6 @@ pub async fn tdlib_download_message_thumbnail(
     };
 
     let Some(thumbnail) = message_thumbnail_file(message.content) else {
-        println!(
-            "[telegram-thumb] no thumbnail chat_id={} message_id={}",
-            chat_id, message_id
-        );
         return Ok(TdlibThumbnailResult {
             success: false,
             file_path: None,
@@ -3235,10 +3541,6 @@ pub async fn tdlib_download_message_thumbnail(
 
     match download_thumbnail_to_cache(client_id, Some(thumbnail), &media_dir).await {
         Some(path) => {
-            println!(
-                "[telegram-thumb] ready chat_id={} message_id={} path={}",
-                chat_id, message_id, path
-            );
             let mut meta = read_native_media_meta(&app, chat_id, message_id)
                 .unwrap_or_else(|_| empty_native_media_meta(chat_id, message_id));
             meta.thumbnail_path = Some(path.clone());
@@ -3285,11 +3587,6 @@ pub async fn tdlib_download_chat_avatar(
                 .is_some_and(|value| value == chat_id.to_string())
                 && path.exists()
             {
-                println!(
-                    "[telegram-avatar] cached chat_id={} path={}",
-                    chat_id,
-                    path.to_string_lossy()
-                );
                 return Ok(TdlibAvatarResult {
                     success: true,
                     file_path: Some(path.to_string_lossy().to_string()),
@@ -3322,7 +3619,6 @@ pub async fn tdlib_download_chat_avatar(
     };
 
     let Some(photo) = chat.photo else {
-        println!("[telegram-avatar] no photo chat_id={}", chat_id);
         return Ok(TdlibAvatarResult {
             success: false,
             file_path: None,
@@ -3338,14 +3634,11 @@ pub async fn tdlib_download_chat_avatar(
     };
 
     match avatar_path {
-        Some(path) => {
-            println!("[telegram-avatar] ready chat_id={} path={}", chat_id, path);
-            Ok(TdlibAvatarResult {
-                success: true,
-                file_path: Some(path),
-                error: None,
-            })
-        }
+        Some(path) => Ok(TdlibAvatarResult {
+            success: true,
+            file_path: Some(path),
+            error: None,
+        }),
         None => {
             println!("[telegram-avatar] failed chat_id={}", chat_id);
             Ok(TdlibAvatarResult {
@@ -3392,6 +3685,7 @@ pub async fn tdlib_start_mass_download(
     let mut failed_count = 0usize;
     let mut items: Vec<TdlibDownloadItem> = Vec::new();
     let mut pending_downloads: Vec<PendingMassDownload> = Vec::new();
+    let mut scanned_messages: Vec<tdlib_rs::types::Message> = Vec::new();
 
     emit_mass_progress(
         &app,
@@ -3409,15 +3703,41 @@ pub async fn tdlib_start_mass_download(
         }
 
         let history_result = if let Some(topic_id) = request.topic_id {
-            functions::get_forum_topic_history(
-                request.chat_id,
-                topic_id,
-                from_message_id,
-                0,
-                100,
-                client_id,
-            )
-            .await
+            if request.topic_kind.as_deref() == Some("thread") {
+                functions::get_message_thread_history(
+                    request.chat_id,
+                    tdlib_message_id_from_app_id(topic_id),
+                    from_message_id,
+                    0,
+                    100,
+                    client_id,
+                )
+                .await
+            } else {
+                let forum_topic_id = match i32::try_from(topic_id) {
+                    Ok(topic_id) => topic_id,
+                    Err(_) => {
+                        return Ok(TdlibMassDownloadResult {
+                            success: false,
+                            downloaded_count,
+                            skipped_count,
+                            failed_count,
+                            total: items.len(),
+                            aborted: false,
+                            error: Some("ID de tópico inválido".to_string()),
+                        });
+                    }
+                };
+                functions::get_forum_topic_history(
+                    request.chat_id,
+                    forum_topic_id,
+                    from_message_id,
+                    0,
+                    100,
+                    client_id,
+                )
+                .await
+            }
         } else {
             functions::get_chat_history(request.chat_id, from_message_id, 0, 100, false, client_id)
                 .await
@@ -3446,49 +3766,85 @@ pub async fn tdlib_start_mass_download(
 
         for message in history.messages.into_iter().flatten() {
             next_from_message_id = message.id;
-
-            let sender_id = message.sender_id.clone();
-            let Some(media) = message_media_file(message.content, message.id) else {
-                continue;
-            };
-            let media_file = media.file;
-            let file_name = media.file_name;
-
-            let mut folder = Path::new(&request.folder_path).to_path_buf();
-            if request.split_by_user {
-                let sender_folder = match sender_id {
-                    tdlib_rs::enums::MessageSender::User(sender) => {
-                        sanitize_folder_name(&format!("ID_{}", sender.user_id))
-                    }
-                    tdlib_rs::enums::MessageSender::Chat(sender) => {
-                        sanitize_folder_name(&format!("Chat_{}", sender.chat_id))
-                    }
-                };
-                folder = folder.join(sender_folder);
-            }
-
-            let destination = folder.join(&file_name);
-            let item_index = items.len();
-            items.push(TdlibDownloadItem {
-                name: file_name.clone(),
-                status: "pending".to_string(),
-                progress: 0,
-                size: effective_file_size(&media_file),
-                file_path: Some(destination.to_string_lossy().to_string()),
-                thumbnail_path: None,
-            });
-            pending_downloads.push(PendingMassDownload {
-                file: media_file,
-                thumbnail: media.thumbnail,
-                destination,
-                item_index,
-            });
+            scanned_messages.push(message);
         }
 
         if next_from_message_id == 0 || next_from_message_id == from_message_id {
             break;
         }
         from_message_id = next_from_message_id;
+    }
+
+    scanned_messages.reverse();
+    let album_split_mode = request.album_split_mode.as_deref().unwrap_or("separator");
+    let mut album_folder_names = HashMap::<i64, String>::new();
+    let mut last_separator_name: Option<String> = None;
+
+    for message in &scanned_messages {
+        let text = content_text(&message.content);
+        let (has_media, _, _, _, _) = content_media_flags(&message.content);
+        if has_media && request.split_by_album && message.media_album_id != 0 {
+            match album_split_mode {
+                "comment" => {
+                    if !text.trim().is_empty() {
+                        album_folder_names
+                            .entry(message.media_album_id)
+                            .or_insert_with(|| sanitize_folder_name(text.trim()));
+                    }
+                }
+                _ => {
+                    if let Some(separator_name) = &last_separator_name {
+                        album_folder_names
+                            .entry(message.media_album_id)
+                            .or_insert_with(|| separator_name.clone());
+                    }
+                }
+            }
+        } else if !has_media && is_likely_album_separator_text(&text) {
+            last_separator_name = Some(sanitize_folder_name(text.trim()));
+        }
+    }
+
+    let mut sender_folder_names = HashMap::<String, String>::new();
+    for message in scanned_messages {
+        let sender_id = message.sender_id.clone();
+        let media_album_id = message.media_album_id;
+        let Some(media) = message_media_file(message.content, message.id) else {
+            continue;
+        };
+        let media_file = media.file;
+        let file_name = media.file_name;
+
+        let mut folder = Path::new(&request.folder_path).to_path_buf();
+        if request.split_by_user {
+            let sender_folder =
+                resolve_sender_folder_name(client_id, &sender_id, &mut sender_folder_names).await;
+            folder = folder.join(sender_folder);
+        }
+        if request.split_by_album && media_album_id != 0 {
+            let album_folder = album_folder_names
+                .get(&media_album_id)
+                .cloned()
+                .unwrap_or_else(|| sanitize_folder_name(&format!("Album_{media_album_id}")));
+            folder = folder.join(album_folder);
+        }
+
+        let destination = folder.join(&file_name);
+        let item_index = items.len();
+        items.push(TdlibDownloadItem {
+            name: file_name.clone(),
+            status: "pending".to_string(),
+            progress: 0,
+            size: effective_file_size(&media_file),
+            file_path: Some(destination.to_string_lossy().to_string()),
+            thumbnail_path: None,
+        });
+        pending_downloads.push(PendingMassDownload {
+            file: media_file,
+            thumbnail: media.thumbnail,
+            destination,
+            item_index,
+        });
     }
 
     let total = items.len();

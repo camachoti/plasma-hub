@@ -1,4 +1,5 @@
 import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
+import type { Chat, ForumTopic, Message } from './TelegramDashboardTypes';
 import { toNumberValue } from './TelegramMessageUtils';
 
 interface TelegramCredentials {
@@ -24,21 +25,30 @@ interface TdlibUserInfo {
 
 interface TdlibChatsResult {
   success: boolean;
-  dialogs: any[];
+  dialogs: Chat[];
   error?: string | null;
 }
 
 interface TdlibMessagesResult {
   success: boolean;
-  messages: any[];
+  messages: Message[];
   hasMore: boolean;
   oldestMessageId?: number | null;
   error?: string | null;
 }
 
+interface TdlibChatCapabilitiesResult {
+  success: boolean;
+  chatId: number;
+  isMember: boolean;
+  canSendMessages: boolean;
+  canSendMedia: boolean;
+  error?: string | null;
+}
+
 interface TdlibForumTopicsResult {
   success: boolean;
-  topics: any[];
+  topics: ForumTopic[];
   error?: string | null;
 }
 
@@ -50,14 +60,21 @@ interface TdlibSharedMediaResult {
 
 interface TdlibSendResult {
   success: boolean;
-  message?: any | null;
+  message?: Message | null;
   error?: string | null;
 }
 
 interface TdlibForwardResult {
   success: boolean;
-  messages: any[];
+  messages: Message[];
   error?: string | null;
+}
+
+interface TdlibNewMessageEvent {
+  chatId: number;
+  topicId?: number | null;
+  topicKind?: string | null;
+  message: Message;
 }
 
 interface DownloadMessageMediaRequest {
@@ -70,7 +87,10 @@ interface TdlibMassDownloadRequest {
   chatId: unknown;
   folderPath: string;
   topicId?: unknown;
+  topicKind?: string | null;
   splitByUser?: boolean;
+  splitByAlbum?: boolean;
+  albumSplitMode?: 'separator' | 'comment';
 }
 
 interface TdlibDownloadResult {
@@ -206,12 +226,19 @@ export class TelegramTdlibBridge {
     return invoke<TdlibChatsResult>('tdlib_get_chats', { limit });
   }
 
-  getMessages({ chatId, limit = 50, offsetId = 0, topicId = null }: any) {
+  getMessages({ chatId, limit = 50, offsetId = 0, topicId = null, topicKind = null }: any) {
     return invoke<TdlibMessagesResult>('tdlib_get_messages', {
       chatId: toNumberValue(chatId),
       limit,
       offsetId: offsetId ? toNumberValue(offsetId) : null,
       topicId: topicId == null ? null : toNumberValue(topicId),
+      topicKind,
+    });
+  }
+
+  getChatCapabilities(chatId: unknown) {
+    return invoke<TdlibChatCapabilitiesResult>('tdlib_get_chat_capabilities', {
+      chatId: toNumberValue(chatId),
     });
   }
 
@@ -237,31 +264,34 @@ export class TelegramTdlibBridge {
     });
   }
 
-  sendMessage({ chatId, text, replyToId = null, topicId = null }: any) {
+  sendMessage({ chatId, text, replyToId = null, topicId = null, topicKind = null }: any) {
     return invoke<TdlibSendResult>('tdlib_send_message', {
       chatId: toNumberValue(chatId),
       text: String(text || ''),
       replyToId: replyToId == null ? null : toNumberValue(replyToId),
       topicId: topicId == null ? null : toNumberValue(topicId),
+      topicKind,
     });
   }
 
-  sendMedia({ chatId, filePath, caption = '', replyToId = null, topicId = null }: any) {
+  sendMedia({ chatId, filePath, caption = '', replyToId = null, topicId = null, topicKind = null }: any) {
     return invoke<TdlibSendResult>('tdlib_send_media', {
       chatId: toNumberValue(chatId),
       filePath,
       caption: caption || '',
       replyToId: replyToId == null ? null : toNumberValue(replyToId),
       topicId: topicId == null ? null : toNumberValue(topicId),
+      topicKind,
     });
   }
 
-  forwardMessage({ chatId, messageId, toChatId = chatId, topicId = null }: any) {
+  forwardMessage({ chatId, messageId, toChatId = chatId, topicId = null, topicKind = null }: any) {
     return invoke<TdlibForwardResult>('tdlib_forward_message', {
       chatId: toNumberValue(chatId),
       messageId: toNumberValue(messageId),
       toChatId: toNumberValue(toChatId),
       topicId: topicId == null ? null : toNumberValue(topicId),
+      topicKind,
     });
   }
 
@@ -345,13 +375,16 @@ export class TelegramTdlibBridge {
     });
   }
 
-  startMassDownload({ chatId, folderPath, topicId = null, splitByUser = false }: TdlibMassDownloadRequest) {
+  startMassDownload({ chatId, folderPath, topicId = null, topicKind = null, splitByUser = false, splitByAlbum = false, albumSplitMode = 'separator' }: TdlibMassDownloadRequest) {
     return invoke<TdlibMassDownloadResult>('tdlib_start_mass_download', {
       request: {
         chatId: toNumberValue(chatId),
         folderPath,
         topicId: topicId == null ? null : toNumberValue(topicId),
+        topicKind,
         splitByUser,
+        splitByAlbum,
+        albumSplitMode,
       },
     });
   }
@@ -366,6 +399,10 @@ export class TelegramTdlibBridge {
 
   onDownloadProgress(cb: (data: TdlibDownloadProgress) => void) {
     return listen<TdlibDownloadProgress>('tdlib-download-progress', event => cb(event.payload));
+  }
+
+  onNewMessage(cb: (data: TdlibNewMessageEvent) => void) {
+    return listen<TdlibNewMessageEvent>('tdlib-new-message', event => cb(event.payload));
   }
 
   onNativeMediaProgress(cb: (data: NativeMediaProgress) => void) {

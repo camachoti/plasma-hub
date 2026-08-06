@@ -1,14 +1,13 @@
-// @ts-nocheck
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { invokeCommand as invoke } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
-import { ContextMenu, IcoDownload, IcoCopy, IcoForward, IcoReply } from '../../components/ContextMenu';
+import { ContextMenu, IcoCopy, IcoForward, IcoReply } from '../../components/ContextMenu';
 import { telegramService } from './TelegramService';
 import { Settings } from './Settings';
-import { Virtuoso } from 'react-virtuoso';
+import { Virtuoso, VirtuosoGrid } from 'react-virtuoso';
 import appIcon from '../../../build/icon.png';
 import { useAppearance } from '../appearance/AppearanceStore';
 import { updateTwitterProfileChat } from './TwitterFakeChatStore';
@@ -19,10 +18,12 @@ import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { QUICK_REACTIONS, TOPIC_ICON_COLORS, hashColor } from './TelegramDashboardConstants';
 import type { Chat, ChatFullInfo, ForumTopic, Message } from './TelegramDashboardTypes';
 import { getTimelineItems, getTopicColor, ListContainer } from './DashboardHelpers';
+import { compareTelegramMessages } from './TelegramMessageUtils';
 import { DashboardChatList } from './DashboardChatList';
 import { DashboardInfoPanel } from './DashboardInfoPanel';
 import { DashboardMassDownloadPanel } from './DashboardMassDownloadPanel';
 import { JoinChannelBar, MessageComposer, SelectionActionBar } from './DashboardComposer';
+import { TimelineMessageItem, formatMessageTime, getChatKind, isTelegramLink } from './DashboardTimelineItem';
 import {
   IconBack,
   IconBell,
@@ -63,8 +64,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
+  const selectedChatRef = useRef<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [visibleMediaIds, setVisibleMediaIds] = useState<Set<number>>(new Set());
+  const visibleMediaIdsRef = useRef<Set<number>>(new Set());
+  const visibleRangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
+  const visibleRangeRafRef = useRef<number | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -80,6 +85,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
   const messagesLoadSeqRef = useRef(0);
   const sharedMediaLoadSeqRef = useRef(0);
+  const topicsLoadSeqRef = useRef(0);
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -151,110 +157,88 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     onConfirm: () => void;
   } | null>(null);
 
-  const filteredChats = chats.filter(chat => {
-    const matchesSearch = chat.title.toLowerCase().includes(chatSearch.trim().toLowerCase());
-    if (activeFolder === 'unread') {
-      return matchesSearch && (chat.unreadCount ?? 0) > 0;
-    }
-    return matchesSearch;
-  });
-  const filteredTopics = forumTopics.filter(topic =>
-    topic.title.toLowerCase().includes(topicSearch.trim().toLowerCase())
+  const unreadChatsCount = useMemo(
+    () => chats.reduce((count, chat) => count + ((chat.unreadCount ?? 0) > 0 ? 1 : 0), 0),
+    [chats]
   );
+  const filteredChats = useMemo(() => {
+    const search = chatSearch.trim().toLowerCase();
+    return chats.filter(chat => {
+      const matchesSearch = !search || chat.title.toLowerCase().includes(search);
+      if (activeFolder === 'unread') {
+        return matchesSearch && (chat.unreadCount ?? 0) > 0;
+      }
+      return matchesSearch;
+    });
+  }, [activeFolder, chatSearch, chats]);
+  const filteredTopics = useMemo(() => {
+    const search = topicSearch.trim().toLowerCase();
+    if (!search) return forumTopics;
+    return forumTopics.filter(topic => topic.title.toLowerCase().includes(search));
+  }, [forumTopics, topicSearch]);
+  const messagesById = useMemo(() => {
+    const map = new Map<number, Message>();
+    messages.forEach(message => map.set(Number(message.id), message));
+    return map;
+  }, [messages]);
+  const selectedMessageIdsSet = useMemo(() => new Set(selectedMessageIds), [selectedMessageIds]);
   const timelineItems = useMemo(() => getTimelineItems(messages), [messages]);
   const timelineFirstItemIndex = useMemo(
     () => Math.max(0, 100000 - timelineItems.length),
     [timelineItems.length]
   );
   const updateVisibleMediaIds = useCallback((range: { startIndex: number; endIndex: number }) => {
-    const rawStart = Number(range.startIndex || 0);
-    const rawEnd = Number(range.endIndex || rawStart);
-    const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
-    const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
-    const ids = new Set<number>();
+    visibleRangeRef.current = range;
+    if (visibleRangeRafRef.current !== null) return;
 
-    for (let index = start; index <= end; index++) {
-      const item = timelineItems[index];
-      if (!item) continue;
-      if (item.type === 'album') {
-        item.messages?.forEach(message => {
-          if (message.hasMedia) ids.add(Number(message.id));
-        });
-      } else if (item.message.hasMedia) {
-        ids.add(Number(item.message.id));
+    visibleRangeRafRef.current = window.requestAnimationFrame(() => {
+      visibleRangeRafRef.current = null;
+      const latestRange = visibleRangeRef.current;
+      if (!latestRange) return;
+
+      const rawStart = Number(latestRange.startIndex || 0);
+      const rawEnd = Number(latestRange.endIndex || rawStart);
+      const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
+      const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
+      const ids = new Set<number>();
+
+      for (let index = start; index <= end; index++) {
+        const item = timelineItems[index];
+        if (!item) continue;
+        if (item.type === 'album') {
+          item.messages?.forEach(message => {
+            if (message.hasMedia) ids.add(Number(message.id));
+          });
+        } else if (item.message.hasMedia) {
+          ids.add(Number(item.message.id));
+        }
       }
-    }
 
-    telegramService.cancelQueuedThumbnails({
-      activeChatId: selectedChat?.id,
-      keepMessageIds: ids,
+      const previousIds = visibleMediaIdsRef.current;
+      const isSameSet = previousIds.size === ids.size && Array.from(ids).every(id => previousIds.has(id));
+      if (isSameSet) return;
+
+      visibleMediaIdsRef.current = ids;
+      telegramService.cancelQueuedThumbnails({
+        activeChatId: selectedChat?.id,
+        keepMessageIds: ids,
+      });
+      telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
+      setVisibleMediaIds(ids);
     });
-    telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
-    setVisibleMediaIds(ids);
   }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
-
-  const getChatKind = (chat: Chat) => {
-    if (chat.isFakeTwitter || (typeof chat.id === 'string' && chat.id.startsWith('twitter_profile_'))) return 'twitter';
-    if (chat.isGroup) return 'grupo';
-    if (chat.isChannel) return 'canal';
-    return 'conversa';
-  };
 
   const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
 
-  const getDownloadMeta = (msg: Message, senderName?: string | null) => ({
+  const getDownloadMeta = useCallback((msg: Message, senderName?: string | null) => ({
     chatTitle: selectedChat?.title,
     chatKind: selectedChat ? getChatKind(selectedChat) : undefined,
     topicTitle: viewingTopic && viewingTopic.id !== 0 ? viewingTopic.title : undefined,
     senderName: senderName || (msg.out ? 'Você' : msg.senderName || undefined),
     senderId: msg.senderId,
-  });
+  }), [selectedChat, viewingTopic]);
 
   const normalizePeerId = (value: unknown) => String(value ?? '').replace(/[^\d-]/g, '');
-
-  const formatMessageTime = (timestamp: number) => {
-    const d = new Date(timestamp * 1000);
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-    const isYesterday = d.toDateString() === yesterday.toDateString();
-    if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    if (isYesterday) return 'Ontem';
-    const daysAgo = (now.getTime() - d.getTime()) / 86400000;
-    if (daysAgo < 7) return d.toLocaleDateString([], { weekday: 'short' });
-    return d.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
-  };
-
-  const formatMessageDate = (timestamp: number) =>
-    new Date(timestamp * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
-
-  const isNewMessageDay = (current: Message, previous?: Message) => {
-    if (!previous) return true;
-    return new Date(current.date * 1000).toDateString() !== new Date(previous.date * 1000).toDateString();
-  };
-
-  const isContinued = (msg: Message, prev?: Message) => {
-    if (!prev) return false;
-    if (prev.out !== msg.out) return false;
-    if (!msg.out && prev.senderId !== msg.senderId) return false;
-    if (isNewMessageDay(msg, prev)) return false;
-    return msg.date - prev.date < 300;
-  };
-
-  const URL_REGEX = /(https?:\/\/[^\s<>\u0000-\u001F\u007F\u00A0\u2000-\u200D\u2028\u2029\uFEFF]+)/g;
-
-  const isTelegramLink = (url: string) => {
-    if (url.startsWith('tg://')) return true;
-    try {
-      const lower = url.toLowerCase();
-      if (lower.startsWith('tg:')) return true;
-      const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);
-      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-      return host === 't.me' || host === 'telegram.me' || host === 'telegram.dog' || parsed.protocol === 'tg:';
-    } catch {
-      return url.toLowerCase().includes('t.me/') || url.toLowerCase().includes('telegram.me/');
-    }
-  };
 
   const handleTelegramLinkRef = useRef<((url: string) => void) | null>(null);
 
@@ -309,29 +293,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
-  const linkifyText = (text: string) => {
-    const parts: (string | React.ReactElement)[] = [];
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    const regex = new RegExp(URL_REGEX.source, 'g');
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
-      const url = match[1];
-      const trailing = url.match(/[)\]}"',;.!?]+$/);
-      const cleanUrl = trailing ? url.slice(0, url.length - trailing[0].length) : url;
-      const displayUrl = cleanUrl.length > 60 ? cleanUrl.slice(0, 57) + '...' : cleanUrl;
-      const isTg = isTelegramLink(cleanUrl);
-      if (isTg) {
-        parts.push(<a key={match.index} href="#" onClick={e => { e.preventDefault(); handleTelegramLink(cleanUrl); }} className="message-link message-link-tg">{displayUrl}</a>);
-      } else {
-        parts.push(<a key={match.index} href={cleanUrl} target="_blank" rel="noopener noreferrer" className="message-link">{displayUrl}</a>);
-      }
-      lastIndex = match.index + cleanUrl.length;
-    }
-    if (lastIndex < text.length) parts.push(text.slice(lastIndex));
-    return parts;
-  };
-
   useEffect(() => {
     fetchDialogs();
     const unsubscribeProgress = telegramService.onDownloadProgress((data) => {
@@ -371,6 +332,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (visibleRangeRafRef.current !== null) {
+        window.cancelAnimationFrame(visibleRangeRafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (showDetailedProgress && progressDetailsListRef.current) {
       progressDetailsListRef.current.scrollTop = progressDetailsListRef.current.scrollHeight;
     }
@@ -385,6 +354,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null);
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
+    visibleMediaIdsRef.current = new Set();
+    visibleRangeRef.current = null;
+    setVisibleMediaIds(new Set());
 
     if (selectedChat) {
       shouldScrollToBottomRef.current = true;
@@ -416,10 +388,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setMessages([]);
         setHasMoreMessages(false);
         setOldestMessageId(null);
-        fetchForumTopics(selectedChat);
         fetchFullChat(selectedChat.id);
-        if (!selectedChat.hasTopics) loadMessages(selectedChat.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat.lastMessageDate });
-        else topicListScrollRef.current = 0;
+        if (selectedChat.hasTopics) {
+          fetchForumTopics(selectedChat);
+          topicListScrollRef.current = 0;
+        } else {
+          topicsLoadSeqRef.current += 1;
+          setLoadingTopics(false);
+          loadMessages(selectedChat.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat.lastMessageDate });
+        }
       }
     } else {
       setMessages([]);
@@ -458,11 +435,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [messages]);
 
   useEffect(() => {
-    const unsubscribe = telegramService.onNewMessage(({ chatId, topicId, message }: any) => {
+    selectedChatRef.current = selectedChat;
+  }, [selectedChat]);
+
+  useEffect(() => {
+    const unsubscribe = telegramService.onNewMessage(({ chatId, topicId, topicKind, message }: any) => {
       if (!selectedChat || String(chatId) !== String(selectedChat.id)) return;
 
       const activeTopicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+      const activeTopicKind = viewingTopic?.kind || 'forum';
       if (activeTopicId && Number(topicId || message.topicId || message.replyToMsgId || 0) !== Number(activeTopicId)) {
+        return;
+      }
+      if (activeTopicId && (topicKind || message.topicKind || 'forum') !== activeTopicKind) {
         return;
       }
 
@@ -470,7 +455,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         const byId = new Map<number, Message>();
         current.forEach(item => byId.set(Number(item.id), item));
         byId.set(Number(message.id), message);
-        return Array.from(byId.values()).sort((a, b) => Number(a.id) - Number(b.id));
+        return Array.from(byId.values()).sort(compareTelegramMessages);
       });
 
       setChats(current => current.map(chat => String(chat.id) === String(chatId)
@@ -509,6 +494,35 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       topicListRef.current.scrollTop = topicListScrollRef.current;
     }
   }, [viewingTopic, loadingTopics, selectedChat?.id]);
+
+  useEffect(() => {
+    if (!selectedChat || selectedChat.isFakeTwitter || selectedChat.isInvite) return;
+    let isMounted = true;
+    telegramService.getChatCapabilities(selectedChat.id).then((res: any) => {
+      if (!isMounted || !res?.success) return;
+      setSelectedChat(current => current && String(current.id) === String(selectedChat.id)
+        ? {
+            ...current,
+            isMember: res.isMember,
+            canSendMessages: res.canSendMessages,
+            canSendMedia: res.canSendMedia,
+          }
+        : current,
+      );
+      setChats(current => current.map(chat => String(chat.id) === String(selectedChat.id)
+        ? {
+          ...chat,
+          isMember: res.isMember,
+          canSendMessages: res.canSendMessages,
+          canSendMedia: res.canSendMedia,
+        }
+        : chat
+      ));
+    }).catch(debugWarn);
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedChat?.id]);
 
   useEffect(() => {
     if (!infoOpen || !selectedChat || selectedChat.isInvite) return;
@@ -565,8 +579,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const preloadAvatars = async (dialogs: Chat[]) => {
-    const BATCH_SIZE = 4;
-    const MAX_PRELOAD = 24;
+    const BATCH_SIZE = 3;
+    const MAX_PRELOAD = 12;
     const targets = dialogs.slice(0, MAX_PRELOAD).filter(d => d.id && typeof d.id === 'string' && !d.id.startsWith('invite_'));
     telegramService.cancelQueuedAvatarsExcept(targets.map(chat => chat.id));
     for (let i = 0; i < targets.length; i += BATCH_SIZE) {
@@ -606,16 +620,35 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const fetchForumTopics = async (chat: Chat) => {
-    if (!chat.hasTopics) return;
+    if (!chat.hasTopics) {
+      topicsLoadSeqRef.current += 1;
+      setForumTopics([]);
+      setLoadingTopics(false);
+      return;
+    }
+    const loadSeq = ++topicsLoadSeqRef.current;
     setLoadingTopics(true);
     try {
       const res = await telegramService.getForumTopics(chat.id);
-      if (res.success && res.topics) setForumTopics(res.topics);
-      else if (!res.success) setError(res.error || 'Failed to fetch topics');
+      if (loadSeq !== topicsLoadSeqRef.current || String(selectedChatRef.current?.id) !== String(chat.id)) return;
+      if (res.success && res.topics) {
+        const seen = new Set<number>();
+        setForumTopics(res.topics.filter((topic: ForumTopic) => {
+          if (topic.kind && topic.kind !== 'forum') return false;
+          if (!Number.isFinite(Number(topic.id)) || Number(topic.id) <= 0) return false;
+          if (seen.has(Number(topic.id))) return false;
+          seen.add(Number(topic.id));
+          return true;
+        }));
+      } else if (!res.success) setError(res.error || 'Failed to fetch topics');
     } catch (e: any) {
-      setError(e.message || 'Unknown error');
+      if (loadSeq === topicsLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chat.id)) {
+        setError(e.message || 'Unknown error');
+      }
     } finally {
-      setLoadingTopics(false);
+      if (loadSeq === topicsLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chat.id)) {
+        setLoadingTopics(false);
+      }
     }
   };
 
@@ -634,7 +667,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic(topic);
     setSelectedTopicId(String(topic.id));
-    loadMessages(selectedChat!.id, 0, topic.id, { refresh: true });
+    loadMessages(selectedChat!.id, 0, topic.id, { refresh: true, topicKind: topic.kind });
 
     if (topic.unreadCount > 0) {
       telegramService.readHistory(selectedChat!.id).catch(debugWarn);
@@ -659,15 +692,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     loadMessages(selectedChat!.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat?.lastMessageDate });
   };
 
-  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null } = {}) => {
+  const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null; topicKind?: string } = {}) => {
     const loadSeq = ++messagesLoadSeqRef.current;
     if (!options.silent) setLoadingMessages(true);
     try {
       if (options.refresh && !offsetId) {
-        const cached = await telegramService.getCachedMessages({ chatId, limit: PAGE_SIZE, topicId });
+        const cached = await telegramService.getCachedMessages({ chatId, limit: PAGE_SIZE, topicId, topicKind: options.topicKind });
         if (loadSeq !== messagesLoadSeqRef.current) return;
         if (cached.success && cached.messages?.length) {
           setMessages(cached.messages);
+          preloadInitialThumbnails(chatId, cached.messages);
           setHasMoreMessages(Boolean(cached.hasMore));
           setOldestMessageId(cached.oldestMessageId ?? null);
           setLoadingMessages(false);
@@ -677,10 +711,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         }
       }
 
-      const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId, refresh: options.refresh });
+      const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId, topicKind: options.topicKind, refresh: options.refresh });
       if (loadSeq !== messagesLoadSeqRef.current) return;
       if (res.success && res.messages) {
         setMessages(res.messages);
+        preloadInitialThumbnails(chatId, res.messages);
         setHasMoreMessages(Boolean(res.hasMore));
         setOldestMessageId(res.oldestMessageId ?? null);
       }
@@ -696,7 +731,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (timelineRef.current) preserveScrollPositionRef.current = timelineRef.current.scrollHeight;
     try {
       const res = await telegramService.getMessages({
-        chatId: selectedChat.id, limit: PAGE_SIZE, offsetId: oldestMessageId, topicId: viewingTopic?.id
+        chatId: selectedChat.id, limit: PAGE_SIZE, offsetId: oldestMessageId, topicId: viewingTopic?.id, topicKind: viewingTopic?.kind
       });
       if (res.success && res.messages?.length) {
         setMessages(current => [...res.messages!, ...current]);
@@ -706,6 +741,24 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     } catch (e) { debugWarn(e); }
     finally { setLoadingMoreMessages(false); }
   };
+
+  const virtuosoComponents = useMemo(() => ({
+    List: ListContainer,
+    Header: () => {
+      if (!hasMoreMessages) return null;
+      return (
+        <div className="messages-load-more" style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
+          {loadingMoreMessages ? (
+            <div className="loader-surface compact" role="status" aria-label="Carregando mensagens anteriores">
+              <span className="modern-loader small" />
+            </div>
+          ) : (
+            <div style={{ height: '24px' }} />
+          )}
+        </div>
+      );
+    }
+  }), [hasMoreMessages, loadingMoreMessages]);
 
   const handleSelectFolder = async () => {
     const res = await telegramService.selectFolder();
@@ -726,8 +779,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     try {
       const res = await telegramService.startDownload({
         chatId: selectedChat.id, folderPath,
-        topic: selectedTopic ? { id: selectedTopic.id, title: selectedTopic.title, topMessageId: selectedTopic.topMessageId } : null,
-        splitByUser: !selectedChat.hasTopics ? splitByUser : false,
+        topic: selectedTopic ? { id: selectedTopic.id, kind: selectedTopic.kind, title: selectedTopic.title, topMessageId: selectedTopic.topMessageId } : null,
+        splitByUser,
         splitByAlbum,
         albumSplitMode,
         chatMeta: {
@@ -822,15 +875,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setError(res.error || 'Não foi possível atualizar mensagens do Twitter/X.');
         return;
       }
+      const addedCount = res.addedCount ?? 0;
 
       await fetchDialogs();
       await loadMessages(selectedChat.id, 0, undefined, { silent: true });
       telegramService.invalidateSharedMedia(selectedChat.id);
       if (infoOpen) fetchSharedMedia(selectedChat.id);
       setConfirmModal({
-        title: res.addedCount > 0 ? 'Mensagens atualizadas' : 'Nada novo por aqui',
-        body: res.addedCount > 0
-          ? `${res.addedCount} ${res.addedCount === 1 ? 'nova mídia foi adicionada' : 'novas mídias foram adicionadas'} ao chat.`
+        title: addedCount > 0 ? 'Mensagens atualizadas' : 'Nada novo por aqui',
+        body: addedCount > 0
+          ? `${addedCount} ${addedCount === 1 ? 'nova mídia foi adicionada' : 'novas mídias foram adicionadas'} ao chat.`
           : 'Nenhuma mídia nova foi encontrada nesse perfil.',
         onConfirm: () => setConfirmModal(null),
       });
@@ -848,13 +902,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const handleSelectFile = async () => {
+    if (selectedChat?.canSendMedia === false) return;
     const res = await telegramService.selectFile();
     if (res.success && res.filePath) setSelectedFile({ filePath: res.filePath, fileName: res.fileName! });
   };
 
   const handleSend = async () => {
     if (!selectedChat || (!inputText.trim() && !selectedFile) || isSending) return;
+    const canSendMessages = selectedChat.canSendMessages !== false;
+    const canSendMedia = selectedChat.canSendMedia !== false;
+    if (inputText.trim() && !canSendMessages) return;
+    if (selectedFile && !canSendMedia) return;
     const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+    const topicKind = viewingTopic?.kind;
     const replyToId = replyTo?.id;
     const textToSend = inputText.trim();
     const fileToSend = selectedFile;
@@ -876,7 +936,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             filePath: fileToSend.filePath,
             caption: textToSend || undefined,
             replyToId,
-            topicId
+            topicId,
+            topicKind,
           });
         } finally { unsub(); }
       } else {
@@ -884,14 +945,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           chatId: selectedChat.id,
           text: textToSend,
           replyToId,
-          topicId
+          topicId,
+          topicKind,
         });
       }
 
       if (res.success) {
         shouldScrollToBottomRef.current = true;
         // Refresh messages silently in background
-        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true });
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
       } else {
         setError(res.error || 'Falha ao enviar');
         // Restore input text on error so user doesn't lose it
@@ -931,6 +993,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleForwardMessage = async (msg: Message) => {
     if (!selectedChat || isSending) return;
     const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+    const topicKind = viewingTopic?.kind;
 
     setIsSending(true);
     try {
@@ -938,11 +1001,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         chatId: selectedChat.id,
         messageId: msg.id,
         topicId,
+        topicKind,
       });
 
       if (res.success) {
         shouldScrollToBottomRef.current = true;
-        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true });
+        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
       } else {
         setError(res.error || 'Falha ao encaminhar mensagem.');
       }
@@ -1087,7 +1151,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               chatId: selectedChat!.id,
               limit: PAGE_SIZE,
               offsetId: currentOldestId,
-              topicId: viewingTopic?.id
+              topicId: viewingTopic?.id,
+              topicKind: viewingTopic?.kind,
             });
             
             if (res.success && res.messages?.length) {
@@ -1128,7 +1193,116 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
-  const showComposer = !selectedChat?.hasTopics || (viewingTopic && viewingTopic.id !== 0);
+  const handleForwardMessageRef = useRef(handleForwardMessage);
+  const handleReactRef = useRef(handleReact);
+  const handleJumpToMessageRef = useRef(handleJumpToMessage);
+  const handleBulkDownloadRef = useRef(handleBulkDownload);
+  const handleSelectFolderRef = useRef(handleSelectFolder);
+  const handleStartDownloadRef = useRef(handleStartDownload);
+  const handleStopDownloadRef = useRef(handleStopDownload);
+  const handleSelectFileRef = useRef(handleSelectFile);
+  const handleSendRef = useRef(handleSend);
+  const handleJoinSelectedChatRef = useRef(handleJoinSelectedChat);
+
+  useEffect(() => { handleForwardMessageRef.current = handleForwardMessage; });
+  useEffect(() => { handleReactRef.current = handleReact; });
+  useEffect(() => { handleJumpToMessageRef.current = handleJumpToMessage; });
+  useEffect(() => { handleBulkDownloadRef.current = handleBulkDownload; });
+  useEffect(() => { handleSelectFolderRef.current = handleSelectFolder; });
+  useEffect(() => { handleStartDownloadRef.current = handleStartDownload; });
+  useEffect(() => { handleStopDownloadRef.current = handleStopDownload; });
+  useEffect(() => { handleSelectFileRef.current = handleSelectFile; });
+  useEffect(() => { handleSendRef.current = handleSend; });
+  useEffect(() => { handleJoinSelectedChatRef.current = handleJoinSelectedChat; });
+
+  const timelineChatKind = useMemo(
+    () => selectedChat ? getChatKind(selectedChat) : undefined,
+    [selectedChat]
+  );
+  const timelineTopicTitle = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.title : undefined;
+  const handleTelegramLinkClick = useCallback((url: string) => {
+    handleTelegramLinkRef.current?.(url);
+  }, []);
+  const handleClearEmojiPicker = useCallback(() => setEmojiPickerMsgId(null), []);
+  const handleOpenMessageContextMenu = useCallback((x: number, y: number, message: Message) => {
+    setMsgContextMenu({ x, y, message });
+  }, []);
+  const handleOpenUserContextMenu = useCallback((x: number, y: number, senderId: string, senderName: string) => {
+    setUserContextMenu({ x, y, senderId, senderName });
+  }, []);
+  const handleOpenImageContextMenu = useCallback((x: number, y: number, msg: Message) => {
+    setImgContextMenu({ x, y, msg });
+  }, []);
+  const handleToggleSelectedMessage = useCallback((messageId: number) => {
+    setSelectedMessageIds(prevIds =>
+      prevIds.includes(messageId)
+        ? prevIds.filter(id => id !== messageId)
+        : [...prevIds, messageId]
+    );
+  }, []);
+  const handleShowEmojiPicker = useCallback((messageId: number, rect: DOMRect) => {
+    const pickerHeight = 300;
+    const y = (rect.bottom + pickerHeight > window.innerHeight)
+      ? rect.top - pickerHeight - 8
+      : rect.bottom + 8;
+    setEmojiPickerPos({ x: rect.left, y });
+    setEmojiPickerMsgId(prev => prev === messageId ? null : messageId);
+  }, []);
+  const handleReactStable = useCallback((message: Message, emoji: string) => {
+    handleReactRef.current(message, emoji);
+  }, []);
+  const handleForwardMessageStable = useCallback((message: Message) => {
+    handleForwardMessageRef.current(message);
+  }, []);
+  const handleJumpToMessageStable = useCallback((messageId: number) => {
+    handleJumpToMessageRef.current(messageId);
+  }, []);
+  const handleBulkDownloadStable = useCallback((messageIds: number[]) => {
+    handleBulkDownloadRef.current(messageIds);
+  }, []);
+  const handleSelectFolderStable = useCallback(() => {
+    handleSelectFolderRef.current();
+  }, []);
+  const handleStartDownloadStable = useCallback(() => {
+    handleStartDownloadRef.current();
+  }, []);
+  const handleStopDownloadStable = useCallback(() => {
+    handleStopDownloadRef.current();
+  }, []);
+  const handleSelectFileStable = useCallback(() => {
+    handleSelectFileRef.current();
+  }, []);
+  const handleSendStable = useCallback(() => {
+    handleSendRef.current();
+  }, []);
+  const handleJoinSelectedChatStable = useCallback(() => {
+    handleJoinSelectedChatRef.current();
+  }, []);
+  const readChatHistory = useCallback((chatId: string) => telegramService.readHistory(chatId), []);
+
+  const preloadInitialThumbnails = useCallback((chatId: string, nextMessages: Message[]) => {
+    const estimatedItemHeight = density === 'compact' ? 120 : density === 'roomy' ? 180 : 150;
+    const viewportItems = Math.ceil(window.innerHeight / estimatedItemHeight);
+    const limit = Math.max(12, Math.min(36, viewportItems * 3));
+    telegramService.preloadMessageThumbnails({ chatId, messages: nextMessages, limit });
+  }, [density]);
+
+  const hasTopicView = Boolean(selectedChat?.hasTopics);
+  const canSendMessages = selectedChat?.canSendMessages !== false;
+  const canSendMedia = selectedChat?.canSendMedia !== false;
+  const canWriteSelectedChat = canSendMessages || canSendMedia;
+  const showComposer = (!hasTopicView || (viewingTopic && viewingTopic.id !== 0)) && canWriteSelectedChat;
+
+  useEffect(() => {
+    if (!selectedChat) return;
+    if (!canSendMessages) {
+      setInputText('');
+      setReplyTo(null);
+    }
+    if (!canSendMedia) {
+      setSelectedFile(null);
+    }
+  }, [selectedChat?.id, canSendMessages, canSendMedia]);
 
   if (loading) return (
     <div className="full-screen-loader fade-in">
@@ -1153,10 +1327,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           loading={loading}
           selectedChat={selectedChat}
           skipLogin={skipLogin}
+          unreadChatsCount={unreadChatsCount}
           formatMessageTime={formatMessageTime}
           getChatKind={getChatKind}
           onTelegramLoginRequest={onTelegramLoginRequest}
-          readChatHistory={telegramService.readHistory.bind(telegramService)}
+          readChatHistory={readChatHistory}
           setActiveFolder={setActiveFolder}
           setChatContextMenu={setChatContextMenu}
           setChatSearch={setChatSearch}
@@ -1171,11 +1346,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         {/* ── Convo ────────────────────────────────────────────────── */}
         <div 
           className={`convo ${isDraggingOver ? 'dragging-over' : ''} ${isSelectionMode ? 'is-selection-mode' : ''}`}
-          onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (selectedChat?.canSendMedia === false) return;
+            setIsDraggingOver(true);
+          }}
           onDragLeave={(e) => { e.preventDefault(); setIsDraggingOver(false); }}
           onDrop={(e) => {
             e.preventDefault();
             setIsDraggingOver(false);
+            if (selectedChat?.canSendMedia === false) return;
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
               const file = e.dataTransfer.files[0] as File & { path?: string };
               const realPath = telegramService.getPathForFile ? telegramService.getPathForFile(file) : file.path;
@@ -1205,7 +1385,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   >
                     <IconBack />
                   </button>
-                  {selectedChat.hasTopics && viewingTopic && (
+                  {hasTopicView && viewingTopic && (
                     <button className="icon-btn" onClick={handleBackToTopics} title="Voltar para tópicos">
                       <IconBack />
                     </button>
@@ -1308,7 +1488,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     filteredTopics={filteredTopics}
                     folderPath={folderPath}
                     forumTopics={forumTopics}
-                    hasTopics={Boolean(selectedChat.hasTopics)}
+                    hasTopics={hasTopicView}
                     isTopicDropdownOpen={isTopicDropdownOpen}
                     loadingTopics={loadingTopics}
                     progress={progress}
@@ -1319,9 +1499,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     splitByUser={splitByUser}
                     stopping={stopping}
                     topicSearch={topicSearch}
-                    handleSelectFolder={handleSelectFolder}
-                    handleStartDownload={handleStartDownload}
-                    handleStopDownload={handleStopDownload}
+                    handleSelectFolder={handleSelectFolderStable}
+                    handleStartDownload={handleStartDownloadStable}
+                    handleStopDownload={handleStopDownloadStable}
                     setAlbumSplitMode={setAlbumSplitMode}
                     setIsDownloadModalOpen={setIsDownloadModalOpen}
                     setIsTopicDropdownOpen={setIsTopicDropdownOpen}
@@ -1367,7 +1547,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               </div>
 
               {/* Content */}
-              {selectedChat.hasTopics && !viewingTopic ? (
+              {hasTopicView && !viewingTopic ? (
                 /* Topic list */
                 <div className="topic-list-panel" ref={topicListRef} onClick={() => isMenuOpen && setIsMenuOpen(false)}>
                   {loadingTopics ? (
@@ -1436,292 +1616,45 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       firstItemIndex={timelineFirstItemIndex}
                       rangeChanged={updateVisibleMediaIds}
                       startReached={loadOlderMessages}
-                      components={{
-                        List: ListContainer,
-                        Header: () => {
-                          if (!hasMoreMessages) return null;
-                          return (
-                            <div className="messages-load-more" style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
-                              {loadingMoreMessages ? (
-                                <div className="loader-surface compact" role="status" aria-label="Carregando mensagens anteriores">
-                                  <span className="modern-loader small" />
-                                </div>
-                              ) : (
-                                <div style={{ height: '24px' }} />
-                              )}
-                            </div>
-                          );
-                        }
-                      }}
+                      components={virtuosoComponents}
                       itemContent={(index, item) => {
                         const dataIndex = index - timelineFirstItemIndex;
                         const prevItem = timelineItems[dataIndex - 1];
-                        const prev = prevItem?.message;
-                        const msg = item.message;
-                        const continued = isContinued(msg, prev);
-                        const dayBreak = isNewMessageDay(msg, prev);
-                        const color = msg.out ? 'cyan' : hashColor(msg.senderId || msg.id.toString());
-                        const displayName = msg.out ? 'Você' : (msg.senderName || (msg.senderId ? `ID ${msg.senderId.slice(-6)}` : 'Desconhecido'));
+                        const mediaIds = item.type === 'album'
+                          ? (item.messages || []).filter(message => message.hasMedia).map(message => Number(message.id))
+                          : item.message.hasMedia ? [Number(item.message.id)] : [];
+                        const selectedMediaIdsKey = mediaIds.filter(id => selectedMessageIdsSet.has(id)).join('|');
+                        const visibleMediaIdsKey = mediaIds.filter(id => visibleMediaIds.has(id)).join('|');
 
-                        return (
-                          <div key={item.id} style={{ paddingBottom: 'var(--msg-gap)' }}>
-                            {dayBreak && (
-                              <div className="day-divider">
-                                <div className="line" />
-                                <div className="label">{formatMessageDate(msg.date)}</div>
-                                <div className="line" />
-                              </div>
-                            )}
-                            <div
-                              id={`msg-${msg.id}`}
-                              data-msg-id={msg.id}
-                              className={`msg-row ${msg.out ? 'self' : ''} ${continued ? 'continued' : ''}${msg.isDeleted ? ' msg-deleted' : ''}`}
-                              onClick={() => setEmojiPickerMsgId(null)}
-                              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMsgContextMenu({ x: e.clientX, y: e.clientY, message: msg }); }}
-                            >
-                              {!msg.out && (
-                                <div
-                                  className={`msg-avatar color-${color}`}
-                                  style={continued ? { visibility: 'hidden' } : undefined}
-                                  onContextMenu={(e) => {
-                                    if (msg.senderId) {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      setUserContextMenu({
-                                        x: e.clientX,
-                                        y: e.clientY,
-                                        senderId: msg.senderId,
-                                        senderName: displayName
-                                      });
-                                    }
-                                  }}
-                                >
-                                  <ChatAvatar chatId={msg.senderId || ''} title={displayName} />
-                                </div>
-                              )}
-                              <div className="msg-body">
-                                {!continued && (
-                                  <div className="msg-head">
-                                    <span
-                                      className={`msg-from color-${color}`}
-                                      onContextMenu={(e) => {
-                                        if (msg.senderId) {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          setUserContextMenu({
-                                            x: e.clientX,
-                                            y: e.clientY,
-                                            senderId: msg.senderId,
-                                            senderName: displayName
-                                          });
-                                        }
-                                      }}
-                                    >
-                                      {displayName}
-                                    </span>
-                                    <span className="msg-time">
-                                      {formatMessageTime(msg.date)}
-                                      {msg.is_edited && <span className="msg-edited-badge">(editado)</span>}
-                                    </span>
-                                  </div>
-                                )}
-                                {continued && (
-                                  <div className="msg-time-inline">
-                                    {formatMessageTime(msg.date)}
-                                    {msg.is_edited && <span className="msg-edited-badge">(editado)</span>}
-                                  </div>
-                                )}
-                                <div className={`msg-bubble ${!msg.text && (msg.hasMedia || item.type === 'album') ? 'media-only' : ''} ${highlightedMsgId === msg.id ? 'highlight-flash' : ''}`}>
-                                  {msg.replyToMsgId && (() => {
-                                    const repliedMsg = messages.find(m => Number(m.id) === Number(msg.replyToMsgId));
-                                    const sender = repliedMsg
-                                      ? (repliedMsg.out ? 'Você' : (repliedMsg.senderName || 'Desconhecido'))
-                                      : `Mensagem #${msg.replyToMsgId}`;
-                                    const text = repliedMsg
-                                      ? (repliedMsg.text ? repliedMsg.text.slice(0, 60) : (repliedMsg.hasMedia ? '📷 Mídia' : ''))
-                                      : 'Clique para saltar para a mensagem';
-
-                                    return (
-                                      <div
-                                        className="msg-reply-preview"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleJumpToMessage(msg.replyToMsgId!);
-                                        }}
-                                      >
-                                        <div className="reply-preview-bar" />
-                                        <div className="reply-preview-content">
-                                          <span className="reply-preview-sender">{sender}</span>
-                                          <span className="reply-preview-text">{text}</span>
-                                        </div>
-                                      </div>
-                                    );
-                                  })()}
-                                  {item.type === 'album' ? (
-                                    <div className={`album-grid album-grid-${Math.min(9, item.messages!.length)}`}>
-                                      {item.messages!.map(albumMsg => (
-                                        <div
-                                          key={albumMsg.id}
-                                          className={`album-grid-item msg-media ${selectedMessageIds.includes(albumMsg.id) ? 'media-selected' : ''}`}
-                                          onContextMenu={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            setImgContextMenu({ x: e.clientX, y: e.clientY, msg: albumMsg });
-                                          }}
-                                        >
-                                          <MessageMedia
-                                            chatId={selectedChat.id}
-                                            messageId={albumMsg.id}
-                                            isVideo={albumMsg.isVideo}
-                                            videoDuration={albumMsg.videoDuration}
-                                            messageDate={albumMsg.date}
-                                            mediaSize={albumMsg.mediaSize}
-                                            thumbnailUrl={albumMsg.thumbnailUrl}
-                                            mediaPriority={visibleMediaIds.has(albumMsg.id) ? 'visible' : 'background'}
-                                            palette={palette}
-                                            density={density}
-                                            downloadMeta={getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName)}
-                                            selectionMode={isSelectionMode}
-                                            onClickOverride={isSelectionMode ? () => {
-                                              setSelectedMessageIds(prevIds =>
-                                                prevIds.includes(albumMsg.id)
-                                                  ? prevIds.filter(id => id !== albumMsg.id)
-                                                  : [...prevIds, albumMsg.id]
-                                              );
-                                            } : undefined}
-                                            albumMedias={item.messages!.map(m => ({ id: m.id, isVideo: m.isVideo, videoDuration: m.videoDuration, messageDate: m.date, mediaSize: m.mediaSize }))}
-                                          />
-                                        </div>
-                                      ))}
-                                    </div>
-                                  ) : (
-                                    msg.hasMedia && (
-                                      <div
-                                        className={`msg-media ${selectedMessageIds.includes(msg.id) ? 'media-selected' : ''}`}
-                                        onContextMenu={(e) => {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          setImgContextMenu({ x: e.clientX, y: e.clientY, msg });
-                                        }}
-                                      >
-                                        <MessageMedia
-                                          chatId={selectedChat.id}
-                                          messageId={msg.id}
-                                          isVideo={msg.isVideo}
-                                          videoDuration={msg.videoDuration}
-                                          messageDate={msg.date}
-                                          mediaSize={msg.mediaSize}
-                                          thumbnailUrl={msg.thumbnailUrl}
-                                          mediaPriority={visibleMediaIds.has(msg.id) ? 'visible' : 'background'}
-                                          palette={palette}
-                                          density={density}
-                                          downloadMeta={getDownloadMeta(msg, displayName)}
-                                          selectionMode={isSelectionMode}
-                                          onClickOverride={isSelectionMode ? () => {
-                                            setSelectedMessageIds(prevIds =>
-                                              prevIds.includes(msg.id)
-                                                ? prevIds.filter(id => id !== msg.id)
-                                                : [...prevIds, msg.id]
-                                            );
-                                          } : undefined}
-                                        />
-                                      </div>
-                                    )
-                                  )}
-                                  {msg.text && <div className="msg-text">{linkifyText(msg.text)}</div>}
-                                  {msg.isDeleted && (
-                                    <div className="msg-deleted-badge">🗑️ Mensagem excluída no servidor</div>
-                                  )}
-                                </div>
-                                {msg.reactions && msg.reactions.length > 0 && (
-                                  <div className="reactions">
-                                    {msg.reactions.map((r, i) => (
-                                      <button key={i} className={`reaction ${r.mine ? 'mine' : ''}`} onClick={() => handleReact(msg, r.emoji)}>
-                                        <span>{r.emoji}</span>
-                                        <span>{r.count}</span>
-                                      </button>
-                                    ))}
-                                    <button
-                                      className="reaction-add"
-                                      title="Reagir"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                                        const pickerHeight = 300;
-                                        const y = (rect.bottom + pickerHeight > window.innerHeight) 
-                                          ? rect.top - pickerHeight - 8 
-                                          : rect.bottom + 8;
-                                        setEmojiPickerPos({ x: rect.left, y });
-                                        setEmojiPickerMsgId(prev => prev === msg.id ? null : msg.id);
-                                      }}
-                                    >+</button>
-                                  </div>
-                                )}
-                              </div>
-                              <div className="msg-actions">
-                                <button
-                                  type="button" className="icon-btn" title="Reagir"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                                    const pickerHeight = 300; // Approximate height of 21 emojis in 3 cols
-                                    const y = (rect.bottom + pickerHeight > window.innerHeight) 
-                                      ? rect.top - pickerHeight - 8 
-                                      : rect.bottom + 8;
-                                    setEmojiPickerPos({ x: rect.left, y });
-                                    setEmojiPickerMsgId(prev => prev === msg.id ? null : msg.id);
-                                  }}
-                                >😊</button>
-                                <button
-                                  type="button" className="icon-btn" title="Responder"
-                                  onClick={(e) => { e.stopPropagation(); setReplyTo(msg); }}
-                                >↩</button>
-                                <button
-                                  type="button" className="icon-btn" title="Encaminhar"
-                                  onClick={(e) => { e.stopPropagation(); handleForwardMessage(msg); }}
-                                >→</button>
-                                {item.type === 'album' ? (
-                                  <button
-                                    type="button" className="icon-btn" title="Salvar todas as mídias"
-                                    onClick={async (e) => {
-                                      e.stopPropagation();
-                                      if (item.messages) {
-                                        for (const albumMsg of item.messages) {
-                                          try {
-                                            await telegramService.saveMessageMediaFile({
-                                              chatId: selectedChat.id,
-                                              messageId: albumMsg.id,
-                                              downloadMeta: getDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName),
-                                            });
-                                          } catch (err) {
-                                            debugWarn(err);
-                                          }
-                                        }
-                                      }
-                                    }}
-                                  >⤓</button>
-                                ) : msg.hasMedia ? (
-                                  <button
-                                    type="button" className="icon-btn" title="Salvar"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      telegramService.saveMessageMediaFile({
-                                        chatId: selectedChat.id,
-                                        messageId: msg.id,
-                                        downloadMeta: getDownloadMeta(msg, displayName),
-                                      });
-                                    }}
-                                  >⤓</button>
-                                ) : msg.text ? (
-                                  <button
-                                    type="button" className="icon-btn" title="Copiar texto"
-                                    onClick={(e) => { e.stopPropagation(); writeClipboardText(msg.text); }}
-                                  >⎘</button>
-                                ) : null}
-                              </div>
-                            </div>
-                          </div>
-                        );
+                        return selectedChat ? (
+                          <TimelineMessageItem
+                            key={item.id}
+                            item={item}
+                            previousMessage={prevItem?.message}
+                            chatId={selectedChat.id}
+                            palette={palette}
+                            density={density}
+                            isSelectionMode={isSelectionMode}
+                            isHighlighted={highlightedMsgId === item.message.id}
+                            selectedMediaIdsKey={selectedMediaIdsKey}
+                            visibleMediaIdsKey={visibleMediaIdsKey}
+                            repliedMessage={item.message.replyToMsgId ? messagesById.get(Number(item.message.replyToMsgId)) : undefined}
+                            chatTitle={selectedChat.title}
+                            chatKind={timelineChatKind}
+                            topicTitle={timelineTopicTitle}
+                            onTelegramLink={handleTelegramLinkClick}
+                            onClearEmojiPicker={handleClearEmojiPicker}
+                            onMessageContextMenu={handleOpenMessageContextMenu}
+                            onUserContextMenu={handleOpenUserContextMenu}
+                            onImageContextMenu={handleOpenImageContextMenu}
+                            onToggleSelectedMessage={handleToggleSelectedMessage}
+                            onShowEmojiPicker={handleShowEmojiPicker}
+                            onReact={handleReactStable}
+                            onReplyTo={setReplyTo}
+                            onForwardMessage={handleForwardMessageStable}
+                            onJumpToMessage={handleJumpToMessageStable}
+                          />
+                        ) : null;
                       }}
                     />
                   )}
@@ -1731,33 +1664,38 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               {isSelectionMode ? (
                 <SelectionActionBar
                   selectedMessageIds={selectedMessageIds}
-                  handleBulkDownload={handleBulkDownload}
+                  handleBulkDownload={handleBulkDownloadStable}
                   setIsSelectionMode={setIsSelectionMode}
                   setSelectedMessageIds={setSelectedMessageIds}
                 />
+              ) : selectedChat.isMember === false ? (
+                <JoinChannelBar
+                  fullChatInfo={fullChatInfo}
+                  selectedChat={selectedChat}
+                  onJoin={handleJoinSelectedChatStable}
+                />
+              ) : showComposer ? (
+                <MessageComposer
+                  inputText={inputText}
+                  isSending={isSending}
+                  replyTo={replyTo}
+                  selectedFile={selectedFile}
+                  sendProgress={sendProgress}
+                  canSendMessages={canSendMessages}
+                  canSendMedia={canSendMedia}
+                  handleSelectFile={handleSelectFileStable}
+                  handleSend={handleSendStable}
+                  setInputText={setInputText}
+                  setReplyTo={setReplyTo}
+                  setSelectedFile={setSelectedFile}
+                />
               ) : (
-                showComposer && (
-                  selectedChat.isMember !== false ? (
-                    <MessageComposer
-                      inputText={inputText}
-                      isSending={isSending}
-                      replyTo={replyTo}
-                      selectedFile={selectedFile}
-                      sendProgress={sendProgress}
-                      handleSelectFile={handleSelectFile}
-                      handleSend={handleSend}
-                      setInputText={setInputText}
-                      setReplyTo={setReplyTo}
-                      setSelectedFile={setSelectedFile}
-                    />
-                  ) : (
-                    <JoinChannelBar
-                      fullChatInfo={fullChatInfo}
-                      selectedChat={selectedChat}
-                      onJoin={handleJoinSelectedChat}
-                    />
-                  )
-                )
+                <div className="join-channel-bar">
+                  <div className="join-channel-info">
+                    <h3>Somente leitura</h3>
+                    <span>Você não tem permissão para enviar mensagens ou mídias neste chat.</span>
+                  </div>
+                </div>
               )}
             </>
           ) : (
@@ -2052,9 +1990,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               ) : searchMediaResults.length === 0 ? (
                 null
               ) : (
-                <div className="search-media-grid">
-                  {searchMediaResults.map(item => (
-                    <div key={item.id} className="search-media-grid-item">
+                <VirtuosoGrid
+                  className="search-media-virtual-grid"
+                  data={searchMediaResults}
+                  computeItemKey={(_, item) => item.id}
+                  components={{
+                    List: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>((props, ref) => (
+                      <div {...props} ref={ref} className="search-media-grid" />
+                    )),
+                    Item: ({ children, ...props }) => (
+                      <div {...props} className="search-media-grid-item">
+                        {children}
+                      </div>
+                    ),
+                  }}
+                  itemContent={(_, item) => (
                       <MessageMedia
                         chatId={selectedChat.id}
                         messageId={item.id}
@@ -2065,9 +2015,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         density={density}
                         downloadMeta={getDownloadMeta(item as Message)}
                       />
-                    </div>
-                  ))}
-                </div>
+                  )}
+                />
               )}
             </div>
           </div>

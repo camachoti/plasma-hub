@@ -20,7 +20,7 @@ interface DashboardInfoPanelProps {
   setInfoOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
-export const DashboardInfoPanel: React.FC<DashboardInfoPanelProps> = ({
+const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
   density,
   forumTopics,
   fullChatInfo,
@@ -128,3 +128,5 @@ export const DashboardInfoPanel: React.FC<DashboardInfoPanelProps> = ({
     )}
   </div>
 );
+
+export const DashboardInfoPanel = React.memo(DashboardInfoPanelComponent);

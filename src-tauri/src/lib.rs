@@ -43,6 +43,7 @@ pub fn run() {
             telegram_service::tdlib_get_me,
             telegram_service::tdlib_get_chats,
             telegram_service::tdlib_get_messages,
+            telegram_service::tdlib_get_chat_capabilities,
             telegram_service::tdlib_get_shared_media,
             telegram_service::tdlib_search_user_media,
             telegram_service::tdlib_send_message,

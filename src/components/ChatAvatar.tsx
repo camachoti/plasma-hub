@@ -7,19 +7,46 @@ interface Props {
   title: string;
 }
 
-export const ChatAvatar: React.FC<Props> = ({ chatId, title }) => {
+const avatarMemoryCache = new Map<string, string>();
+const avatarPendingRequests = new Map<string, Promise<string | null>>();
+
+const loadAvatar = async (chatId: string) => {
+  const cached = avatarMemoryCache.get(chatId);
+  if (cached) return cached;
+
+  const pending = avatarPendingRequests.get(chatId);
+  if (pending) return pending;
+
+  const request = telegramService.getAvatar(chatId)
+    .then(res => {
+      if (res?.success && res.dataUrl) {
+        avatarMemoryCache.set(chatId, res.dataUrl);
+        return res.dataUrl;
+      }
+      return null;
+    })
+    .finally(() => avatarPendingRequests.delete(chatId));
+  avatarPendingRequests.set(chatId, request);
+  return request;
+};
+
+const ChatAvatarComponent: React.FC<Props> = ({ chatId, title }) => {
   const [imgData, setImgData] = useState<string | null>(null);
   
   useEffect(() => {
-    setImgData(null);
+    let isMounted = true;
+    const cached = avatarMemoryCache.get(chatId);
+    setImgData(cached || null);
+
     const fetchAvatar = async () => {
       if (!chatId || typeof chatId !== 'string' || chatId.startsWith('invite_')) return;
-      const res = await telegramService.getAvatar(chatId);
-      if (res && res.success && res.dataUrl) {
-        setImgData(res.dataUrl);
-      }
+      const dataUrl = await loadAvatar(chatId);
+      if (isMounted && dataUrl) setImgData(dataUrl);
     };
     fetchAvatar();
+    return () => {
+      isMounted = false;
+    };
   }, [chatId]);
 
   if (imgData) {
@@ -32,3 +59,5 @@ export const ChatAvatar: React.FC<Props> = ({ chatId, title }) => {
     </div>
   );
 };
+
+export const ChatAvatar = React.memo(ChatAvatarComponent);

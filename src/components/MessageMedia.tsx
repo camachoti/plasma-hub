@@ -1,9 +1,16 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { ArrowsInSimple, ArrowsOutSimple, Play, SpeakerSlash, SpeakerHigh, DownloadSimple, X } from "@phosphor-icons/react";
+import { DownloadSimple } from "@phosphor-icons/react";
 import { ContextMenu } from './ContextMenu';
+import { MessageMediaLightbox } from './MessageMediaLightbox';
+import { MessageMediaPreview } from './MessageMediaPreview';
+import { useMessageMediaProgress } from './useMessageMediaProgress';
 import { telegramService } from '../features/telegram/TelegramService';
 import { debugLog, debugWarn } from '../shared/debug/logger';
+import {
+  IMAGE_MEDIA_MIME_TYPE,
+  MediaCancelControl,
+  MediaSkeleton,
+} from './MessageMediaPrimitives';
 
 interface Props {
   chatId: string;
@@ -29,7 +36,6 @@ interface ContextMenuState {
 }
 
 const IconDownload = () => <DownloadSimple size={18} weight="bold" />;
-const IMAGE_MEDIA_MIME_TYPE = 'image/jpeg';
 
 const getVideoDebugState = (video: HTMLVideoElement | null) => {
   if (!video) return null;
@@ -63,37 +69,47 @@ const logVideoEvent = (label: string, video: HTMLVideoElement | null, context: R
   });
 };
 
-const MediaSkeleton: React.FC<{ compact?: boolean }> = ({ compact = false }) => (
-  <div className={`media-skeleton-shimmer ${compact ? 'compact' : ''}`} aria-hidden="true">
-    <div className="media-skeleton-glow" />
-  </div>
-);
-
-const MessageMediaMini: React.FC<{ chatId: string; messageId: number }> = ({ chatId, messageId }) => {
-  const [thumb, setThumb] = useState<string | null>(null);
-
-  useEffect(() => {
-    let isMounted = true;
-    telegramService.getMessageMedia({ chatId, messageId, priority: 'background' }).then(res => {
-      if (isMounted && res.success && res.filePath) {
-        setThumb(res.filePath);
-      }
-    });
-    return () => { isMounted = false; };
-  }, [chatId, messageId]);
-
-  return (
-    <div className="mini-thumb-container">
-      {thumb ? (
-        <img src={thumb} className="mini-thumb-img" alt="Thumbnail" />
-      ) : (
-        <MediaSkeleton compact />
-      )}
-    </div>
-  );
+const areAlbumMediasEqual = (left?: Props['albumMedias'], right?: Props['albumMedias']) => {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return item.id === other.id
+      && item.isVideo === other.isVideo
+      && item.videoDuration === other.videoDuration
+      && item.messageDate === other.messageDate
+      && item.mediaSize === other.mediaSize;
+  });
 };
 
-export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, mediaSize, thumbnailUrl, palette, density, onClickOverride, selectionMode = false, albumMedias, downloadMeta, mediaPriority = 'visible' }) => {
+const areDownloadMetaEqual = (left?: Props['downloadMeta'], right?: Props['downloadMeta']) => {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.chatTitle === right.chatTitle
+    && left.chatKind === right.chatKind
+    && left.topicTitle === right.topicTitle
+    && left.senderName === right.senderName
+    && left.senderId === right.senderId;
+};
+
+const areMessageMediaPropsEqual = (prev: Props, next: Props) => (
+  prev.chatId === next.chatId
+  && prev.messageId === next.messageId
+  && prev.isVideo === next.isVideo
+  && prev.videoDuration === next.videoDuration
+  && prev.messageDate === next.messageDate
+  && prev.mediaSize === next.mediaSize
+  && prev.thumbnailUrl === next.thumbnailUrl
+  && prev.palette === next.palette
+  && prev.density === next.density
+  && prev.selectionMode === next.selectionMode
+  && prev.mediaPriority === next.mediaPriority
+  && Boolean(prev.onClickOverride) === Boolean(next.onClickOverride)
+  && areAlbumMediasEqual(prev.albumMedias, next.albumMedias)
+  && areDownloadMetaEqual(prev.downloadMeta, next.downloadMeta)
+);
+
+const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, mediaSize, thumbnailUrl, palette, density, onClickOverride, selectionMode = false, albumMedias, downloadMeta, mediaPriority = 'visible' }) => {
   const [previewSrc, setPreviewSrc] = useState<string | null>(thumbnailUrl || null);
   const [loading, setLoading] = useState(true);
   const [isOpen, setIsOpen] = useState(false);
@@ -132,6 +148,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
   const inlineLoadingRef = useRef(false);
   const savingMediaRef = useRef(false);
   const fullPreviewLoadedRef = useRef(false);
+  const thumbnailFallbackRequestedRef = useRef(false);
   const prefetchTimersRef = useRef<Map<string, number>>(new Map());
   const canceledMediaRequestsRef = useRef<Set<string>>(new Set());
 
@@ -197,20 +214,23 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
   useEffect(() => {
     let isMounted = true;
     fullPreviewLoadedRef.current = false;
+    thumbnailFallbackRequestedRef.current = false;
     setHasCachedFullMedia(false);
     setPreviewSrc(thumbnailUrl || null);
     setLoading(!thumbnailUrl);
 
     const fetchMedia = async () => {
-      const thumbRequest = telegramService.getMessageMedia({ chatId, messageId, priority: mediaPriority })
-        .then(res => {
-          if (!isMounted || !res.success || !res.filePath || fullPreviewLoadedRef.current) return;
-          setPreviewSrc(res.filePath);
-        })
-        .catch(debugWarn)
-        .finally(() => {
-          if (isMounted) setLoading(false);
-        });
+      const thumbRequest = thumbnailUrl
+        ? Promise.resolve()
+        : telegramService.getMessageMedia({ chatId, messageId, priority: mediaPriority })
+          .then(res => {
+            if (!isMounted || !res.success || !res.filePath || fullPreviewLoadedRef.current) return;
+            setPreviewSrc(res.filePath);
+          })
+          .catch(debugWarn)
+          .finally(() => {
+            if (isMounted) setLoading(false);
+          });
 
       if (!isVideo) {
         telegramService.getCachedMessageMediaFile({ chatId, messageId, mimeType: IMAGE_MEDIA_MIME_TYPE })
@@ -225,14 +245,7 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
       }
 
       try {
-        if (thumbnailUrl) {
-          await Promise.race([
-            thumbRequest,
-            new Promise(resolve => setTimeout(resolve, 1200)),
-          ]);
-        } else {
-          await thumbRequest;
-        }
+        await thumbRequest;
       } catch (e) {
         debugWarn(e);
       }
@@ -247,6 +260,16 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
       }
     };
   }, [chatId, messageId, isVideo, thumbnailUrl, mediaPriority]);
+
+  const handlePreviewImageError = () => {
+    if (thumbnailFallbackRequestedRef.current) return;
+    thumbnailFallbackRequestedRef.current = true;
+    telegramService.getMessageMedia({ chatId, messageId, priority: 'visible' })
+      .then(res => {
+        if (res?.success && res.filePath) setPreviewSrc(res.filePath);
+      })
+      .catch(debugWarn);
+  };
 
   useEffect(() => {
     return () => {
@@ -273,15 +296,11 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
   }, [chatId, messageId, isVideo]);
 
   useEffect(() => {
-    const unsubscribe = telegramService.onMediaProgress((data: any) => {
-      if (String(data.chatId) !== String(chatId) || Number(data.messageId) !== Number(messageId)) return;
+    let progressFrameId: number | null = null;
+    let pendingProgressData: any = null;
+
+    const applyProgressUpdate = (data: any) => {
       const key = mediaRequestKey(Number(data.messageId));
-      if (data.stage === 'canceled') {
-        canceledMediaRequestsRef.current.add(key);
-        clearDownloadVisualState();
-        setCancelingMedia(false);
-        return;
-      }
       if (canceledMediaRequestsRef.current.has(key)) {
         if (data.stage === 'ready') {
           canceledMediaRequestsRef.current.delete(key);
@@ -317,9 +336,37 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
       if (isVideo && progress >= 100 && data.stage !== 'saving') {
         setHasCachedFullMedia(true);
       }
+    };
+
+    const unsubscribe = telegramService.onMessageMediaProgress(chatId, messageId, (data: any) => {
+      const key = mediaRequestKey(Number(data.messageId));
+      if (data.stage === 'canceled') {
+        if (progressFrameId !== null) {
+          window.cancelAnimationFrame(progressFrameId);
+          progressFrameId = null;
+        }
+        pendingProgressData = null;
+        canceledMediaRequestsRef.current.add(key);
+        clearDownloadVisualState();
+        setCancelingMedia(false);
+        return;
+      }
+
+      pendingProgressData = data;
+      if (progressFrameId !== null) return;
+
+      progressFrameId = window.requestAnimationFrame(() => {
+        progressFrameId = null;
+        const latestProgressData = pendingProgressData;
+        pendingProgressData = null;
+        if (latestProgressData) applyProgressUpdate(latestProgressData);
+      });
     });
 
     return () => {
+      if (progressFrameId !== null) {
+        window.cancelAnimationFrame(progressFrameId);
+      }
       unsubscribe();
     };
   }, [chatId, messageId, isVideo]);
@@ -615,78 +662,35 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
   ];
 
   const canOpenViewer = Boolean(previewSrc || fullMediaSrc || isVideo);
-  const isSavingInBackground = savingMedia || (mediaStage === 'saving' || mediaStage === 'downloading') && mediaProgress > 0 && mediaProgress < 100;
-  const shouldShowProgress = loadingFullMedia || isSavingInBackground;
-  const visiblePlayerProgress = playerProgress > 0 && playerProgress < 100 ? playerProgress : mediaProgress;
-  const normalizeBytes = (value?: number | null) => {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : undefined;
-  };
-  const activeMediaSize = normalizeBytes(albumMedias?.find(item => item.id === activeMessageId)?.mediaSize ?? mediaSize);
-  const knownTotalBytes = normalizeBytes(mediaBytes.totalBytes) || activeMediaSize;
-  const knownDownloadedBytes = mediaBytes.downloadedBytes
-    ?? (knownTotalBytes && visiblePlayerProgress > 0 ? Math.round((visiblePlayerProgress / 100) * knownTotalBytes) : undefined);
-  const formatMediaBytes = (bytes?: number) => {
-    const numericBytes = normalizeBytes(bytes);
-    if (!numericBytes) return null;
-    const units = ['B', 'KB', 'MB', 'GB'];
-    const exponent = Math.min(Math.floor(Math.log(numericBytes) / Math.log(1024)), units.length - 1);
-    const unit = units[exponent];
-    if (!unit) return null;
-    const value = numericBytes / Math.pow(1024, exponent);
-    if (!Number.isFinite(value)) return null;
-    return `${Number(value.toFixed(value >= 10 || exponent === 0 ? 0 : 1))} ${units[exponent]}`;
-  };
-  const progressBytesLabel = knownTotalBytes
-    ? `${formatMediaBytes(knownDownloadedBytes) || '0 B'} / ${formatMediaBytes(knownTotalBytes)}`
-    : formatMediaBytes(knownDownloadedBytes);
-  const progressDetailLabel = progressBytesLabel || (visiblePlayerProgress > 0 && visiblePlayerProgress < 100 ? `${visiblePlayerProgress}%` : null);
-  let progressLabel = 'Preparando';
-  if (savingMedia || mediaStage === 'downloading') {
-    progressLabel = 'Baixando';
-  } else if (mediaStage === 'saving') {
-    progressLabel = 'Salvando';
-  }
-  const mediaSizeLabel = formatMediaBytes(normalizeBytes(mediaSize));
-  const shouldShowVideoSizeChip = Boolean(isVideo && mediaSizeLabel && !isInlinePlaying && !hasCachedFullMedia);
-  const hasCancelableMediaProgress = (
-    mediaStage === 'downloading'
-    || mediaStage === 'saving'
-  ) && visiblePlayerProgress > 0 && visiblePlayerProgress < 100;
-  const canCancelMediaDownload = !cancelingMedia && (savingMedia || isSavingInBackground || hasCancelableMediaProgress);
+  const {
+    canCancelMediaDownload,
+    mediaSizeLabel,
+    progressBytesLabel,
+    progressDetailLabel,
+    progressLabel,
+    shouldShowProgress,
+    shouldShowVideoSizeChip,
+    visiblePlayerProgress,
+  } = useMessageMediaProgress({
+    activeMessageId,
+    albumMedias,
+    mediaSize,
+    mediaBytes,
+    mediaProgress,
+    mediaStage,
+    playerProgress,
+    loadingFullMedia,
+    savingMedia,
+    cancelingMedia,
+    isVideo,
+    isInlinePlaying,
+    hasCachedFullMedia,
+  });
   const renderCancelMediaControl = (targetMessageId = activeMessageId || messageId) => {
     if (!canCancelMediaDownload) return null;
     return (
-      <span
-        role="button"
-        tabIndex={0}
-        className="media-cancel-download-btn"
-        title="Cancelar download"
-        aria-label="Cancelar download da mídia"
-        onClick={(event) => handleCancelMediaDownload(event, targetMessageId)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            handleCancelMediaDownload(event, targetMessageId);
-          }
-        }}
-      >
-        <X size={15} weight="bold" />
-      </span>
+      <MediaCancelControl onCancel={(event) => handleCancelMediaDownload(event, targetMessageId)} />
     );
-  };
-
-  const formatDuration = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  };
-
-  const formatMessageTime = (dateNum?: number) => {
-    if (!dateNum) return '';
-    const d = new Date(dateNum * 1000);
-    const h = d.getHours().toString().padStart(2, '0');
-    const m = d.getMinutes().toString().padStart(2, '0');
-    return `${h}:${m}`;
   };
 
   const shouldRenderInlinePlayer = isInlinePlaying && inlineStreamUrl && !selectionInteractionLocked;
@@ -694,158 +698,44 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
   if (previewSrc || fullMediaSrc || isVideo) {
     return (
       <>
-      <div className={`media-preview ${isVideo ? 'is-video' : 'is-image'} ${isInlinePlaying ? 'playing-inline' : ''}`}>
-        {shouldRenderInlinePlayer ? (
-          <div className="inline-video-wrapper" onClick={handleOpen}>
-            <video
-              ref={inlineVideoRef}
-              className="inline-video-player"
-              src={inlineStreamUrl}
-              autoPlay
-              muted={isMuted}
-              playsInline
-              onLoadStart={event => logVideoEvent('inline loadstart', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onLoadedMetadata={event => logVideoEvent('inline loadedmetadata', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onLoadedData={event => logVideoEvent('inline loadeddata', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onProgress={event => logVideoEvent('inline progress', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onSuspend={event => logVideoEvent('inline suspend', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onAbort={event => logVideoEvent('inline abort', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-              onCanPlay={event => {
-                setInlineBuffering(false);
-                logVideoEvent('inline canplay', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-              }}
-              onPlaying={event => {
-                setInlineBuffering(false);
-                scheduleFullMediaPrefetch(messageId);
-                logVideoEvent('inline playing', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-              }}
-              onWaiting={event => {
-                setInlineBuffering(true);
-                logVideoEvent('inline waiting', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-              }}
-              onStalled={event => {
-                setInlineBuffering(true);
-                logVideoEvent('inline stalled', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-              }}
-              onError={event => {
-                logVideoEvent('inline error', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
-                setInlineBuffering(false);
-                setInlineError('Falha ao reproduzir vídeo.');
-                setIsInlinePlaying(false);
-                setInlineStreamUrl(null);
-              }}
-              onTimeUpdate={handleTimeUpdate}
-            />
-            <button 
-              className="inline-mute-btn" 
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsMuted(!isMuted);
-              }}
-            >
-              {isMuted ? <SpeakerSlash size={16} weight="fill" color="white" /> : <SpeakerHigh size={16} weight="fill" color="white" />}
-            </button>
-            {!inlineBuffering && !shouldShowProgress && (
-              <div className="inline-progress-bar">
-                <div className="inline-progress-fill" style={{ width: `${inlineVideoProgress}%` }}></div>
-              </div>
-            )}
-            {(shouldShowProgress || inlineBuffering) && (
-              <div className="video-play-icon loading">
-                <span className="spinner"></span>
-              </div>
-            )}
-            {shouldShowProgress && (
-              <div className="media-progress-badge media-progress-badge-video">
-                {progressLabel} {progressBytesLabel || `${mediaProgress}%`}
-              </div>
-            )}
-            {renderCancelMediaControl(messageId)}
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="media-preview-button"
-            onClick={(e) => {
-              if (handleSelectionClick(e)) return;
-              if (isVideo) {
-                handleInlinePlay(e);
-              } else if (canOpenViewer) {
-                handleOpen(e);
-              }
-            }}
-            disabled={!selectionInteractionLocked && !canOpenViewer}
-          >
-            {previewSrc ? (
-              <img
-                src={previewSrc}
-                alt="Media"
-                className="media-img"
-                onContextMenu={handleContextMenu}
-              />
-            ) : (
-              <div className="media-preview media-skeleton" onContextMenu={handleContextMenu} style={{ border: 'none', width: '100%', height: '100%' }}>
-                <MediaSkeleton compact={inlineLoading || shouldShowProgress} />
-              </div>
-            )}
-            
-            {shouldShowProgress && (
-              isVideo ? (
-                <>
-                  <div className="video-play-icon loading">
-                    <span className="spinner"></span>
-                  </div>
-                  <div className="media-progress-badge media-progress-badge-video">
-                    {progressLabel} {progressBytesLabel || `${mediaProgress}%`}
-                  </div>
-                </>
-              ) : (
-                <div className="media-progress-badge">
-                  {progressLabel} {progressBytesLabel || `${mediaProgress}%`}
-                </div>
-              )
-            )}
-            
-            {inlineLoading && !shouldShowProgress && (
-              <div className="video-play-icon loading">
-                <span className="spinner"></span>
-              </div>
-            )}
-
-            {renderCancelMediaControl(messageId)}
-
-            {inlineError && !inlineLoading && !shouldShowProgress && (
-              <div className="media-status-chip error">
-                {inlineError}
-              </div>
-            )}
-
-            {previewSrc && isVideo && !shouldShowProgress && !inlineLoading && (
-              <div className="video-play-icon">
-                <Play size={24} weight="fill" color="white" />
-              </div>
-            )}
-            
-            {previewSrc && shouldShowVideoSizeChip && (
-              <div className="media-overlay-pill top-left media-size-overlay">
-                {mediaSizeLabel}
-              </div>
-            )}
-
-            {previewSrc && isVideo && videoDuration != null && (
-              <div className="media-overlay-pill top-right">
-                {formatDuration(videoDuration)}
-              </div>
-            )}
-            
-            {previewSrc && !isVideo && messageDate != null && (
-              <div className="media-overlay-pill bottom-right">
-                {formatMessageTime(messageDate)}
-              </div>
-            )}
-          </button>
-        )}
-      </div>
+      <MessageMediaPreview
+        chatId={chatId}
+        messageId={messageId}
+        isVideo={isVideo}
+        videoDuration={videoDuration}
+        messageDate={messageDate}
+        previewSrc={previewSrc}
+        inlineStreamUrl={inlineStreamUrl}
+        shouldRenderInlinePlayer={Boolean(shouldRenderInlinePlayer)}
+        shouldShowProgress={shouldShowProgress}
+        inlineBuffering={inlineBuffering}
+        inlineLoading={inlineLoading}
+        inlineError={inlineError}
+        inlineVideoProgress={inlineVideoProgress}
+        isMuted={isMuted}
+        canOpenViewer={canOpenViewer}
+        selectionInteractionLocked={selectionInteractionLocked}
+        progressLabel={progressLabel}
+        progressBytesLabel={progressBytesLabel}
+        mediaProgress={mediaProgress}
+        shouldShowVideoSizeChip={shouldShowVideoSizeChip}
+        mediaSizeLabel={mediaSizeLabel}
+        inlineVideoRef={inlineVideoRef}
+        onOpen={handleOpen}
+        onInlinePlay={handleInlinePlay}
+        onSelectionClick={handleSelectionClick}
+        onContextMenu={handleContextMenu}
+        onPreviewImageError={handlePreviewImageError}
+        onSetMuted={setIsMuted}
+        onSetInlineBuffering={setInlineBuffering}
+        onSetInlineError={setInlineError}
+        onSetInlinePlaying={setIsInlinePlaying}
+        onSetInlineStreamUrl={setInlineStreamUrl}
+        onTimeUpdate={handleTimeUpdate}
+        onCancelControl={renderCancelMediaControl}
+        onScheduleFullMediaPrefetch={scheduleFullMediaPrefetch}
+        onLogVideoEvent={logVideoEvent}
+      />
 
         {contextMenu.visible && (
           <ContextMenu
@@ -858,165 +748,44 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
           />
         )}
 
-        {isOpen && createPortal(
-          <div
-            className="media-lightbox"
-            data-palette={palette}
-            data-density={density}
-            onClick={() => setIsOpen(false)}
-          >
-            <div className="media-lightbox-toolbar" onClick={event => event.stopPropagation()}>
-              <button
-                type="button"
-                className="btn-icon"
-                onClick={(event) => savingMedia ? handleCancelMediaDownload(event, activeMessageId) : handleSaveMedia(true)}
-                disabled={cancelingMedia}
-                title={savingMedia ? 'Cancelar download' : 'Download'}
-                aria-label={savingMedia ? 'Cancelar download da mídia' : 'Salvar mídia'}
-              >
-                {savingMedia ? <X size={20} weight="bold" /> : <DownloadSimple size={20} weight="bold" />}
-              </button>
-              <button
-                type="button"
-                className="btn-icon"
-                onClick={() => setIsOpen(false)}
-                aria-label="Fechar visualizacao de midia"
-              >
-                ×
-              </button>
-            </div>
-            <div
-              className={`media-lightbox-content ${activeIsVideo ? 'video-content' : 'image-content'}`}
-            >
-              {activeLoading || (!activeFullSrc && !activeError) ? (
-                <div className="media-lightbox-loading" onClick={event => event.stopPropagation()}>
-                  <div className="media-lightbox-preparing">
-                    <span className="spinner"></span>
-                    {progressDetailLabel && (
-                      <div className="media-lightbox-progress-track">
-                        <div
-                          className="media-lightbox-progress-fill"
-                          style={{ width: visiblePlayerProgress > 0 && visiblePlayerProgress < 100 ? `${visiblePlayerProgress}%` : '42%' }}
-                        />
-                      </div>
-                    )}
-                    {renderCancelMediaControl(activeMessageId)}
-                  </div>
-                </div>
-              ) : activeIsVideo && activeFullSrc && !activeError ? (
-                <div className="media-video-shell" ref={lightboxVideoShellRef}>
-                  <video
-                    className="media-video-player"
-                    src={activeFullSrc}
-                    poster={previewSrc || undefined}
-                    controls
-                    controlsList="nofullscreen"
-                    autoPlay
-                    playsInline
-                    preload="auto"
-                    onLoadStart={event => logVideoEvent('lightbox loadstart', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc })}
-                    onLoadedMetadata={event => {
-                      setLightboxBuffering(false);
-                      logVideoEvent('lightbox loadedmetadata', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onLoadedData={event => logVideoEvent('lightbox loadeddata', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc })}
-                    onProgress={event => logVideoEvent('lightbox progress', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc })}
-                    onSuspend={event => logVideoEvent('lightbox suspend', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc })}
-                    onAbort={event => logVideoEvent('lightbox abort', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc })}
-                    onCanPlay={event => {
-                      setLightboxBuffering(false);
-                      logVideoEvent('lightbox canplay', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onPlaying={event => {
-                      setLightboxBuffering(false);
-                      scheduleFullMediaPrefetch(activeMessageId);
-                      logVideoEvent('lightbox playing', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onWaiting={event => {
-                      setLightboxBuffering(true);
-                      logVideoEvent('lightbox waiting', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onSeeking={event => {
-                      setLightboxBuffering(true);
-                      logVideoEvent('lightbox seeking', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onSeeked={() => setLightboxBuffering(false)}
-                    onStalled={event => {
-                      setLightboxBuffering(true);
-                      logVideoEvent('lightbox stalled', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                    }}
-                    onError={event => {
-                      logVideoEvent('lightbox error', event.currentTarget, { chatId, messageId: activeMessageId, src: activeFullSrc });
-                      setLightboxBuffering(false);
-                      setActiveError('Falha ao reproduzir vídeo.');
-                      setActiveFullSrc(null);
-                    }}
-                    onContextMenu={handleContextMenu}
-                    onClick={event => event.stopPropagation()}
-                  />
-                  <button
-                    type="button"
-                    className="media-player-fullscreen-btn"
-                    onClick={togglePlayerFullscreen}
-                    aria-label={isPlayerFullscreen ? 'Sair da tela cheia' : 'Entrar em tela cheia'}
-                    title={isPlayerFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
-                  >
-                    {isPlayerFullscreen ? <ArrowsInSimple size={20} weight="bold" /> : <ArrowsOutSimple size={20} weight="bold" />}
-                  </button>
-                  {(lightboxBuffering || shouldShowProgress) && (
-                    <div 
-                      className={`video-play-icon loading ${shouldShowProgress ? 'progress-loading' : ''}`}
-                      onClick={event => event.stopPropagation()}
-                    >
-                      <span className="spinner"></span>
-                      {shouldShowProgress && (
-                        <span className="loading-text">{progressLabel} {progressBytesLabel || `${mediaProgress}%`}</span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ) : activeFullSrc ? (
-                <img
-                  src={activeFullSrc}
-                  alt="Media expandida"
-                  className="media-lightbox-img"
-                  onContextMenu={handleContextMenu}
-                  onClick={event => event.stopPropagation()}
-                />
-              ) : (
-                <div className="media-preview failed media-lightbox-failed" onClick={event => event.stopPropagation()}>
-                  <strong>Mídia indisponível</strong>
-                  {activeError && <span>{activeError}</span>}
-                </div>
-              )}
-            </div>
-
-            {albumMedias && albumMedias.length > 1 && (
-              <div className="media-lightbox-carousel" onClick={e => e.stopPropagation()}>
-                {albumMedias.map(item => (
-                  <button
-                    key={item.id}
-                    className={`carousel-thumb ${item.id === activeMessageId ? 'active' : ''}`}
-                    onClick={() => setActiveMessageId(item.id)}
-                  >
-                    <MessageMediaMini chatId={chatId} messageId={item.id} />
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {contextMenu.visible && (
-            <ContextMenu
-              x={contextMenu.x}
-              y={contextMenu.y}
-              items={contextMenuItems}
-              onClose={closeContextMenu}
-              palette={palette}
-              density={density}
-            />
-            )}
-          </div>,
-          document.querySelector('.dashboard-container') || document.body
+        {isOpen && (
+          <MessageMediaLightbox
+            palette={palette}
+            density={density}
+            chatId={chatId}
+            activeMessageId={activeMessageId}
+            activeIsVideo={activeIsVideo}
+            activeFullSrc={activeFullSrc}
+            activeError={activeError}
+            activeLoading={activeLoading}
+            previewSrc={previewSrc}
+            savingMedia={savingMedia}
+            cancelingMedia={cancelingMedia}
+            lightboxBuffering={lightboxBuffering}
+            shouldShowProgress={shouldShowProgress}
+            progressLabel={progressLabel}
+            progressBytesLabel={progressBytesLabel}
+            mediaProgress={mediaProgress}
+            visiblePlayerProgress={visiblePlayerProgress}
+            progressDetailLabel={progressDetailLabel}
+            isPlayerFullscreen={isPlayerFullscreen}
+            albumMedias={albumMedias}
+            contextMenu={contextMenu}
+            contextMenuItems={contextMenuItems}
+            videoShellRef={lightboxVideoShellRef}
+            onClose={() => setIsOpen(false)}
+            onSave={(event) => savingMedia ? handleCancelMediaDownload(event, activeMessageId) : handleSaveMedia(true)}
+            onToggleFullscreen={togglePlayerFullscreen}
+            onContextMenu={handleContextMenu}
+            onCancelControl={renderCancelMediaControl}
+            onSelectAlbumMedia={setActiveMessageId}
+            onSetLightboxBuffering={setLightboxBuffering}
+            onSetActiveError={setActiveError}
+            onSetActiveFullSrc={setActiveFullSrc}
+            onScheduleFullMediaPrefetch={scheduleFullMediaPrefetch}
+            onCloseContextMenu={closeContextMenu}
+            onLogVideoEvent={logVideoEvent}
+          />
         )}
       </>
     );
@@ -1028,3 +797,5 @@ export const MessageMedia: React.FC<Props> = ({ chatId, messageId, isVideo, vide
     </div>
   );
 };
+
+export const MessageMedia = React.memo(MessageMediaComponent, areMessageMediaPropsEqual);
