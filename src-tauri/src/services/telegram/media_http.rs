@@ -191,10 +191,6 @@ fn write_response(
     path: &str,
     range_header: Option<&str>,
 ) -> std::io::Result<()> {
-    println!(
-        "[plasma-media-http] request method={} path={} range={:?}",
-        method, path, range_header
-    );
     let Some((chat_id, message_id)) = parse_plasma_media_path(path) else {
         return write_text_response(stream, 400, "URL inválida".to_string());
     };
@@ -217,10 +213,6 @@ fn write_response(
         Err(error) => return write_text_response(stream, 404, error.to_string()),
     };
     let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    println!(
-        "[plasma-media-http] resolved chat_id={} message_id={} path={} len={} content_type={}",
-        chat_id, message_id, playback_path, len, content_type
-    );
 
     if method.eq_ignore_ascii_case("HEAD") {
         return write_headers(
@@ -264,10 +256,6 @@ fn write_response(
         ));
     }
     write_headers(stream, status, headers)?;
-    let sent = copy_file_range(&mut file, stream, start, content_len)?;
-    println!(
-        "[plasma-media-http] response status={} range={}-{} len={} sent={}",
-        status, start, end, len, sent
-    );
+    copy_file_range(&mut file, stream, start, content_len)?;
     stream.flush()
 }

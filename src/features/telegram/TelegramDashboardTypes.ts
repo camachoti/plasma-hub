@@ -4,6 +4,8 @@ export interface Chat {
   isGroup: boolean;
   isChannel: boolean;
   isMember?: boolean;
+  canSendMessages?: boolean;
+  canSendMedia?: boolean;
   isInvite?: boolean;
   inviteHash?: string;
   about?: string;
@@ -27,6 +29,7 @@ export interface ChatFullInfo {
 
 export interface ForumTopic {
   id: number;
+  kind?: 'forum' | 'thread';
   title: string;
   topMessageId: number;
   unreadCount: number;
@@ -46,13 +49,17 @@ export interface Message {
   isVideo: boolean;
   videoDuration?: number | null;
   mediaSize?: number | null;
+  thumbnailPath?: string | null;
   thumbnailUrl?: string | null;
   reactions?: Array<{ emoji: string; count: number; mine: boolean }>;
+  isDeleted?: boolean;
+  isEdited?: boolean;
   is_deleted?: boolean;
   is_edited?: boolean;
   replyToMsgId?: number | null;
   groupedId?: string | null;
   topicId?: number | null;
+  topicKind?: string | null;
 }
 
 export interface TimelineItem {

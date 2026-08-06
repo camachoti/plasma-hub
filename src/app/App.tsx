@@ -49,6 +49,9 @@ function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => appStorage.getBoolean(SKIP_LOGIN_KEY) || Boolean(appStorage.get(TELEGRAM_TDLIB_SESSION_KEY)),
   );
+  const [isCheckingAuth, setIsCheckingAuth] = useState(
+    () => !appStorage.getBoolean(SKIP_LOGIN_KEY) && Boolean(appStorage.get(TELEGRAM_TDLIB_SESSION_KEY)),
+  );
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
@@ -78,13 +81,17 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     const checkLoginStatus = async () => {
-      if (skipLogin) return;
+      if (skipLogin) {
+        setIsCheckingAuth(false);
+        return;
+      }
       const savedSession = appStorage.get(TELEGRAM_TDLIB_SESSION_KEY);
       if (!savedSession) {
         setIsLoggedIn(false);
-        setIsLoading(false);
+        setIsCheckingAuth(false);
         return;
       }
+      setIsCheckingAuth(true);
       try {
         const telegramService = await getTelegramService();
         telegramService.skipLogin = skipLogin;
@@ -95,11 +102,33 @@ function App() {
       } catch (caughtError) {
         debugWarn("Failed to check auth status", caughtError);
         if (!cancelled) setIsLoggedIn(false);
+      } finally {
+        if (!cancelled) setIsCheckingAuth(false);
       }
     };
     checkLoginStatus();
     return () => {
       cancelled = true;
+    };
+  }, [skipLogin]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    getTelegramService().then(async service => {
+      unlisten = await service.onTdlibAuthState(state => {
+        if (disposed || skipLogin) return;
+        if (state === "wait_tdlib_parameters") return;
+        const authorized = state === "ready";
+        setIsLoggedIn(authorized);
+        setIsCheckingAuth(false);
+        if (authorized) appStorage.set(TELEGRAM_TDLIB_SESSION_KEY, "ready");
+        else appStorage.remove(TELEGRAM_TDLIB_SESSION_KEY);
+      });
+    }).catch(error => debugWarn("Failed to subscribe to TDLib auth state", error));
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, [skipLogin]);
 
@@ -177,8 +206,21 @@ function App() {
     setPhoneCodeHash(null);
     setCode("");
     setIsLoading(false);
+    setIsCheckingAuth(false);
     setError("");
   };
+
+  if (isCheckingAuth && !skipLogin) {
+    return (
+      <div className="app-container" data-palette={palette} data-density={density}>
+        <div className="app-loading">
+          <div className="loader-surface" role="status" aria-label="Verificando autenticação do Telegram">
+            <span className="modern-loader" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!isLoggedIn && !skipLogin) {
     return (

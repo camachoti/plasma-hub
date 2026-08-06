@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { telegramService } from './TelegramService';
-import { Trash } from '@phosphor-icons/react';
+import { CheckCircle, TelegramLogo, Trash, TwitterLogo, WarningCircle } from '@phosphor-icons/react';
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
 import { getStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
@@ -173,6 +173,13 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     }
   };
 
+  const tdlibReady = tdlibState === 'ready';
+  const tdlibStatusLabel = tdlibReady
+    ? 'Conectado'
+    : tdlibState === 'not_initialized'
+      ? 'Não inicializado'
+      : tdlibState.replace(/_/g, ' ');
+
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel" onClick={e => e.stopPropagation()}>
@@ -217,9 +224,15 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
         ) : (
           <div className="settings-body">
             {activeTab === 'general' && (
-              <>
-                <div className="settings-section">
-                  <h3>Twitter/X</h3>
+              <div className="settings-general-grid">
+                <div className="settings-section settings-card">
+                  <div className="settings-integration-header">
+                    <div className="settings-integration-icon twitter"><TwitterLogo size={21} weight="fill" /></div>
+                    <div>
+                      <h3>Twitter / X</h3>
+                      <p>Credenciais opcionais para conteúdo que exige uma sessão ativa.</p>
+                    </div>
+                  </div>
                   <div className="settings-field settings-field-stack">
                     <label htmlFor="twitter-cookies">Cookies opcionais</label>
                     <textarea
@@ -236,58 +249,52 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   </p>
                 </div>
 
-                <div className="settings-section">
-                  <h3>Telegram nativo</h3>
-                  <div className="settings-field">
-                    <label>Status TDLib</label>
-                    <span className="settings-hint" style={{ margin: 0 }}>{tdlibState}</span>
+                <div className="settings-section settings-card">
+                  <div className="settings-integration-header">
+                    <div className="settings-integration-icon telegram"><TelegramLogo size={21} weight="fill" /></div>
+                    <div>
+                      <h3>Telegram nativo</h3>
+                      <p>Gerencie a autenticação e teste a conexão local com o TDLib.</p>
+                    </div>
+                    <span className={`settings-status-badge ${tdlibReady ? 'ready' : 'inactive'}`}>
+                      {tdlibReady ? <CheckCircle size={15} weight="fill" /> : <WarningCircle size={15} weight="fill" />}
+                      {tdlibStatusLabel}
+                    </span>
                   </div>
-                  <div className="settings-field">
-                    <label>Telefone</label>
-                    <input
-                      type="tel"
-                      value={tdlibPhone}
-                      onChange={e => setTdlibPhone(e.target.value)}
-                      placeholder="+55..."
-                    />
+                  <div className="settings-auth-grid">
+                    <label className="settings-input-group">
+                      <span>Telefone</span>
+                      <input type="tel" value={tdlibPhone} onChange={e => setTdlibPhone(e.target.value)} placeholder="+55 11 99999-9999" />
+                    </label>
+                    <label className="settings-input-group">
+                      <span>Código</span>
+                      <input inputMode="numeric" value={tdlibCode} onChange={e => setTdlibCode(e.target.value)} placeholder="12345" />
+                    </label>
+                    <label className="settings-input-group">
+                      <span>Senha 2FA</span>
+                      <input type="password" value={tdlibPassword} onChange={e => setTdlibPassword(e.target.value)} placeholder="Se necessário" />
+                    </label>
                   </div>
-                  <div className="settings-field">
-                    <label>Código</label>
-                    <input
-                      value={tdlibCode}
-                      onChange={e => setTdlibCode(e.target.value)}
-                      placeholder="12345"
-                    />
-                  </div>
-                  <div className="settings-field">
-                    <label>Senha 2FA</label>
-                    <input
-                      type="password"
-                      value={tdlibPassword}
-                      onChange={e => setTdlibPassword(e.target.value)}
-                      placeholder="Opcional"
-                    />
-                  </div>
-                  <div className="settings-actions" style={{ justifyContent: 'flex-start', paddingTop: 8 }}>
+                  <div className="settings-tdlib-actions">
                     <button className="settings-save-btn" type="button" onClick={handleTdlibInit} disabled={tdlibBusy}>
                       Inicializar
                     </button>
-                    <button className="settings-save-btn" type="button" onClick={handleTdlibPhone} disabled={tdlibBusy || !tdlibPhone}>
+                    <button className="settings-secondary-btn" type="button" onClick={handleTdlibPhone} disabled={tdlibBusy || !tdlibPhone}>
                       Enviar telefone
                     </button>
-                    <button className="settings-save-btn" type="button" onClick={handleTdlibCode} disabled={tdlibBusy || !tdlibCode}>
+                    <button className="settings-secondary-btn" type="button" onClick={handleTdlibCode} disabled={tdlibBusy || !tdlibCode}>
                       Validar código
                     </button>
-                    <button className="settings-save-btn" type="button" onClick={handleTdlibPassword} disabled={tdlibBusy || !tdlibPassword}>
+                    <button className="settings-secondary-btn" type="button" onClick={handleTdlibPassword} disabled={tdlibBusy || !tdlibPassword}>
                       Validar senha
                     </button>
-                    <button className="settings-save-btn" type="button" onClick={handleTdlibTest} disabled={tdlibBusy}>
+                    <button className="settings-secondary-btn" type="button" onClick={handleTdlibTest} disabled={tdlibBusy}>
                       Testar
                     </button>
                   </div>
-                  {tdlibMessage && <p className="settings-hint">{tdlibMessage}</p>}
+                  {tdlibMessage && <div className="settings-feedback">{tdlibMessage}</div>}
                 </div>
-              </>
+              </div>
             )}
 
             {activeTab === 'visual' && (

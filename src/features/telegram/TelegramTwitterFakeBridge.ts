@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
 import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { mediaCache } from './MediaCacheService';
@@ -6,27 +5,42 @@ import {
   findTwitterFakeMessage,
   getTwitterFakeChat,
   isTwitterFakeChatId,
+  type TwitterFakeChat,
   type TwitterFakeMessage,
 } from './TwitterFakeChatStore';
 
+interface TwitterFakeMediaProgress {
+  chatId: unknown;
+  messageId: unknown;
+  progress: number;
+  stage: 'downloading' | 'ready' | 'failed';
+}
+
+interface TwitterFakeMediaResult {
+  success: boolean;
+  filePath?: string;
+  streamUrl?: string;
+  error?: string;
+}
+
 export class TelegramTwitterFakeBridge {
   constructor(
-    private readonly emitMediaProgress: (data: any) => void,
+    private readonly emitMediaProgress: (data: TwitterFakeMediaProgress) => void,
   ) {}
 
-  isFakeChat(chatId: any) {
+  isFakeChat(chatId: unknown): boolean {
     return isTwitterFakeChatId(chatId);
   }
 
-  getFakeChat(chatId: any) {
+  getFakeChat(chatId: unknown): TwitterFakeChat | null {
     return getTwitterFakeChat(chatId);
   }
 
-  findFakeMessage(chatId: any, messageId: any) {
+  findFakeMessage(chatId: unknown, messageId: unknown): TwitterFakeMessage | null {
     return findTwitterFakeMessage(chatId, messageId);
   }
 
-  async downloadFakeMedia(chatId: any, messageId: any, message: TwitterFakeMessage) {
+  async downloadFakeMedia(chatId: unknown, messageId: unknown, message: TwitterFakeMessage): Promise<TwitterFakeMediaResult> {
     if (!message.url) return { success: false, error: 'Mídia sem URL.' };
 
     try {
@@ -55,10 +69,10 @@ export class TelegramTwitterFakeBridge {
       const filePath = await mediaCache.saveMedia(cacheKey, buffer, contentType);
       this.emitMediaProgress({ chatId, messageId, progress: 100, stage: 'ready' });
       return { success: true, filePath, streamUrl: filePath };
-    } catch (error: any) {
+    } catch (error) {
       debugWarn("[TelegramService] Failed to download Twitter/X media:", error);
       this.emitMediaProgress({ chatId, messageId, progress: 0, stage: 'failed' });
-      return { success: false, error: error.message || String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 }

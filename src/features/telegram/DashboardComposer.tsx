@@ -14,7 +14,7 @@ interface SelectionActionBarProps {
   setSelectedMessageIds: React.Dispatch<React.SetStateAction<number[]>>;
 }
 
-export const SelectionActionBar: React.FC<SelectionActionBarProps> = ({
+const SelectionActionBarComponent: React.FC<SelectionActionBarProps> = ({
   selectedMessageIds,
   handleBulkDownload,
   setIsSelectionMode,
@@ -62,6 +62,8 @@ interface MessageComposerProps {
   replyTo: Message | null;
   selectedFile: SelectedFile | null;
   sendProgress: number | null;
+  canSendMessages: boolean;
+  canSendMedia: boolean;
   handleSelectFile: () => void;
   handleSend: () => void;
   setInputText: React.Dispatch<React.SetStateAction<string>>;
@@ -69,12 +71,14 @@ interface MessageComposerProps {
   setSelectedFile: React.Dispatch<React.SetStateAction<SelectedFile | null>>;
 }
 
-export const MessageComposer: React.FC<MessageComposerProps> = ({
+const MessageComposerComponent: React.FC<MessageComposerProps> = ({
   inputText,
   isSending,
   replyTo,
   selectedFile,
   sendProgress,
+  canSendMessages,
+  canSendMedia,
   handleSelectFile,
   handleSend,
   setInputText,
@@ -105,12 +109,14 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
         </div>
       )}
       <div className="composer-main">
-        <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending} title="Anexar arquivo">
+        <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending || !canSendMedia} title={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'}>
           <IconAttach />
         </button>
         <textarea
           value={inputText}
-          onChange={event => setInputText(event.target.value)}
+          onChange={event => {
+            if (canSendMessages) setInputText(event.target.value);
+          }}
           onInput={event => {
             const textarea = event.currentTarget;
             textarea.style.height = 'auto';
@@ -122,9 +128,9 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
               handleSend();
             }
           }}
-          placeholder="Escreva uma mensagem..."
+          placeholder={canSendMessages ? 'Escreva uma mensagem...' : 'Envio de mensagens indisponível neste grupo'}
           rows={1}
-          disabled={isSending}
+          disabled={isSending || !canSendMessages}
         />
         <div className="composer-right-actions">
           <button type="button" className="icon-btn" title="Emoji">
@@ -134,7 +140,7 @@ export const MessageComposer: React.FC<MessageComposerProps> = ({
             type="button"
             className="composer-send"
             onClick={handleSend}
-            disabled={(!inputText.trim() && !selectedFile) || isSending}
+            disabled={isSending || ((!canSendMessages || !inputText.trim()) && (!canSendMedia || !selectedFile))}
           >
             {isSending ? <span className="spinner small-spinner" /> : <IconSend />}
           </button>
@@ -150,7 +156,7 @@ interface JoinChannelBarProps {
   onJoin: () => void;
 }
 
-export const JoinChannelBar: React.FC<JoinChannelBarProps> = ({
+const JoinChannelBarComponent: React.FC<JoinChannelBarProps> = ({
   fullChatInfo,
   selectedChat,
   onJoin,
@@ -167,3 +173,7 @@ export const JoinChannelBar: React.FC<JoinChannelBarProps> = ({
     </button>
   </div>
 );
+
+export const SelectionActionBar = React.memo(SelectionActionBarComponent);
+export const MessageComposer = React.memo(MessageComposerComponent);
+export const JoinChannelBar = React.memo(JoinChannelBarComponent);

@@ -1,4 +1,5 @@
 import React from 'react';
+import { Virtuoso } from 'react-virtuoso';
 import type { ForumTopic } from './TelegramDashboardTypes';
 import { formatBytes } from './DashboardHelpers';
 import { IconMagic } from './DashboardIcons';
@@ -49,7 +50,40 @@ interface DashboardMassDownloadPanelProps {
   setTopicSearch: React.Dispatch<React.SetStateAction<string>>;
 }
 
-export const DashboardMassDownloadPanel: React.FC<DashboardMassDownloadPanelProps> = ({
+const ProgressItemRow = React.memo(({ item }: { item: DownloadItem }) => (
+  <div className={`progress-item-row ${item.status}`}>
+    <div className="progress-item-info">
+      <span className="progress-item-name" title={item.name}>{item.name}</span>
+      {item.size > 0 && (
+        <span className="progress-item-size">
+          {formatBytes(item.size)}
+        </span>
+      )}
+    </div>
+    <div className="progress-item-status-col">
+      {item.status === 'pending' && (
+        <span className="item-badge">Na fila</span>
+      )}
+      {item.status === 'downloading' && (
+        <span className="item-badge downloading">
+          <span className="spinner small-spinner inline-spinner" style={{ width: 10, height: 10, borderWidth: 1.5, display: 'inline-block', marginRight: 4 }} />
+          {item.progress}%
+        </span>
+      )}
+      {item.status === 'completed' && (
+        <span className="item-badge completed">✓ Salvo</span>
+      )}
+      {item.status === 'skipped' && (
+        <span className="item-badge skipped">⌥ Já existe</span>
+      )}
+      {item.status === 'failed' && (
+        <span className="item-badge failed">✕ Falhou</span>
+      )}
+    </div>
+  </div>
+));
+
+const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelProps> = ({
   albumSplitMode,
   downloading,
   filteredTopics,
@@ -144,8 +178,7 @@ export const DashboardMassDownloadPanel: React.FC<DashboardMassDownloadPanelProp
         )}
       </div>
 
-      {!hasTopics && (
-        <div className="mass-download-options-row">
+      <div className="mass-download-options-row">
           <div className="split-user-selection">
             <label className="switch-label">
               <input
@@ -190,8 +223,7 @@ export const DashboardMassDownloadPanel: React.FC<DashboardMassDownloadPanelProp
               </div>
             )}
           </div>
-        </div>
-      )}
+      </div>
     </div>
     {progress && (
       <div
@@ -218,41 +250,17 @@ export const DashboardMassDownloadPanel: React.FC<DashboardMassDownloadPanelProp
         </div>
         {showDetailedProgress && progress.items && progress.items.length > 0 && (
           <div ref={progressDetailsListRef} className="progress-details-list" onClick={event => event.stopPropagation()}>
-            {progress.items.map((item, index) => (
-              <div key={index} className={`progress-item-row ${item.status}`}>
-                <div className="progress-item-info">
-                  <span className="progress-item-name" title={item.name}>{item.name}</span>
-                  {item.size > 0 && (
-                    <span className="progress-item-size">
-                      {formatBytes(item.size)}
-                    </span>
-                  )}
-                </div>
-                <div className="progress-item-status-col">
-                  {item.status === 'pending' && (
-                    <span className="item-badge">Na fila</span>
-                  )}
-                  {item.status === 'downloading' && (
-                    <span className="item-badge downloading">
-                      <span className="spinner small-spinner inline-spinner" style={{ width: 10, height: 10, borderWidth: 1.5, display: 'inline-block', marginRight: 4 }} />
-                      {item.progress}%
-                    </span>
-                  )}
-                  {item.status === 'completed' && (
-                    <span className="item-badge completed">✓ Salvo</span>
-                  )}
-                  {item.status === 'skipped' && (
-                    <span className="item-badge skipped">⌥ Já existe</span>
-                  )}
-                  {item.status === 'failed' && (
-                    <span className="item-badge failed">✕ Falhou</span>
-                  )}
-                </div>
-              </div>
-            ))}
+            <Virtuoso
+              style={{ height: '100%' }}
+              data={progress.items}
+              computeItemKey={(index, item) => `${item.name}_${index}`}
+              itemContent={(_, item) => <ProgressItemRow item={item} />}
+            />
           </div>
         )}
       </div>
     )}
   </div>
 );
+
+export const DashboardMassDownloadPanel = React.memo(DashboardMassDownloadPanelComponent);

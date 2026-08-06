@@ -83,8 +83,20 @@ export function getMessageGroupedId(message: any) {
   return groupedId == null ? null : String(groupedId);
 }
 
-export function messageCacheKey(chatId: string, topicId?: number) {
-  return topicId ? `${chatId}::topic:${topicId}` : chatId;
+export function messageCacheKey(chatId: string, topicId?: number, topicKind = 'forum') {
+  return topicId ? `${chatId}::${topicKind}:${topicId}` : chatId;
+}
+
+export function compareTelegramMessages(left: any, right: any) {
+  const dateDifference = Number(left?.date || 0) - Number(right?.date || 0);
+  if (dateDifference !== 0) return dateDifference;
+
+  const leftId = Number(left?.id || 0);
+  const rightId = Number(right?.id || 0);
+  if (leftId < 0 && rightId >= 0) return 1;
+  if (leftId >= 0 && rightId < 0) return -1;
+  if (leftId < 0 && rightId < 0) return Math.abs(leftId) - Math.abs(rightId);
+  return leftId - rightId;
 }
 
 export function isLikelyAlbumSeparator(message: any) {

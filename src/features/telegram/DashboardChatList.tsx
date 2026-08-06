@@ -1,4 +1,5 @@
 import React from 'react';
+import { Virtuoso } from 'react-virtuoso';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import type { Chat } from './TelegramDashboardTypes';
 import { hashColor } from './TelegramDashboardConstants';
@@ -16,6 +17,7 @@ interface DashboardChatListProps {
   loading: boolean;
   selectedChat: Chat | null;
   skipLogin: boolean;
+  unreadChatsCount: number;
   formatMessageTime: (timestamp: number) => string;
   getChatKind: (chat: Chat) => string;
   onTelegramLoginRequest?: () => void;
@@ -31,7 +33,78 @@ interface DashboardChatListProps {
   setSelectedChat: React.Dispatch<React.SetStateAction<Chat | null>>;
 }
 
-export const DashboardChatList: React.FC<DashboardChatListProps> = ({
+interface ChatRowProps {
+  chat: Chat;
+  isActive: boolean;
+  formatMessageTime: (timestamp: number) => string;
+  getChatKind: (chat: Chat) => string;
+  readChatHistory: (chatId: string) => Promise<unknown>;
+  setChatContextMenu: React.Dispatch<React.SetStateAction<{ x: number; y: number; chat: Chat } | null>>;
+  setChats: React.Dispatch<React.SetStateAction<Chat[]>>;
+  setError: React.Dispatch<React.SetStateAction<string>>;
+  setSelectedChat: React.Dispatch<React.SetStateAction<Chat | null>>;
+}
+
+const ChatRow = React.memo(({
+  chat,
+  isActive,
+  formatMessageTime,
+  getChatKind,
+  readChatHistory,
+  setChatContextMenu,
+  setChats,
+  setError,
+  setSelectedChat,
+}: ChatRowProps) => {
+  const color = hashColor(chat.id);
+  const hasUnread = (chat.unreadCount ?? 0) > 0;
+
+  return (
+    <div
+      className={`chat-row ${isActive ? 'active' : ''} ${hasUnread ? 'unread' : ''}`}
+      onClick={() => {
+        setSelectedChat(chat);
+        setError('');
+        if (hasUnread) {
+          readChatHistory(chat.id).catch(debugWarn);
+          setChats(prev => prev.map(item => item.id === chat.id ? { ...item, unreadCount: 0 } : item));
+        }
+      }}
+      onContextMenu={event => {
+        event.preventDefault();
+        setChatContextMenu({ x: event.clientX, y: event.clientY, chat });
+      }}
+    >
+      <div className={`chat-avatar color-${color}`}>
+        <ChatAvatar chatId={chat.id} title={chat.title} />
+      </div>
+      <div className="chat-name">
+        <span className="name-text">{chat.title || 'Unknown'}</span>
+        {chat.hasTopics && <span className="badge-icon" title="Fórum">#</span>}
+      </div>
+      <span className="chat-meta">
+        {chat.lastMessageDate ? formatMessageTime(chat.lastMessageDate) : ''}
+      </span>
+      <div className="chat-preview" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+        {chat.lastMessageIsVideo && <span title="Vídeo">📹</span>}
+        {chat.lastMessageIsPhoto && <span title="Foto">📷</span>}
+        {!chat.lastMessageIsVideo && !chat.lastMessageIsPhoto && chat.lastMessageHasMedia && <span title="Mídia">📎</span>}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {chat.lastMessageText || getChatKind(chat)}
+        </span>
+      </div>
+      <div className="chat-flags" style={{ gridColumn: 3 }}>
+        {hasUnread && (
+          <span className="chat-badge">
+            {chat.unreadCount! > 99 ? '99+' : chat.unreadCount}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   activeFolder,
   chatSearch,
   chats,
@@ -42,6 +115,7 @@ export const DashboardChatList: React.FC<DashboardChatListProps> = ({
   loading,
   selectedChat,
   skipLogin,
+  unreadChatsCount,
   formatMessageTime,
   getChatKind,
   onTelegramLoginRequest,
@@ -100,7 +174,7 @@ export const DashboardChatList: React.FC<DashboardChatListProps> = ({
         onClick={() => setActiveFolder('unread')}
       >
         Não lidos
-        <span className="count">{chats.filter(chat => (chat.unreadCount ?? 0) > 0).length}</span>
+        <span className="count">{unreadChatsCount}</span>
       </div>
     </div>
 
@@ -110,81 +184,51 @@ export const DashboardChatList: React.FC<DashboardChatListProps> = ({
       </div>
     )}
 
-    <div className="chats">
-      {skipLogin && (
-        <div
-          className="chat-row telegram-login-row"
-          onClick={() => {
-            setError('');
-            onTelegramLoginRequest?.();
-          }}
-        >
-          <div className="chat-avatar telegram-login-avatar">
-            <IconLogOut />
-          </div>
-          <div className="telegram-login-copy">
-            <div className="chat-name">
-              <span className="name-text">Logar no Telegram</span>
-            </div>
-            <div className="chat-preview">
-              Conectar sua conta para carregar chats reais
-            </div>
-          </div>
-        </div>
-      )}
-      {filteredChats.map(chat => {
-        const color = hashColor(chat.id);
-        const hasUnread = (chat.unreadCount ?? 0) > 0;
-
-        return (
+    <Virtuoso
+      className="chats"
+      style={{ minHeight: 0 }}
+      data={filteredChats}
+      computeItemKey={(_, chat) => chat.id}
+      components={{
+        Header: () => skipLogin ? (
           <div
-            key={chat.id}
-            className={`chat-row ${selectedChat?.id === chat.id ? 'active' : ''} ${hasUnread ? 'unread' : ''}`}
+            className="chat-row telegram-login-row"
             onClick={() => {
-              setSelectedChat(chat);
               setError('');
-              if (hasUnread) {
-                readChatHistory(chat.id).catch(debugWarn);
-                setChats(prev => prev.map(item => item.id === chat.id ? { ...item, unreadCount: 0 } : item));
-              }
-            }}
-            onContextMenu={event => {
-              event.preventDefault();
-              setChatContextMenu({ x: event.clientX, y: event.clientY, chat });
+              onTelegramLoginRequest?.();
             }}
           >
-            <div className={`chat-avatar color-${color}`}>
-              <ChatAvatar chatId={chat.id} title={chat.title} />
+            <div className="chat-avatar telegram-login-avatar">
+              <IconLogOut />
             </div>
-            <div className="chat-name">
-              <span className="name-text">{chat.title || 'Unknown'}</span>
-              {chat.hasTopics && <span className="badge-icon" title="Fórum">#</span>}
-            </div>
-            <span className="chat-meta">
-              {chat.lastMessageDate ? formatMessageTime(chat.lastMessageDate) : ''}
-            </span>
-            <div className="chat-preview" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              {chat.lastMessageIsVideo && <span title="Vídeo">📹</span>}
-              {chat.lastMessageIsPhoto && <span title="Foto">📷</span>}
-              {!chat.lastMessageIsVideo && !chat.lastMessageIsPhoto && chat.lastMessageHasMedia && <span title="Mídia">📎</span>}
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {chat.lastMessageText || getChatKind(chat)}
-              </span>
-            </div>
-            <div className="chat-flags" style={{ gridColumn: 3 }}>
-              {hasUnread && (
-                <span className="chat-badge">
-                  {chat.unreadCount! > 99 ? '99+' : chat.unreadCount}
-                </span>
-              )}
+            <div className="telegram-login-copy">
+              <div className="chat-name">
+                <span className="name-text">Logar no Telegram</span>
+              </div>
+              <div className="chat-preview">
+                Conectar sua conta para carregar chats reais
+              </div>
             </div>
           </div>
-        );
-      })}
-      {!filteredChats.length && !loading && !skipLogin && (
-        <div className="messages-empty">Nenhum chat encontrado.</div>
+        ) : null,
+        Footer: () => !filteredChats.length && !loading && !skipLogin ? (
+          <div className="messages-empty">Nenhum chat encontrado.</div>
+        ) : null,
+      }}
+      itemContent={(_, chat) => (
+        <ChatRow
+          chat={chat}
+          isActive={selectedChat?.id === chat.id}
+          formatMessageTime={formatMessageTime}
+          getChatKind={getChatKind}
+          readChatHistory={readChatHistory}
+          setChatContextMenu={setChatContextMenu}
+          setChats={setChats}
+          setError={setError}
+          setSelectedChat={setSelectedChat}
+        />
       )}
-    </div>
+    />
 
     <div className="user-card">
       <div className="avatar">EU</div>
@@ -214,3 +258,5 @@ export const DashboardChatList: React.FC<DashboardChatListProps> = ({
     </div>
   </div>
 );
+
+export const DashboardChatList = React.memo(DashboardChatListComponent);
