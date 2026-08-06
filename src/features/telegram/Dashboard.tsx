@@ -414,7 +414,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setIsCreatingTopic(false);
       setNewTopicTitle('');
     }
-  }, [selectedChat]);
+  }, [selectedChat?.id]);
 
   useEffect(() => {
     if (shouldScrollToBottomRef.current && virtuosoRef.current && messages.length > 0) {
@@ -440,7 +440,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   useEffect(() => {
     const unsubscribe = telegramService.onNewMessage(({ chatId, topicId, topicKind, message }: any) => {
-      if (!selectedChat || String(chatId) !== String(selectedChat.id)) return;
+      const activeChat = selectedChatRef.current;
+      const isActiveChat = Boolean(activeChat && String(chatId) === String(activeChat.id));
+
+      setChats(current => current.map(chat => String(chat.id) === String(chatId)
+        ? {
+          ...chat,
+          lastMessageText: message.text || (message.hasMedia ? '' : chat.lastMessageText),
+          lastMessageDate: message.date,
+          lastMessageHasMedia: message.hasMedia,
+          lastMessageIsVideo: message.isVideo,
+          lastMessageIsPhoto: message.isPhoto,
+          unreadCount: !isActiveChat && !message.out ? (chat.unreadCount ?? 0) + 1 : chat.unreadCount,
+        }
+        : chat
+      ));
+
+      if (!activeChat || !isActiveChat) return;
 
       const activeTopicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
       const activeTopicKind = viewingTopic?.kind || 'forum';
@@ -457,18 +473,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         byId.set(Number(message.id), message);
         return Array.from(byId.values()).sort(compareTelegramMessages);
       });
-
-      setChats(current => current.map(chat => String(chat.id) === String(chatId)
-        ? {
-          ...chat,
-          lastMessageText: message.text || (message.hasMedia ? '' : chat.lastMessageText),
-          lastMessageDate: message.date,
-          lastMessageHasMedia: message.hasMedia,
-          lastMessageIsVideo: message.isVideo,
-          lastMessageIsPhoto: message.isPhoto,
-        }
-        : chat
-      ));
 
       shouldScrollToBottomRef.current = true;
     });

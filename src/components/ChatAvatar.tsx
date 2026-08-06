@@ -7,12 +7,19 @@ interface Props {
   title: string;
 }
 
-const avatarMemoryCache = new Map<string, string>();
+interface AvatarMemoryCacheEntry {
+  dataUrl: string;
+  cachedAt: number;
+}
+
+const avatarMemoryCache = new Map<string, AvatarMemoryCacheEntry>();
 const avatarPendingRequests = new Map<string, Promise<string | null>>();
 
 const loadAvatar = async (chatId: string) => {
+  const refreshMs = await telegramService.getAvatarRefreshMs();
   const cached = avatarMemoryCache.get(chatId);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.cachedAt < refreshMs) return cached.dataUrl;
+  if (cached) avatarMemoryCache.delete(chatId);
 
   const pending = avatarPendingRequests.get(chatId);
   if (pending) return pending;
@@ -20,7 +27,7 @@ const loadAvatar = async (chatId: string) => {
   const request = telegramService.getAvatar(chatId)
     .then(res => {
       if (res?.success && res.dataUrl) {
-        avatarMemoryCache.set(chatId, res.dataUrl);
+        avatarMemoryCache.set(chatId, { dataUrl: res.dataUrl, cachedAt: Date.now() });
         return res.dataUrl;
       }
       return null;
@@ -32,16 +39,23 @@ const loadAvatar = async (chatId: string) => {
 
 const ChatAvatarComponent: React.FC<Props> = ({ chatId, title }) => {
   const [imgData, setImgData] = useState<string | null>(null);
+
+  useEffect(() => telegramService.onCacheCleared(() => {
+    avatarMemoryCache.clear();
+    avatarPendingRequests.clear();
+    setImgData(null);
+  }), []);
   
   useEffect(() => {
     let isMounted = true;
     const cached = avatarMemoryCache.get(chatId);
-    setImgData(cached || null);
+    setImgData(cached?.dataUrl || null);
 
     const fetchAvatar = async () => {
       if (!chatId || typeof chatId !== 'string' || chatId.startsWith('invite_')) return;
       const dataUrl = await loadAvatar(chatId);
       if (isMounted && dataUrl) setImgData(dataUrl);
+      if (isMounted && !dataUrl) setImgData(null);
     };
     fetchAvatar();
     return () => {

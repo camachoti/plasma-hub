@@ -68,6 +68,8 @@ class TelegramService {
   private mediaFileRequests = new Map<string, Promise<any>>();
   private mediaThumbRequests = new Map<string, Promise<any>>();
   private avatarRequests = new Map<string, Promise<any>>();
+  private messageCacheMergeQueues = new Map<string, Promise<void>>();
+  private cacheClearCallbacks = new Set<() => void>();
   private activeNativeMediaDownloads = new Map<string, { chatId: string; messageId: number; priority: 'user' | 'background' }>();
   private sharedMediaCache = new Map<string, { loadedAt: number; media: any[] }>();
   private activeThumbnailDownloads = 0;
@@ -298,18 +300,31 @@ class TelegramService {
     throw new Error('Use TDLib nativo.');
   }
 
-  private async mergeMessageIntoCache(chatId: string, message: any, topicId?: number | null, topicKind = 'forum') {
-    const keys = [messageCacheKey(chatId, topicId ?? undefined, topicKind)];
-    if (topicId) keys.push(messageCacheKey(chatId));
-
-    for (const key of keys) {
+  private async enqueueMessageCacheMerge(key: string, message: any) {
+    const previous = this.messageCacheMergeQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
       const cached = await mediaCache.getMessages(key);
       const byId = new Map<number, any>();
       cached.forEach(item => byId.set(Number(item.id), item));
       byId.set(Number(message.id), message);
       const merged = Array.from(byId.values()).sort(compareTelegramMessages);
       await mediaCache.saveMessages(key, merged);
+    });
+
+    this.messageCacheMergeQueues.set(key, next);
+    try {
+      await next;
+    } finally {
+      if (this.messageCacheMergeQueues.get(key) === next) {
+        this.messageCacheMergeQueues.delete(key);
+      }
     }
+  }
+
+  private async mergeMessageIntoCache(chatId: string, message: any, topicId?: number | null, topicKind = 'forum') {
+    const keys = [messageCacheKey(chatId, topicId ?? undefined, topicKind)];
+    if (topicId) keys.push(messageCacheKey(chatId));
+    await Promise.all(keys.map(key => this.enqueueMessageCacheMerge(key, message)));
   }
 
   private normalizeNativeMessages(chatId: any, messages: any[]) {
@@ -867,6 +882,18 @@ class TelegramService {
     return cachedUrl
       ? { success: true, dataUrl: cachedUrl }
       : { success: false, error: 'Avatar nativo via TDLib ainda não disponível.' };
+  }
+
+  async getAvatarRefreshMs() {
+    const settings = await mediaCache.getCacheSettings();
+    return Math.max(1, settings.avatarRefreshHours || 24) * 60 * 60 * 1000;
+  }
+
+  onCacheCleared(cb: () => void) {
+    this.cacheClearCallbacks.add(cb);
+    return () => {
+      this.cacheClearCallbacks.delete(cb);
+    };
   }
 
   private async getAvatarInner(id: any, cacheKey: string, fallbackUrl?: string | null) {
@@ -2140,6 +2167,7 @@ class TelegramService {
 
   async clearCache() {
     await mediaCache.clearCache();
+    this.cacheClearCallbacks.forEach(cb => cb());
     if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
       try {
         await this.tdlibBridge.clearNativeMediaCache();
