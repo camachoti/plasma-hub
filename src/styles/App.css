@@ -50,6 +50,72 @@
   pointer-events: none;
 }
 
+.telegram-connection-notice {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100% - 32px));
+  padding: 8px 13px;
+  border: 1px solid color-mix(in oklch, var(--warning, #f2b84b) 38%, var(--line-soft));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--bg-1) 94%, transparent);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 650;
+  box-shadow: var(--shadow-md);
+  transform: translateX(-50%);
+  backdrop-filter: blur(12px);
+}
+
+.telegram-connection-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning, #f2b84b);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--warning, #f2b84b) 18%, transparent);
+}
+
+.app-toast {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 140;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  max-width: min(360px, calc(100% - 36px));
+  padding: 11px 14px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--bg-1) 96%, transparent);
+  color: var(--text-1);
+  box-shadow: var(--shadow-lg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+.app-toast.completed { border-left-color: var(--good); }
+.app-toast.failed { border-left-color: var(--danger); }
+.app-toast.canceled { border-left-color: var(--text-3); }
+.app-toast strong { font-size: 12px; }
+.app-toast span {
+  max-width: 100%;
+  color: var(--text-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .app-container[data-runtime="android"] .main-content {
   padding-top: 44px;
 }

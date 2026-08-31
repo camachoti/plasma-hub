@@ -12,6 +12,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(not(target_os = "android"))]
 use tokio::process::Command;
 
+#[cfg(target_os = "android")]
+use super::download_control::is_cancellation_error;
+use super::download_control::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
+
 #[derive(Clone, Serialize)]
 struct DownloadProgressEvent {
     id: String,
@@ -362,7 +366,9 @@ pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::Pa
 
     #[cfg(target_os = "windows")]
     let binary_name = "yt-dlp.exe";
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    let binary_name = "yt-dlp_linux";
+    #[cfg(target_os = "macos")]
     let binary_name = "yt-dlp";
 
     let binary_path = app_dir.join(binary_name);
@@ -370,13 +376,23 @@ pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::Pa
     if !binary_path.exists() {
         #[cfg(target_os = "windows")]
         let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let download_url =
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
+        #[cfg(all(
+            target_os = "linux",
+            not(any(target_arch = "x86_64", target_arch = "aarch64"))
+        ))]
         let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
         #[cfg(target_os = "macos")]
         let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
 
         let response = reqwest::get(download_url)
             .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
             .map_err(|e| e.to_string())?;
         let bytes = response.bytes().await.map_err(|e| e.to_string())?;
         fs::write(&binary_path, bytes).map_err(|e| e.to_string())?;
@@ -460,6 +476,7 @@ pub async fn download_youtube_native(
     format_id: String,
     filename: String,
 ) -> Result<(), String> {
+    let cancellation = DownloadCancellation::register(id.clone());
     let binary_path = ensure_ytdlp(&app_handle).await?;
 
     let format_arg = if format_id == "video" || format_id == "audio" {
@@ -478,11 +495,12 @@ pub async fn download_youtube_native(
         .arg("-f")
         .arg(format_arg)
         .arg("-o")
-        .arg(output_path)
+        .arg(&output_path)
+        .arg("--no-part")
         .arg("--newline")
         .arg(&url)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| e.to_string())?;
 
@@ -508,7 +526,20 @@ pub async fn download_youtube_native(
         }
     });
 
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if cancellation.is_canceled() {
+        let _ = child.kill().await;
+        let _ = fs::remove_file(&output_path);
+        return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+    }
+
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(|e| e.to_string())?,
+        _ = cancellation.wait() => {
+            let _ = child.kill().await;
+            let _ = fs::remove_file(&output_path);
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+    };
 
     if status.success() {
         let _ = app_handle.emit(
@@ -537,8 +568,12 @@ pub async fn download_youtube_native(
     format_id: String,
     filename: String,
 ) -> Result<(), String> {
+    let cancellation = DownloadCancellation::register(id.clone());
     let result = async {
-        let direct_url = get_youtube_direct_stream_url(&url, &format_id).await?;
+        let direct_url = tokio::select! {
+            result = get_youtube_direct_stream_url(&url, &format_id) => result?,
+            _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+        };
         let download_dir = youtube_download_dir(&app_handle)?;
         fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
         let output_path = download_dir.join(filename);
@@ -547,12 +582,13 @@ pub async fn download_youtube_native(
             .user_agent("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
             .build()
             .map_err(|e| e.to_string())?;
-        let mut response = client
-            .get(direct_url)
-            .header("referer", "https://www.youtube.com/")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut response = tokio::select! {
+            result = client
+                .get(direct_url)
+                .header("referer", "https://www.youtube.com/")
+                .send() => result.map_err(|e| e.to_string())?,
+            _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+        };
 
         if !response.status().is_success() {
             return Err(format!("YouTube stream HTTP {}", response.status()));
@@ -560,9 +596,14 @@ pub async fn download_youtube_native(
 
         let total = response.content_length().unwrap_or(0);
         let mut received = 0_u64;
-        let mut file = fs::File::create(output_path).map_err(|e| e.to_string())?;
+        let mut file = fs::File::create(&output_path).map_err(|e| e.to_string())?;
 
         while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if cancellation.is_canceled() {
+                drop(file);
+                let _ = fs::remove_file(&output_path);
+                return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+            }
             file.write_all(&chunk).map_err(|e| e.to_string())?;
             received += chunk.len() as u64;
             let progress = if total > 0 {
@@ -588,6 +629,9 @@ pub async fn download_youtube_native(
     .await;
 
     if let Err(error) = &result {
+        if is_cancellation_error(error) {
+            return result;
+        }
         let _ = app_handle.emit(
             "youtube-download-error",
             DownloadErrorEvent {

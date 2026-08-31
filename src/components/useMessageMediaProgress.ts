@@ -50,11 +50,13 @@ export function useMessageMediaProgress({
     ? `${formatMediaBytes(knownDownloadedBytes) || '0 B'} / ${formatMediaBytes(knownTotalBytes)}`
     : formatMediaBytes(knownDownloadedBytes);
   const progressDetailLabel = progressBytesLabel || (visiblePlayerProgress > 0 && visiblePlayerProgress < 100 ? `${visiblePlayerProgress}%` : null);
-  const progressLabel = savingMedia || mediaStage === 'downloading'
-    ? 'Baixando'
-    : mediaStage === 'saving'
-      ? 'Salvando'
-      : 'Preparando';
+  const progressLabel = savingMedia || mediaStage === 'saving'
+    ? 'Salvando'
+    : mediaStage === 'downloading'
+      ? 'Baixando'
+      : mediaStage === 'processing'
+        ? 'Processando'
+        : 'Preparando';
   const mediaSizeLabel = formatMediaBytes(normalizeMediaBytes(mediaSize));
   const shouldShowVideoSizeChip = Boolean(isVideo && mediaSizeLabel && !isInlinePlaying && !hasCachedFullMedia);
   const hasCancelableMediaProgress = (

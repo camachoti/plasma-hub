@@ -719,6 +719,7 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
         progressBytesLabel={progressBytesLabel}
         mediaProgress={mediaProgress}
         shouldShowVideoSizeChip={shouldShowVideoSizeChip}
+        hasCachedFullMedia={hasCachedFullMedia}
         mediaSizeLabel={mediaSizeLabel}
         inlineVideoRef={inlineVideoRef}
         onOpen={handleOpen}

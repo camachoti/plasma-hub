@@ -13,8 +13,9 @@ use tauri::{
 };
 use tdlib_rs::{
     enums::{
-        AuthorizationState, ChatList, ChatMemberStatus, ChatType, InputFile, InputMessageContent,
-        InputMessageReplyTo, MessageContent, MessageReplyTo, MessageSender, MessageTopic, Update,
+        AuthorizationState, ChatList, ChatMemberStatus, ChatType, ConnectionState, InputFile,
+        InputMessageContent, InputMessageReplyTo, MessageContent, MessageReplyTo, MessageSender,
+        MessageTopic, Update,
     },
     functions,
     types::{
@@ -187,6 +188,7 @@ pub struct TdlibChatInfo {
 pub struct TdlibChatsResult {
     success: bool,
     dialogs: Vec<TdlibChatInfo>,
+    has_more: bool,
     error: Option<String>,
 }
 
@@ -226,9 +228,25 @@ pub struct TdlibMessagesResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TdlibSearchMessagesResult {
+    success: bool,
+    messages: Vec<TdlibMessageInfo>,
+    total_count: i32,
+    next_from_message_id: Option<i64>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TdlibSharedMediaItem {
     id: i64,
+    date: i32,
+    sender_id: String,
+    sender_name: String,
+    has_media: bool,
+    is_photo: bool,
     is_video: bool,
+    grouped_id: Option<String>,
     media_size: Option<i64>,
 }
 
@@ -1431,6 +1449,23 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
     }
 }
 
+async fn resolve_message_sender_names(client_id: i32, messages: &mut [TdlibMessageInfo]) {
+    let mut sender_names = HashMap::<String, String>::new();
+    for message in messages {
+        if message.out {
+            continue;
+        }
+        if let Some(sender_name) = sender_names.get(&message.sender_id) {
+            message.sender_name = sender_name.clone();
+            continue;
+        }
+
+        let sender_name = resolve_sender_name(client_id, &message.sender_id).await;
+        sender_names.insert(message.sender_id.clone(), sender_name.clone());
+        message.sender_name = sender_name;
+    }
+}
+
 fn plain_formatted_text(text: impl Into<String>) -> FormattedText {
     FormattedText {
         text: text.into(),
@@ -1629,6 +1664,37 @@ fn tdlib_chat_to_app(chat: tdlib_rs::types::Chat) -> TdlibChatInfo {
     }
 }
 
+fn tdlib_user_to_contact_chat(user: tdlib_rs::types::User) -> TdlibChatInfo {
+    let title = format!("{} {}", user.first_name, user.last_name)
+        .trim()
+        .to_string();
+    let title = if title.is_empty() {
+        user.usernames
+            .and_then(|usernames| usernames.active_usernames.into_iter().next())
+            .unwrap_or_else(|| user.phone_number.clone())
+    } else {
+        title
+    };
+
+    TdlibChatInfo {
+        id: user.id.to_string(),
+        title,
+        date: 0,
+        unread_count: 0,
+        is_group: false,
+        is_channel: false,
+        is_member: true,
+        can_send_messages: true,
+        can_send_media: true,
+        has_topics: false,
+        last_message_text: String::new(),
+        last_message_date: 0,
+        last_message_has_media: false,
+        last_message_is_video: false,
+        last_message_is_photo: false,
+    }
+}
+
 fn emit_mass_progress(
     app: &AppHandle,
     chat_id: i64,
@@ -1672,6 +1738,16 @@ async fn set_state(inner: &Arc<Mutex<TdlibInner>>, app: &AppHandle, state: Autho
     let _ = app.emit("tdlib-auth-state", &label);
 }
 
+fn connection_state_label(state: &ConnectionState) -> &'static str {
+    match state {
+        ConnectionState::WaitingForNetwork => "waiting_for_network",
+        ConnectionState::ConnectingToProxy => "connecting_to_proxy",
+        ConnectionState::Connecting => "connecting",
+        ConnectionState::Updating => "updating",
+        ConnectionState::Ready => "ready",
+    }
+}
+
 async fn client_id_or_status(state: &State<'_, TdlibManager>) -> Result<i32, TdlibStatus> {
     let client_id = {
         let guard = state.inner.lock().await;
@@ -1712,6 +1788,12 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
             match result {
                 Ok(Some((Update::AuthorizationState(update), _client_id))) => {
                     set_state(&inner, &app, update.authorization_state).await;
+                }
+                Ok(Some((Update::ConnectionState(update), _client_id))) => {
+                    let _ = app.emit(
+                        "tdlib-connection-state",
+                        connection_state_label(&update.state),
+                    );
                 }
                 Ok(Some((Update::NewMessage(update), client_id))) => {
                     if matches!(
@@ -2317,34 +2399,79 @@ pub async fn tdlib_get_chats(
             return Ok(TdlibChatsResult {
                 success: false,
                 dialogs: Vec::new(),
+                has_more: false,
                 error: status.error.or(Some(status.state)),
             });
         }
     };
 
-    let chat_ids =
-        match functions::get_chats(Some(ChatList::Main), limit.unwrap_or(100), client_id).await {
-            Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
-            Err(error) => {
-                return Ok(TdlibChatsResult {
-                    success: false,
-                    dialogs: Vec::new(),
-                    error: Some(error.message),
-                });
-            }
-        };
+    let limit = limit.unwrap_or(250).clamp(50, 5000);
+    let _ = functions::load_chats(Some(ChatList::Main), 100, client_id).await;
+    let _ = functions::load_chats(Some(ChatList::Archive), 100, client_id).await;
+    let main_chat_ids = match functions::get_chats(Some(ChatList::Main), limit, client_id).await {
+        Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
+        Err(error) => {
+            return Ok(TdlibChatsResult {
+                success: false,
+                dialogs: Vec::new(),
+                has_more: false,
+                error: Some(error.message),
+            });
+        }
+    };
+
+    let archive_chat_ids = if let Ok(tdlib_rs::enums::Chats::Chats(chats)) =
+        functions::get_chats(Some(ChatList::Archive), limit, client_id).await
+    {
+        chats.chat_ids
+    } else {
+        Vec::new()
+    };
+    let has_more =
+        main_chat_ids.len() >= limit as usize || archive_chat_ids.len() >= limit as usize;
+    let mut chat_ids = main_chat_ids;
+    chat_ids.extend(archive_chat_ids);
 
     let mut dialogs = Vec::new();
+    let mut seen_chat_ids = HashMap::<String, bool>::new();
     for chat_id in chat_ids {
+        let chat_id_key = chat_id.to_string();
+        if seen_chat_ids.contains_key(&chat_id_key) {
+            continue;
+        }
         if let Ok(tdlib_rs::enums::Chat::Chat(chat)) = functions::get_chat(chat_id, client_id).await
         {
+            seen_chat_ids.insert(chat_id_key, true);
             dialogs.push(tdlib_chat_to_app(chat));
         }
+    }
+
+    if let Ok(tdlib_rs::enums::Users::Users(users)) = functions::get_contacts(client_id).await {
+        let mut contact_dialogs = Vec::new();
+        for user_id in users.user_ids {
+            let chat_id_key = user_id.to_string();
+            if seen_chat_ids.contains_key(&chat_id_key) {
+                continue;
+            }
+            if let Ok(tdlib_rs::enums::User::User(user)) =
+                functions::get_user(user_id, client_id).await
+            {
+                if !user.have_access {
+                    continue;
+                }
+                seen_chat_ids.insert(chat_id_key, true);
+                contact_dialogs.push(tdlib_user_to_contact_chat(user));
+            }
+        }
+        contact_dialogs
+            .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        dialogs.extend(contact_dialogs);
     }
 
     Ok(TdlibChatsResult {
         success: true,
         dialogs,
+        has_more,
         error: None,
     })
 }
@@ -2447,20 +2574,7 @@ pub async fn tdlib_get_messages(
     let mut messages: Vec<TdlibMessageInfo> =
         raw_messages.into_iter().map(tdlib_message_to_app).collect();
 
-    let mut sender_names = HashMap::<String, String>::new();
-    for message in &mut messages {
-        if message.out {
-            continue;
-        }
-        if let Some(sender_name) = sender_names.get(&message.sender_id) {
-            message.sender_name = sender_name.clone();
-            continue;
-        }
-
-        let sender_name = resolve_sender_name(client_id, &message.sender_id).await;
-        sender_names.insert(message.sender_id.clone(), sender_name.clone());
-        message.sender_name = sender_name;
-    }
+    resolve_message_sender_names(client_id, &mut messages).await;
     messages.sort_by_key(|message| {
         let id_order = if message.id < 0 {
             (1_u8, message.id.unsigned_abs())
@@ -2479,6 +2593,102 @@ pub async fn tdlib_get_messages(
         oldest_message_id,
         error: None,
     })
+}
+
+#[tauri::command]
+pub async fn tdlib_search_chat_messages(
+    state: State<'_, TdlibManager>,
+    chat_id: i64,
+    query: String,
+    limit: Option<i32>,
+    from_message_id: Option<i64>,
+    topic_id: Option<i64>,
+    topic_kind: Option<String>,
+) -> Result<TdlibSearchMessagesResult, String> {
+    let client_id = match ready_client_id(&state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibSearchMessagesResult {
+                success: false,
+                messages: Vec::new(),
+                total_count: 0,
+                next_from_message_id: None,
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    let trimmed_query = query.trim().to_string();
+    if trimmed_query.is_empty() {
+        return Ok(TdlibSearchMessagesResult {
+            success: true,
+            messages: Vec::new(),
+            total_count: 0,
+            next_from_message_id: None,
+            error: None,
+        });
+    }
+
+    let topic = message_topic_from_id(topic_id, topic_kind.as_deref());
+    let search_from_message_id = from_message_id
+        .map(tdlib_message_id_from_app_id)
+        .unwrap_or(0);
+    let requested_limit = limit.unwrap_or(50).clamp(1, 100);
+
+    match functions::search_chat_messages(
+        chat_id,
+        topic,
+        trimmed_query,
+        None,
+        search_from_message_id,
+        0,
+        requested_limit,
+        None,
+        client_id,
+    )
+    .await
+    {
+        Ok(tdlib_rs::enums::FoundChatMessages::FoundChatMessages(found)) => {
+            let raw_messages: Vec<tdlib_rs::types::Message> = found
+                .messages
+                .into_iter()
+                .filter(|message| {
+                    !matches!(message.content, MessageContent::MessageChatDeleteMember(_))
+                })
+                .collect();
+
+            let mut messages: Vec<TdlibMessageInfo> =
+                raw_messages.into_iter().map(tdlib_message_to_app).collect();
+            resolve_message_sender_names(client_id, &mut messages).await;
+            messages.sort_by_key(|message| {
+                let id_order = if message.id < 0 {
+                    (1_u8, message.id.unsigned_abs())
+                } else {
+                    (0_u8, message.id as u64)
+                };
+                (message.date, id_order)
+            });
+
+            Ok(TdlibSearchMessagesResult {
+                success: true,
+                messages,
+                total_count: found.total_count,
+                next_from_message_id: if found.next_from_message_id != 0 {
+                    Some(app_message_id_from_tdlib(found.next_from_message_id))
+                } else {
+                    None
+                },
+                error: None,
+            })
+        }
+        Err(error) => Ok(TdlibSearchMessagesResult {
+            success: false,
+            messages: Vec::new(),
+            total_count: 0,
+            next_from_message_id: None,
+            error: Some(error.message),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -2601,7 +2811,17 @@ pub async fn tdlib_get_shared_media(
             if has_media && (is_photo || is_video) {
                 media.push(TdlibSharedMediaItem {
                     id: app_message_id_from_tdlib(message.id),
+                    date: message.date,
+                    sender_id: sender_id_to_string(&message.sender_id),
+                    sender_name: String::new(),
+                    has_media,
+                    is_photo,
                     is_video,
+                    grouped_id: if message.media_album_id != 0 {
+                        Some(message.media_album_id.to_string())
+                    } else {
+                        None
+                    },
                     media_size,
                 });
                 if media.len() >= requested_limit {
@@ -2683,7 +2903,17 @@ pub async fn tdlib_search_user_media(
             if has_media && (is_photo || is_video) {
                 media.push(TdlibSharedMediaItem {
                     id: app_message_id_from_tdlib(message.id),
+                    date: message.date,
+                    sender_id: target_user_id.clone(),
+                    sender_name: String::new(),
+                    has_media,
+                    is_photo,
                     is_video,
+                    grouped_id: if message.media_album_id != 0 {
+                        Some(message.media_album_id.to_string())
+                    } else {
+                        None
+                    },
                     media_size,
                 });
                 if media.len() >= requested_limit {
@@ -3998,4 +4228,38 @@ pub async fn tdlib_start_mass_download(
         aborted,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forum_topic_round_trips_without_becoming_a_thread() {
+        let topic = message_topic_from_id(Some(42), Some("forum"));
+
+        assert_eq!(message_topic_kind(&topic).as_deref(), Some("forum"));
+        assert_eq!(message_topic_id(&topic), Some(42));
+    }
+
+    #[test]
+    fn thread_topic_round_trips_using_app_message_ids() {
+        let app_message_id = 941;
+        let topic = message_topic_from_id(Some(app_message_id), Some("thread"));
+
+        assert_eq!(message_topic_kind(&topic).as_deref(), Some("thread"));
+        assert_eq!(message_topic_id(&topic), Some(app_message_id));
+    }
+
+    #[test]
+    fn unsupported_topic_kinds_do_not_create_fake_topics() {
+        assert!(message_topic_from_id(Some(7), Some("direct_messages")).is_none());
+        assert!(message_topic_from_id(Some(7), Some("saved_messages")).is_none());
+        assert!(message_topic_from_id(None, Some("forum")).is_none());
+    }
+
+    #[test]
+    fn oversized_forum_topic_ids_are_rejected() {
+        assert!(message_topic_from_id(Some(i64::from(i32::MAX) + 1), Some("forum")).is_none());
+    }
 }

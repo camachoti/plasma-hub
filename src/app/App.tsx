@@ -14,6 +14,8 @@ import "../styles/App.css";
 
 const SKIP_LOGIN_KEY = "skip_login";
 const TELEGRAM_TDLIB_SESSION_KEY = "telegram_tdlib_session";
+const LOGIN_REQUIRED_STATES = new Set(["wait_phone_number", "wait_code", "wait_password"]);
+const SESSION_CLOSED_STATES = new Set(["logging_out", "closing", "closed"]);
 
 async function getTelegramService() {
   const { telegramService } = await import("../features/telegram/TelegramService");
@@ -54,6 +56,7 @@ function App() {
   );
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [telegramConnectionState, setTelegramConnectionState] = useState("ready");
 
   useEffect(() => {
     const openSharedDownloadUrl = (url?: string | null) => {
@@ -119,11 +122,17 @@ function App() {
       unlisten = await service.onTdlibAuthState(state => {
         if (disposed || skipLogin) return;
         if (state === "wait_tdlib_parameters") return;
-        const authorized = state === "ready";
-        setIsLoggedIn(authorized);
-        setIsCheckingAuth(false);
-        if (authorized) appStorage.set(TELEGRAM_TDLIB_SESSION_KEY, "ready");
-        else appStorage.remove(TELEGRAM_TDLIB_SESSION_KEY);
+        if (state === "ready") {
+          setIsLoggedIn(true);
+          setIsCheckingAuth(false);
+          appStorage.set(TELEGRAM_TDLIB_SESSION_KEY, "ready");
+          return;
+        }
+        if (LOGIN_REQUIRED_STATES.has(state) || SESSION_CLOSED_STATES.has(state)) {
+          setIsLoggedIn(false);
+          setIsCheckingAuth(false);
+          appStorage.remove(TELEGRAM_TDLIB_SESSION_KEY);
+        }
       });
     }).catch(error => debugWarn("Failed to subscribe to TDLib auth state", error));
     return () => {
@@ -131,6 +140,20 @@ function App() {
       unlisten?.();
     };
   }, [skipLogin]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    getTelegramService().then(async service => {
+      unlisten = await service.onTdlibConnectionState(state => {
+        if (!disposed) setTelegramConnectionState(state);
+      });
+    }).catch(error => debugWarn("Failed to subscribe to TDLib connection state", error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const handleSendCode = async () => {
     if (!phone || !countryCode) return;
@@ -251,6 +274,7 @@ function App() {
       palette={palette}
       density={density}
       skipLogin={skipLogin}
+      telegramConnectionState={telegramConnectionState}
       onActiveTabChange={setActiveTab}
       onSettingsOpen={() => setIsSettingsOpen(true)}
       onSettingsClose={() => setIsSettingsOpen(false)}

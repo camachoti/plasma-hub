@@ -9,52 +9,123 @@ interface SelectedFile {
 
 interface SelectionActionBarProps {
   selectedMessageIds: number[];
-  handleBulkDownload: (messageIds: number[]) => void;
+  selectableMediaIds: number[];
+  bulkDownloadActive: boolean;
+  bulkProgress: {
+    total: number;
+    downloaded: number;
+    currentFile: string;
+    status: string;
+  } | null;
+  handleBulkDownload: (messageIds: number[]) => Promise<boolean>;
+  handleCopySelected: (messageIds: number[]) => Promise<void>;
+  handleForwardSelected: (messageIds: number[]) => Promise<void>;
   setIsSelectionMode: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedMessageIds: React.Dispatch<React.SetStateAction<number[]>>;
 }
 
 const SelectionActionBarComponent: React.FC<SelectionActionBarProps> = ({
   selectedMessageIds,
+  selectableMediaIds,
+  bulkDownloadActive,
+  bulkProgress,
   handleBulkDownload,
+  handleCopySelected,
+  handleForwardSelected,
   setIsSelectionMode,
   setSelectedMessageIds,
-}) => (
-  <div className="selection-action-bar-wrap">
-    <div className="selection-action-bar">
-      <span className="selection-count">
-        {selectedMessageIds.length} {selectedMessageIds.length === 1 ? 'mídia selecionada' : 'mídias selecionadas'}
-      </span>
-      <div className="selection-actions">
-        <button
-          className="btn-cancel-selection"
-          onClick={() => {
-            setIsSelectionMode(false);
-            setSelectedMessageIds([]);
-          }}
-        >
-          Cancelar
-        </button>
-        <button
-          className="btn-download-selected"
-          disabled={selectedMessageIds.length === 0}
-          onClick={() => {
-            handleBulkDownload(selectedMessageIds);
-            setIsSelectionMode(false);
-            setSelectedMessageIds([]);
-          }}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" x2="12" y1="15" y2="3" />
-          </svg>
-          <span>Baixar Selecionadas</span>
-        </button>
+}) => {
+  const selectedCount = selectedMessageIds.length;
+  const selectableCount = selectableMediaIds.length;
+  const allLoadedSelected = selectableCount > 0 && selectedCount >= selectableCount;
+  const progressPercent = bulkProgress?.total
+    ? Math.min(100, Math.round((bulkProgress.downloaded / bulkProgress.total) * 100))
+    : 0;
+
+  const handleDownloadSelected = async () => {
+    const started = await handleBulkDownload(selectedMessageIds);
+    if (started) {
+      setIsSelectionMode(false);
+      setSelectedMessageIds([]);
+    }
+  };
+
+  return (
+    <div className="selection-action-bar-wrap">
+      <div className="selection-action-bar">
+        <div className="selection-summary">
+          <span className="selection-summary-main">
+            {selectedCount} {selectedCount === 1 ? 'mídia selecionada' : 'mídias selecionadas'}
+          </span>
+          <span className="selection-summary-sub">
+            {bulkDownloadActive && bulkProgress
+              ? `${progressPercent}% baixado · ${bulkProgress.currentFile}`
+              : `${selectableCount} ${selectableCount === 1 ? 'mídia carregada' : 'mídias carregadas'} no chat`}
+          </span>
+          {bulkDownloadActive && bulkProgress && (
+            <div className="selection-progress" aria-label="Progresso do download selecionado">
+              <div className="selection-progress-fill" style={{ width: `${progressPercent}%` }} />
+            </div>
+          )}
+        </div>
+        <div className="selection-actions">
+          <div className="selection-secondary-actions">
+            <button
+              className="btn-selection-secondary"
+              disabled={bulkDownloadActive || selectableCount === 0 || allLoadedSelected}
+              onClick={() => setSelectedMessageIds(selectableMediaIds)}
+            >
+              Selecionar tudo
+            </button>
+            <button
+              className="btn-selection-secondary"
+              disabled={bulkDownloadActive || selectedCount === 0}
+              onClick={() => setSelectedMessageIds([])}
+            >
+              Limpar
+            </button>
+          </div>
+          <button
+            className="btn-cancel-selection"
+            disabled={bulkDownloadActive}
+            onClick={() => {
+              setIsSelectionMode(false);
+              setSelectedMessageIds([]);
+            }}
+          >
+            Sair
+          </button>
+          <button
+            className="btn-selection-secondary"
+            disabled={selectedCount === 0 || bulkDownloadActive}
+            onClick={() => void handleCopySelected(selectedMessageIds)}
+          >
+            Copiar
+          </button>
+          <button
+            className="btn-selection-secondary"
+            disabled={selectedCount === 0 || bulkDownloadActive}
+            onClick={() => void handleForwardSelected(selectedMessageIds)}
+          >
+            Encaminhar
+          </button>
+          <button
+            className="btn-download-selected"
+            disabled={selectedCount === 0 || bulkDownloadActive}
+            onClick={handleDownloadSelected}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" x2="12" y1="15" y2="3" />
+            </svg>
+            <span>{bulkDownloadActive ? 'Baixando...' : `Baixar ${selectedCount || ''}`.trim()}</span>
+          </button>
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 interface MessageComposerProps {
   inputText: string;

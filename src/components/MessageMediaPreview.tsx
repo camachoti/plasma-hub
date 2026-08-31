@@ -28,6 +28,7 @@ interface MessageMediaPreviewProps {
   progressBytesLabel: string | null;
   mediaProgress: number;
   shouldShowVideoSizeChip: boolean;
+  hasCachedFullMedia: boolean;
   mediaSizeLabel: string | null;
   inlineVideoRef: React.RefObject<HTMLVideoElement | null>;
   onOpen: (event?: React.MouseEvent) => void;
@@ -67,6 +68,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
   progressBytesLabel,
   mediaProgress,
   shouldShowVideoSizeChip,
+  hasCachedFullMedia,
   mediaSizeLabel,
   inlineVideoRef,
   onOpen,
@@ -215,6 +217,10 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           <div className="media-overlay-pill top-left media-size-overlay">
             {mediaSizeLabel}
           </div>
+        )}
+
+        {previewSrc && hasCachedFullMedia && !shouldShowProgress && (
+          <div className="media-status-chip cached">Em cache</div>
         )}
 
         {previewSrc && isVideo && videoDuration != null && (

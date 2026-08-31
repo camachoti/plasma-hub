@@ -1,6 +1,7 @@
 import React from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { ChatAvatar } from '../../components/ChatAvatar';
+import { ChatListSkeleton } from '../../components/Skeletons';
 import type { Chat } from './TelegramDashboardTypes';
 import { hashColor } from './TelegramDashboardConstants';
 import { IconLogOut, IconSearch, IconSettings } from './DashboardIcons';
@@ -15,12 +16,15 @@ interface DashboardChatListProps {
   isSearchOpen: boolean;
   isSettingsMenuOpen: boolean;
   loading: boolean;
+  loadingMore: boolean;
+  hasMoreChats: boolean;
   selectedChat: Chat | null;
   skipLogin: boolean;
   unreadChatsCount: number;
   formatMessageTime: (timestamp: number) => string;
   getChatKind: (chat: Chat) => string;
   onTelegramLoginRequest?: () => void;
+  onLoadMoreChats: () => void;
   readChatHistory: (chatId: string) => Promise<unknown>;
   setActiveFolder: React.Dispatch<React.SetStateAction<'all' | 'unread'>>;
   setChatContextMenu: React.Dispatch<React.SetStateAction<{ x: number; y: number; chat: Chat } | null>>;
@@ -62,6 +66,9 @@ const ChatRow = React.memo(({
   return (
     <div
       className={`chat-row ${isActive ? 'active' : ''} ${hasUnread ? 'unread' : ''}`}
+      role="button"
+      tabIndex={0}
+      aria-current={isActive ? 'page' : undefined}
       onClick={() => {
         setSelectedChat(chat);
         setError('');
@@ -73,6 +80,12 @@ const ChatRow = React.memo(({
       onContextMenu={event => {
         event.preventDefault();
         setChatContextMenu({ x: event.clientX, y: event.clientY, chat });
+      }}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          event.currentTarget.click();
+        }
       }}
     >
       <div className={`chat-avatar color-${color}`}>
@@ -113,12 +126,15 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   isSearchOpen,
   isSettingsMenuOpen,
   loading,
+  loadingMore,
+  hasMoreChats,
   selectedChat,
   skipLogin,
   unreadChatsCount,
   formatMessageTime,
   getChatKind,
   onTelegramLoginRequest,
+  onLoadMoreChats,
   readChatHistory,
   setActiveFolder,
   setChatContextMenu,
@@ -164,14 +180,22 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
     <div className="folders">
       <div
         className={`folder ${activeFolder === 'all' ? 'active' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={activeFolder === 'all'}
         onClick={() => setActiveFolder('all')}
+        onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
       >
         Todos
         <span className="count">{chats.length}</span>
       </div>
       <div
         className={`folder ${activeFolder === 'unread' ? 'active' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={activeFolder === 'unread'}
         onClick={() => setActiveFolder('unread')}
+        onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
       >
         Não lidos
         <span className="count">{unreadChatsCount}</span>
@@ -188,15 +212,23 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
       className="chats"
       style={{ minHeight: 0 }}
       data={filteredChats}
+      endReached={() => {
+        if (hasMoreChats && !loadingMore && !chatSearch.trim() && activeFolder === 'all') {
+          onLoadMoreChats();
+        }
+      }}
       computeItemKey={(_, chat) => chat.id}
       components={{
         Header: () => skipLogin ? (
           <div
             className="chat-row telegram-login-row"
+            role="button"
+            tabIndex={0}
             onClick={() => {
               setError('');
               onTelegramLoginRequest?.();
             }}
+            onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
           >
             <div className="chat-avatar telegram-login-avatar">
               <IconLogOut />
@@ -211,7 +243,10 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
             </div>
           </div>
         ) : null,
-        Footer: () => !filteredChats.length && !loading && !skipLogin ? (
+        EmptyPlaceholder: () => loading ? <ChatListSkeleton /> : null,
+        Footer: () => loadingMore ? (
+          <div className="chat-list-loading-more" role="status">Carregando mais conversas…</div>
+        ) : !filteredChats.length && !loading && !skipLogin ? (
           <div className="messages-empty">Nenhum chat encontrado.</div>
         ) : null,
       }}

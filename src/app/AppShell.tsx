@@ -1,6 +1,7 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { At, ChatCircle, DownloadSimple, Gear as SettingsIcon } from "@phosphor-icons/react";
 import { runtimeCapabilities } from "../shared/platform/runtime";
+import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
 
 const Dashboard = lazy(() => import("../features/telegram/Dashboard").then(module => ({ default: module.Dashboard })));
 const Downloads = lazy(() => import("../features/telegram/Downloads").then(module => ({ default: module.Downloads })));
@@ -15,6 +16,7 @@ interface AppShellProps {
   palette: string;
   density: string;
   skipLogin: boolean;
+  telegramConnectionState: string;
   onActiveTabChange: (tab: AppTab) => void;
   onSettingsOpen: () => void;
   onSettingsClose: () => void;
@@ -27,11 +29,28 @@ export function AppShell({
   palette,
   density,
   skipLogin,
+  telegramConnectionState,
   onActiveTabChange,
   onSettingsOpen,
   onSettingsClose,
   onTelegramLoginRequest,
 }: AppShellProps) {
+  const [downloadToast, setDownloadToast] = useState<DownloadItem | null>(null);
+
+  useEffect(() => {
+    let timeoutId: number | undefined;
+    const handleDownloadStatus = (event: Event) => {
+      const item = (event as CustomEvent<DownloadItem>).detail;
+      setDownloadToast(item);
+      window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => setDownloadToast(null), 4200);
+    };
+    window.addEventListener(DOWNLOAD_STATUS_EVENT, handleDownloadStatus);
+    return () => {
+      window.removeEventListener(DOWNLOAD_STATUS_EVENT, handleDownloadStatus);
+      window.clearTimeout(timeoutId);
+    };
+  }, []);
   const fallback = (
     <div className="app-loading">
       <div className="loader-surface" role="status" aria-label="Carregando">
@@ -39,6 +58,13 @@ export function AppShell({
       </div>
     </div>
   );
+  const connectionNotice = !skipLogin && telegramConnectionState !== "ready"
+    ? telegramConnectionState === "waiting_for_network"
+      ? "Sem rede. O Telegram será reconectado automaticamente."
+      : telegramConnectionState === "updating"
+        ? "Telegram conectado. Atualizando mensagens…"
+        : "Reconectando ao Telegram…"
+    : null;
 
   return (
     <div
@@ -47,11 +73,29 @@ export function AppShell({
       data-density={density}
       data-runtime={runtimeCapabilities.kind}
     >
+      {connectionNotice && (
+        <div className="telegram-connection-notice" role="status" aria-live="polite">
+          <span className="telegram-connection-dot" />
+          {connectionNotice}
+        </div>
+      )}
+      {downloadToast && (
+        <button
+          type="button"
+          className={`app-toast ${downloadToast.status}`}
+          onClick={() => setDownloadToast(null)}
+          aria-live="polite"
+        >
+          <strong>{downloadToast.status === 'completed' ? 'Download concluído' : downloadToast.status === 'canceled' ? 'Download cancelado' : 'Falha no download'}</strong>
+          <span>{downloadToast.fileName}</span>
+        </button>
+      )}
       <div className="sidebar">
         <button
           className={`sidebar-item ${activeTab === "telegram" ? "active" : ""}`}
           onClick={() => onActiveTabChange("telegram")}
           title="Telegram"
+          aria-label="Abrir Telegram"
         >
           <ChatCircle size={22} />
         </button>
@@ -59,6 +103,7 @@ export function AppShell({
           className={`sidebar-item ${activeTab === "downloads" ? "active" : ""}`}
           onClick={() => onActiveTabChange("downloads")}
           title="Downloads"
+          aria-label="Abrir downloads"
         >
           <DownloadSimple size={22} />
         </button>
@@ -66,6 +111,7 @@ export function AppShell({
           className={`sidebar-item ${activeTab === "twitter" ? "active" : ""}`}
           onClick={() => onActiveTabChange("twitter")}
           title="Twitter / X"
+          aria-label="Abrir Twitter / X"
         >
           <At size={22} />
         </button>
@@ -74,6 +120,7 @@ export function AppShell({
           className={`sidebar-item ${isSettingsOpen ? "active" : ""}`}
           onClick={onSettingsOpen}
           title="Configurações"
+          aria-label="Abrir configurações"
         >
           <SettingsIcon size={22} />
         </button>

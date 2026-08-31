@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { telegramService } from './TelegramService';
 import { CheckCircle, TelegramLogo, Trash, TwitterLogo, WarningCircle } from '@phosphor-icons/react';
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
-import { getStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
+import { getStoredTwitterCookies, loadStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
 
 interface CacheStats {
@@ -78,6 +78,10 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const [tdlibPassword, setTdlibPassword] = useState('');
   const [tdlibBusy, setTdlibBusy] = useState(false);
 
+  useEffect(() => {
+    loadStoredTwitterCookies().then(setTwitterCookies).catch(() => {});
+  }, []);
+
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
@@ -145,7 +149,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     setSaving(true);
     try {
       await telegramService.setCacheSettings(settings);
-      setStoredTwitterCookies(twitterCookies);
+      await setStoredTwitterCookies(twitterCookies);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } finally {

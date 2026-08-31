@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo, StackSimple, CaretDown, XCircle } from '@phosphor-icons/react';
+import { ArrowClockwise, CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo, StackSimple, CaretDown, X, XCircle, Trash } from '@phosphor-icons/react';
 import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -13,6 +13,13 @@ function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['vide
   if (!format || format.id === 'na' || format.id === 'web-limit') return false;
   if (media.platform === 'youtube' && runtimeCapabilities.isAndroid && format.hasAudio === false) return false;
   if (format.url) return true;
+  if (
+    media.platform === 'tiktok' &&
+    Boolean(media.originalUrl) &&
+    runtimeCapabilities.isTauri &&
+    !runtimeCapabilities.isAndroid &&
+    (format.id === 'best' || format.id === 'bestaudio')
+  ) return true;
   return media.platform === 'youtube' && Boolean(media.originalUrl) && runtimeCapabilities.supportsNativeYoutube;
 }
 
@@ -232,6 +239,24 @@ export const Downloads: React.FC = () => {
   };
 
   const runningCount = downloads.filter(d => d.status === 'downloading').length;
+  const finishedCount = downloads.length - runningCount;
+  const actionableRunningCount = downloads.filter(d => d.status === 'downloading' && d.canCancel).length;
+
+  const handleCancelDownload = async (item: DownloadItem) => {
+    await downloadService.cancelDownload(item.id);
+  };
+
+  const handleRetryDownload = async (item: DownloadItem) => {
+    await downloadService.retryDownload(item.id);
+  };
+
+  const handleCancelGroup = async (items: DownloadItem[]) => {
+    await Promise.all(items.filter(item => item.status === 'downloading' && item.canCancel).map(item => downloadService.cancelDownload(item.id)));
+  };
+
+  const handleRetryGroup = async (items: DownloadItem[]) => {
+    await Promise.all(items.filter(item => (item.status === 'failed' || item.status === 'canceled') && item.canRetry).map(item => downloadService.retryDownload(item.id)));
+  };
 
   const renderDownloadItem = (item: DownloadItem, compact = false) => (
     <div
@@ -286,6 +311,50 @@ export const Downloads: React.FC = () => {
           {item.error && <span className="stat-item error-text">{item.error}</span>}
         </div>
       </div>
+      <div className="download-item-actions">
+        {item.status === 'downloading' && item.canCancel && (
+          <button
+            type="button"
+            className="download-action-icon danger"
+            title="Cancelar download"
+            aria-label={`Cancelar ${item.fileName}`}
+            onClick={event => {
+              event.stopPropagation();
+              void handleCancelDownload(item);
+            }}
+          >
+            <X size={16} />
+          </button>
+        )}
+        {(item.status === 'failed' || item.status === 'canceled') && item.canRetry && (
+          <button
+            type="button"
+            className="download-action-icon"
+            title="Tentar novamente"
+            aria-label={`Tentar novamente ${item.fileName}`}
+            onClick={event => {
+              event.stopPropagation();
+              void handleRetryDownload(item);
+            }}
+          >
+            <ArrowClockwise size={16} />
+          </button>
+        )}
+        {item.status !== 'downloading' && (
+          <button
+            type="button"
+            className="download-action-icon danger"
+            title="Remover do histórico"
+            aria-label={`Remover ${item.fileName} do histórico`}
+            onClick={event => {
+              event.stopPropagation();
+              downloadService.removeDownload(item.id);
+            }}
+          >
+            <Trash size={16} />
+          </button>
+        )}
+      </div>
     </div>
   );
 
@@ -296,9 +365,28 @@ export const Downloads: React.FC = () => {
           <h1>Downloads</h1>
           <span>{downloads.length} itens</span>
         </div>
-        <button className="folder-action-btn" onClick={() => handleOpenFolder()} title="Abrir pasta de downloads">
-          <FolderOpen size={16} /> Pasta
-        </button>
+        <div className="downloads-topbar-actions">
+          {finishedCount > 0 && (
+            <button className="text-action-btn" onClick={() => downloadService.clearFinished()}>
+              <Trash size={15} /> Limpar finalizados
+            </button>
+          )}
+          {actionableRunningCount > 0 && (
+            <button
+              className="text-action-btn danger"
+              onClick={() => {
+                void Promise.all(downloads
+                  .filter(item => item.status === 'downloading' && item.canCancel)
+                  .map(item => downloadService.cancelDownload(item.id)));
+              }}
+            >
+              <X size={15} /> Cancelar ativos
+            </button>
+          )}
+          <button className="folder-action-btn" onClick={() => handleOpenFolder()} title="Abrir pasta de downloads">
+            <FolderOpen size={16} /> Pasta
+          </button>
+        </div>
       </header>
 
       <div className="downloads-content">
@@ -399,55 +487,85 @@ export const Downloads: React.FC = () => {
               const first = entry.items[0];
               const expanded = expandedGroups.has(entry.id);
               const meta = downloadMetaItems(first);
+              const groupCanCancel = entry.items.some(item => item.status === 'downloading' && item.canCancel);
+              const groupCanRetry = entry.items.some(item => (item.status === 'failed' || item.status === 'canceled') && item.canRetry);
 
               return (
                 <div key={entry.id} className={`download-group ${summary.status}`}>
-                  <button type="button" className="download-group-header" onClick={() => toggleGroup(entry.id)}>
-                    <div className="download-icon-wrapper">
-                      {summary.thumbnail ? (
-                        <div className="download-thumbnail-container">
-                          <img src={summary.thumbnail} alt="Thumbnail" className="download-thumbnail-img" />
-                          <div className={`download-status-overlay ${summary.status}`}>
-                            {summary.status === 'downloading' && <FileArrowDown size={14} />}
-                            {summary.status === 'completed' && <CheckCircle size={14} />}
-                            {summary.status === 'failed' && <WarningCircle size={14} />}
-                            {summary.status === 'canceled' && <XCircle size={14} />}
+                  <div className="download-group-header-row">
+                    <button type="button" className="download-group-header" onClick={() => toggleGroup(entry.id)}>
+                      <div className="download-icon-wrapper">
+                        {summary.thumbnail ? (
+                          <div className="download-thumbnail-container">
+                            <img src={summary.thumbnail} alt="Thumbnail" className="download-thumbnail-img" />
+                            <div className={`download-status-overlay ${summary.status}`}>
+                              {summary.status === 'downloading' && <FileArrowDown size={14} />}
+                              {summary.status === 'completed' && <CheckCircle size={14} />}
+                              {summary.status === 'failed' && <WarningCircle size={14} />}
+                              {summary.status === 'canceled' && <XCircle size={14} />}
+                            </div>
                           </div>
+                        ) : (
+                          <div className={`download-icon ${summary.status}`}>
+                            <StackSimple size={20} />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="download-details">
+                        <div className="download-name-row">
+                          <h3 className="download-name" title={first.batchTitle || first.fileName}>
+                            {first.batchTitle || 'Mass Download'}
+                          </h3>
+                          <span className={`download-percentage status-${summary.status}`}>
+                            {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
+                          </span>
                         </div>
-                      ) : (
-                        <div className={`download-icon ${summary.status}`}>
-                          <StackSimple size={20} />
+
+                        <div className={`progress-bar-container ${summary.status}`}>
+                          <div className="progress-bar-fill" style={{ width: `${summary.progress}%` }} />
                         </div>
-                      )}
-                    </div>
 
-                    <div className="download-details">
-                      <div className="download-name-row">
-                        <h3 className="download-name" title={first.batchTitle || first.fileName}>
-                          {first.batchTitle || 'Mass Download'}
-                        </h3>
-                        <span className={`download-percentage status-${summary.status}`}>
-                          {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
-                        </span>
+                        <div className="download-stats">
+                          <span className="stat-item">{summary.total} arquivos</span>
+                          <span className="stat-item">{summary.completed} finalizados</span>
+                          {summary.skipped > 0 && <span className="stat-item">{summary.skipped} ignorados</span>}
+                          {summary.running > 0 && <span className="stat-item">{summary.running} em andamento</span>}
+                          {summary.failed > 0 && <span className="stat-item error-text">{summary.failed} falharam</span>}
+                          {summary.canceled > 0 && <span className="stat-item muted-text">{summary.canceled} cancelados</span>}
+                          {meta.map(item => <span key={item} className="stat-item">{item}</span>)}
+                        </div>
                       </div>
 
-                      <div className={`progress-bar-container ${summary.status}`}>
-                        <div className="progress-bar-fill" style={{ width: `${summary.progress}%` }} />
+                      <CaretDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} />
+                    </button>
+                    {(groupCanCancel || groupCanRetry) && (
+                      <div className="download-group-actions">
+                        {groupCanCancel && (
+                          <button
+                            type="button"
+                            className="download-action-icon danger"
+                            title="Cancelar itens ativos"
+                            aria-label="Cancelar itens ativos"
+                            onClick={() => void handleCancelGroup(entry.items)}
+                          >
+                            <X size={16} />
+                          </button>
+                        )}
+                        {groupCanRetry && (
+                          <button
+                            type="button"
+                            className="download-action-icon"
+                            title="Tentar novamente itens com falha"
+                            aria-label="Tentar novamente itens com falha"
+                            onClick={() => void handleRetryGroup(entry.items)}
+                          >
+                            <ArrowClockwise size={16} />
+                          </button>
+                        )}
                       </div>
-
-                      <div className="download-stats">
-                        <span className="stat-item">{summary.total} arquivos</span>
-                        <span className="stat-item">{summary.completed} finalizados</span>
-                        {summary.skipped > 0 && <span className="stat-item">{summary.skipped} ignorados</span>}
-                        {summary.running > 0 && <span className="stat-item">{summary.running} em andamento</span>}
-                        {summary.failed > 0 && <span className="stat-item error-text">{summary.failed} falharam</span>}
-                        {summary.canceled > 0 && <span className="stat-item muted-text">{summary.canceled} cancelados</span>}
-                        {meta.map(item => <span key={item} className="stat-item">{item}</span>)}
-                      </div>
-                    </div>
-
-                    <CaretDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} />
-                  </button>
+                    )}
+                  </div>
 
                   {expanded && (
                     <div className="download-group-items">

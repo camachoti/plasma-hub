@@ -26,6 +26,7 @@ interface TdlibUserInfo {
 interface TdlibChatsResult {
   success: boolean;
   dialogs: Chat[];
+  hasMore: boolean;
   error?: string | null;
 }
 
@@ -34,6 +35,14 @@ interface TdlibMessagesResult {
   messages: Message[];
   hasMore: boolean;
   oldestMessageId?: number | null;
+  error?: string | null;
+}
+
+interface TdlibSearchMessagesResult {
+  success: boolean;
+  messages: Message[];
+  totalCount: number;
+  nextFromMessageId?: number | null;
   error?: string | null;
 }
 
@@ -236,6 +245,17 @@ export class TelegramTdlibBridge {
     });
   }
 
+  searchChatMessages({ chatId, query, limit = 50, fromMessageId = null, topicId = null, topicKind = null }: any) {
+    return invoke<TdlibSearchMessagesResult>('tdlib_search_chat_messages', {
+      chatId: toNumberValue(chatId),
+      query: String(query || ''),
+      limit,
+      fromMessageId: fromMessageId == null ? null : toNumberValue(fromMessageId),
+      topicId: topicId == null ? null : toNumberValue(topicId),
+      topicKind,
+    });
+  }
+
   getChatCapabilities(chatId: unknown) {
     return invoke<TdlibChatCapabilitiesResult>('tdlib_get_chat_capabilities', {
       chatId: toNumberValue(chatId),
@@ -395,6 +415,10 @@ export class TelegramTdlibBridge {
 
   onAuthState(cb: (state: string) => void) {
     return listen<string>('tdlib-auth-state', event => cb(event.payload));
+  }
+
+  onConnectionState(cb: (state: string) => void) {
+    return listen<string>('tdlib-connection-state', event => cb(event.payload));
   }
 
   onDownloadProgress(cb: (data: TdlibDownloadProgress) => void) {

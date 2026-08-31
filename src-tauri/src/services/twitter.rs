@@ -9,6 +9,10 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+use super::download_control::{
+    is_cancellation_error, DownloadCancellation, DOWNLOAD_CANCELED_ERROR,
+};
+
 const TWITTER_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 #[derive(Debug, Serialize)]
@@ -582,8 +586,14 @@ pub async fn download_twitter_native(
     filename: String,
     cookies: Option<String>,
 ) -> Result<(), String> {
-    let result = download_twitter_native_inner(&app_handle, &id, &url, &filename, cookies).await;
+    let cancellation = DownloadCancellation::register(id.clone());
+    let result =
+        download_twitter_native_inner(&app_handle, &id, &url, &filename, cookies, &cancellation)
+            .await;
     if let Err(error) = &result {
+        if is_cancellation_error(error) {
+            return result;
+        }
         let _ = app_handle.emit(
             "twitter-download-error",
             TwitterDownloadErrorEvent {
@@ -603,10 +613,20 @@ pub async fn download_twitter_profile_native(
     media_urls: Vec<String>,
     cookies: Option<String>,
 ) -> Result<(), String> {
-    let result =
-        download_twitter_profile_native_inner(&app_handle, &id, &username, media_urls, cookies)
-            .await;
+    let cancellation = DownloadCancellation::register(id.clone());
+    let result = download_twitter_profile_native_inner(
+        &app_handle,
+        &id,
+        &username,
+        media_urls,
+        cookies,
+        &cancellation,
+    )
+    .await;
     if let Err(error) = &result {
+        if is_cancellation_error(error) {
+            return result;
+        }
         let _ = app_handle.emit(
             "twitter-download-error",
             TwitterDownloadErrorEvent {
@@ -637,6 +657,7 @@ async fn download_twitter_profile_native_inner(
     username: &str,
     media_urls: Vec<String>,
     cookies: Option<String>,
+    cancellation: &DownloadCancellation,
 ) -> Result<(), String> {
     if media_urls.is_empty() {
         return Err("Nenhuma mídia encontrada para baixar".to_string());
@@ -651,13 +672,15 @@ async fn download_twitter_profile_native_inner(
     let total_items = media_urls.len() as f64;
 
     for (idx, media_url) in media_urls.iter().enumerate() {
+        if cancellation.is_canceled() {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
         let ext = media_extension(media_url);
         let output_path = download_dir.join(format!("{:04}.{}", idx + 1, ext));
-        let mut response = client
-            .get(media_url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut response = tokio::select! {
+            result = client.get(media_url).send() => result.map_err(|e| e.to_string())?,
+            _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+        };
 
         if !response.status().is_success() {
             return Err(format!(
@@ -667,8 +690,13 @@ async fn download_twitter_profile_native_inner(
             ));
         }
 
-        let mut file = fs::File::create(output_path).map_err(|e| e.to_string())?;
+        let mut file = fs::File::create(&output_path).map_err(|e| e.to_string())?;
         while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if cancellation.is_canceled() {
+                drop(file);
+                let _ = fs::remove_file(&output_path);
+                return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+            }
             file.write_all(&chunk).map_err(|e| e.to_string())?;
         }
 
@@ -695,6 +723,7 @@ async fn download_twitter_native_inner(
     url: &str,
     filename: &str,
     cookies: Option<String>,
+    cancellation: &DownloadCancellation,
 ) -> Result<(), String> {
     let download_dir = twitter_download_dir(app_handle)?;
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
@@ -705,7 +734,10 @@ async fn download_twitter_native_inner(
         eprintln!("[twitter_native] using Twitter cookies for media download");
     }
     let client = build_twitter_client(cookie_header.as_deref())?;
-    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let mut response = tokio::select! {
+        result = client.get(url).send() => result.map_err(|e| e.to_string())?,
+        _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
+    };
 
     if !response.status().is_success() {
         return Err(format!("Twitter media HTTP {}", response.status()));
@@ -713,9 +745,14 @@ async fn download_twitter_native_inner(
 
     let total = response.content_length().unwrap_or(0);
     let mut received = 0_u64;
-    let mut file = fs::File::create(output_path).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&output_path).map_err(|e| e.to_string())?;
 
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if cancellation.is_canceled() {
+            drop(file);
+            let _ = fs::remove_file(&output_path);
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         received += chunk.len() as u64;
         let progress = if total > 0 {
@@ -748,9 +785,23 @@ fn extract_twitter_id(url: &str) -> Result<String, String> {
 }
 
 fn extract_twitter_profile_username(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    let handle_re = Regex::new(r"^@([A-Za-z0-9_]{1,15})$").map_err(|e| e.to_string())?;
+    if let Some(username) = handle_re
+        .captures(trimmed)
+        .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+    {
+        return Ok(username);
+    }
+
+    let username_re = Regex::new(r"^[A-Za-z0-9_]{1,15}$").map_err(|e| e.to_string())?;
+    if username_re.is_match(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+
     let re = Regex::new(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/?(?:\?.*)?$")
         .map_err(|e| e.to_string())?;
-    re.captures(url)
+    re.captures(trimmed)
         .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
         .ok_or_else(|| "Nao foi possivel identificar o perfil".to_string())
 }

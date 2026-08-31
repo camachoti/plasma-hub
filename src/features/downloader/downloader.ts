@@ -18,6 +18,7 @@ import {
   getDownloadExtension,
   isTwitterProfileUrl,
 } from './downloaderUtils';
+import type { PlatformId } from './types';
 
 export interface TwitterRequestOptions {
   twitterCookies?: string;
@@ -32,7 +33,11 @@ export async function analyzeUrl(url: string, options: TwitterRequestOptions = {
   switch (platform) {
     case 'reddit':    return extractReddit(url);
     case 'youtube':   return extractYoutube(url);
-    case 'tiktok':    return extractTikTok(url);
+    case 'tiktok':
+      if (runtimeCapabilities.isTauri && !runtimeCapabilities.isAndroid) {
+        return invoke<MediaInfo>('analyze_tiktok_native', { url });
+      }
+      return extractTikTok(url);
     case 'instagram': return extractInstagram(url);
     case 'twitter':
       if (!extractTwitterId(url)) {
@@ -55,18 +60,46 @@ export async function analyzeUrl(url: string, options: TwitterRequestOptions = {
 
 // ─── Download ─────────────────────────────────────────────────────────────────
 
+function getDownloadHeaders(platform: PlatformId): Record<string, string> {
+  const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  switch (platform) {
+    case 'youtube':
+      return {
+        'User-Agent': defaultUserAgent,
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com',
+      };
+    case 'tiktok':
+      return {
+        'User-Agent': defaultUserAgent,
+        'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
+      };
+    case 'twitter':
+      return {
+        'User-Agent': defaultUserAgent,
+        'Referer': 'https://x.com/',
+        'Accept': 'video/mp4,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      };
+    default:
+      return {
+        'User-Agent': defaultUserAgent,
+        'Accept': '*/*',
+      };
+  }
+}
+
 async function downloadViaBlob(
   url: string,
   filename: string,
-  onProgress: (p: number) => void
+  platform: PlatformId,
+  onProgress: (p: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const res = await tauriFetch(url, { 
     method: 'GET',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': 'https://www.youtube.com/',
-      'Origin': 'https://www.youtube.com'
-    }
+    signal,
+    headers: getDownloadHeaders(platform),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -96,18 +129,17 @@ async function downloadViaBlob(
 async function downloadViaNativeFile(
   url: string,
   filename: string,
-  onProgress: (p: number) => void
+  platform: PlatformId,
+  onProgress: (p: number) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const downloadDir = await getDownloadDir();
   const filePath = await joinPath(downloadDir, filename);
 
   const res = await tauriFetch(url, {
     method: 'GET',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': 'https://www.youtube.com/',
-      'Origin': 'https://www.youtube.com'
-    }
+    signal,
+    headers: getDownloadHeaders(platform),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -124,6 +156,7 @@ async function downloadViaNativeFile(
     } else {
       let received = 0;
       while (true) {
+        signal?.throwIfAborted();
         const { done, value } = await reader.read();
         if (done) break;
         if (!value) continue;
@@ -164,6 +197,8 @@ export async function downloadMedia(
     status: 'downloading',
     platform: info.platform as any,
     thumbnailUrl: info.thumbnailUrl
+  }, {
+    retry: () => downloadMedia(info, mode, formatId, options),
   });
 
   const onProgress = (p: number) => {
@@ -183,6 +218,17 @@ export async function downloadMedia(
     info.originalUrl &&
     runtimeCapabilities.supportsNativeYoutube
   ) {
+    const unlisteners: Array<() => void> = [];
+    downloadService.setActions(downloadId, {
+      cancel: async () => {
+        await invoke<boolean>('cancel_native_download', { id: downloadId });
+        downloadService.updateDownload(downloadId, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado pelo usuário.',
+        });
+      },
+    });
     try {
       // se for vídeo e não tiver áudio nativo, combina com o melhor áudio
       let ytFormat = formatId;
@@ -195,18 +241,21 @@ export async function downloadMedia(
           onProgress(e.payload.progress);
         }
       });
+      unlisteners.push(unlistenProgress);
 
       const unlistenDone = await listen<{id: string}>('youtube-download-done', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
         }
       });
+      unlisteners.push(unlistenDone);
 
       const unlistenError = await listen<{id: string, error: string}>('youtube-download-error', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'failed', error: e.payload.error });
         }
       });
+      unlisteners.push(unlistenError);
 
       await invoke('download_youtube_native', { 
         id: downloadId,
@@ -215,11 +264,9 @@ export async function downloadMedia(
         filename: filename
       });
 
-      unlistenProgress();
-      unlistenDone();
-      unlistenError();
       return;
     } catch (err: any) {
+      if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
       debugWarn('Backend download failed, fallback to direct url:', err);
       // Try to fallback
       try {
@@ -228,28 +275,46 @@ export async function downloadMedia(
           formatId 
         });
       } catch (e) {}
+      downloadService.updateDownload(downloadId, { status: 'downloading', error: undefined });
+    } finally {
+      unlisteners.forEach(unlisten => unlisten());
+      downloadService.clearActions(downloadId, ['cancel']);
     }
   }
 
   if (info.platform === 'twitter' && dlUrl && runtimeCapabilities.supportsNativeTwitter) {
+    const unlisteners: Array<() => void> = [];
+    downloadService.setActions(downloadId, {
+      cancel: async () => {
+        await invoke<boolean>('cancel_native_download', { id: downloadId });
+        downloadService.updateDownload(downloadId, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado pelo usuário.',
+        });
+      },
+    });
     try {
       const unlistenProgress = await listen<{id: string, progress: number}>('twitter-download-progress', (e) => {
         if (e.payload.id === downloadId) {
           onProgress(e.payload.progress);
         }
       });
+      unlisteners.push(unlistenProgress);
 
       const unlistenDone = await listen<{id: string}>('twitter-download-done', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
         }
       });
+      unlisteners.push(unlistenDone);
 
       const unlistenError = await listen<{id: string, error: string}>('twitter-download-error', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'failed', error: e.payload.error });
         }
       });
+      unlisteners.push(unlistenError);
 
       await invoke('download_twitter_native', {
         id: downloadId,
@@ -258,12 +323,74 @@ export async function downloadMedia(
         cookies: cleanOptional(options.twitterCookies),
       });
 
-      unlistenProgress();
-      unlistenDone();
-      unlistenError();
       return;
     } catch (err: any) {
+      if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
       debugWarn('Native Twitter download failed, falling back to blob download:', err);
+      downloadService.updateDownload(downloadId, { status: 'downloading', error: undefined });
+    } finally {
+      unlisteners.forEach(unlisten => unlisten());
+      downloadService.clearActions(downloadId, ['cancel']);
+    }
+  }
+
+  if (
+    info.platform === 'tiktok' &&
+    info.originalUrl &&
+    runtimeCapabilities.isTauri &&
+    !runtimeCapabilities.isAndroid
+  ) {
+    const unlisteners: Array<() => void> = [];
+    downloadService.setActions(downloadId, {
+      cancel: async () => {
+        await invoke<boolean>('cancel_native_download', { id: downloadId });
+        downloadService.updateDownload(downloadId, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado pelo usuário.',
+        });
+      },
+    });
+    try {
+      const unlistenProgress = await listen<{id: string, progress: number}>('tiktok-download-progress', (event) => {
+        if (event.payload.id === downloadId) onProgress(event.payload.progress);
+      });
+      unlisteners.push(unlistenProgress);
+
+      const unlistenDone = await listen<{id: string}>('tiktok-download-done', (event) => {
+        if (event.payload.id === downloadId) {
+          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+        }
+      });
+      unlisteners.push(unlistenDone);
+
+      const unlistenError = await listen<{id: string, error: string}>('tiktok-download-error', (event) => {
+        if (event.payload.id === downloadId) {
+          downloadService.updateDownload(downloadId, { status: 'failed', error: event.payload.error });
+        }
+      });
+      unlisteners.push(unlistenError);
+
+      await invoke('download_tiktok_native', {
+        id: downloadId,
+        url: info.originalUrl,
+        formatId,
+        filename,
+        directUrl: dlUrl,
+      });
+      return;
+    } catch (error) {
+      if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
+      const message = error instanceof Error ? error.message : String(error);
+      debugWarn('Native TikTok download failed:', error);
+      downloadService.updateDownload(downloadId, {
+        status: 'failed',
+        error: message || 'O download nativo do TikTok falhou.',
+      });
+      return;
+    } finally {
+      unlisteners.forEach(unlisten => unlisten());
+      downloadService.clearActions(downloadId, ['cancel']);
     }
   }
 
@@ -278,16 +405,38 @@ export async function downloadMedia(
   }
 
   try {
+    const abortController = new AbortController();
+    downloadService.setActions(downloadId, {
+      cancel: () => {
+        abortController.abort();
+        downloadService.updateDownload(downloadId, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado pelo usuário.',
+        });
+      },
+    });
+
     if (runtimeCapabilities.isTauri) {
-      const filePath = await downloadViaNativeFile(dlUrl, filename, onProgress);
+      const filePath = await downloadViaNativeFile(dlUrl, filename, info.platform, onProgress, abortController.signal);
       downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, filePath });
     } else {
-      await downloadViaBlob(dlUrl, filename, onProgress);
+      await downloadViaBlob(dlUrl, filename, info.platform, onProgress, abortController.signal);
       downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
     }
   } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      downloadService.updateDownload(downloadId, {
+        status: 'canceled',
+        progress: 0,
+        error: 'Cancelado pelo usuário.',
+      });
+      return;
+    }
     debugWarn("Download failed", err);
     downloadService.updateDownload(downloadId, { status: 'failed', error: err.message });
+  } finally {
+    downloadService.clearActions(downloadId, ['cancel']);
   }
 }
 

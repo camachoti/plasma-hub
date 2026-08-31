@@ -5,18 +5,19 @@ import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
 import { ContextMenu, IcoCopy, IcoForward, IcoReply } from '../../components/ContextMenu';
+import { InitialDashboardSkeleton, MessageListSkeleton, TopicListSkeleton } from '../../components/Skeletons';
 import { telegramService } from './TelegramService';
 import { Settings } from './Settings';
-import { Virtuoso, VirtuosoGrid } from 'react-virtuoso';
+import { Virtuoso } from 'react-virtuoso';
 import appIcon from '../../../build/icon.png';
 import { useAppearance } from '../appearance/AppearanceStore';
 import { updateTwitterProfileChat } from './TwitterFakeChatStore';
-import { getStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
+import { loadStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
 import { writeClipboardText } from '../../shared/platform/clipboard';
 import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { QUICK_REACTIONS, TOPIC_ICON_COLORS, hashColor } from './TelegramDashboardConstants';
-import type { Chat, ChatFullInfo, ForumTopic, Message } from './TelegramDashboardTypes';
+import type { Chat, ChatFullInfo, ForumTopic, Message, TimelineItem } from './TelegramDashboardTypes';
 import { getTimelineItems, getTopicColor, ListContainer } from './DashboardHelpers';
 import { compareTelegramMessages } from './TelegramMessageUtils';
 import { DashboardChatList } from './DashboardChatList';
@@ -59,10 +60,18 @@ interface DashboardProps {
   onTelegramLoginRequest?: () => void;
 }
 
+const LAST_CHAT_KEY = 'plasma_last_chat_id';
+const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
+const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
+const INFO_PANEL_KEY = 'plasma_info_panel_open';
+
 export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTelegramLoginRequest }) => {
   const PAGE_SIZE = 50;
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMoreChats, setLoadingMoreChats] = useState(false);
+  const [hasMoreChats, setHasMoreChats] = useState(false);
+  const [chatLoadLimit, setChatLoadLimit] = useState(250);
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const selectedChatRef = useRef<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -86,6 +95,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const messagesLoadSeqRef = useRef(0);
   const sharedMediaLoadSeqRef = useRef(0);
   const topicsLoadSeqRef = useRef(0);
+  const chatSearchSeqRef = useRef(0);
+  const restoredChatRef = useRef(false);
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -105,6 +116,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [downloading, setDownloading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState('');
+  const [dashboardToast, setDashboardToast] = useState<{ tone: 'success' | 'error' | 'info'; title: string; message?: string } | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [chatSearch, setChatSearch] = useState('');
   const [topicSearch, setTopicSearch] = useState('');
@@ -120,8 +132,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [imgContextMenu, setImgContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null);
   const [userContextMenu, setUserContextMenu] = useState<{ x: number; y: number; senderId: string; senderName: string } | null>(null);
   const [searchMediaUser, setSearchMediaUser] = useState<{ senderId: string; senderName: string } | null>(null);
-  const [searchMediaResults, setSearchMediaResults] = useState<any[]>([]);
+  const [searchMediaResults, setSearchMediaResults] = useState<Message[]>([]);
   const [searchMediaLoading, setSearchMediaLoading] = useState(false);
+  const [isSearchMediaSelectionMode, setIsSearchMediaSelectionMode] = useState(false);
+  const [selectedSearchMediaIds, setSelectedSearchMediaIds] = useState<number[]>([]);
+  const [isChatSearchOpen, setIsChatSearchOpen] = useState(false);
+  const [chatMessageSearch, setChatMessageSearch] = useState('');
+  const [chatSearchResultIndex, setChatSearchResultIndex] = useState(0);
+  const [remoteChatSearchResults, setRemoteChatSearchResults] = useState<Message[]>([]);
+  const [remoteChatSearchTotal, setRemoteChatSearchTotal] = useState<number | null>(null);
+  const [remoteChatSearchNextFromMessageId, setRemoteChatSearchNextFromMessageId] = useState<number | null>(null);
+  const [chatSearchLoading, setChatSearchLoading] = useState(false);
+  const [chatSearchError, setChatSearchError] = useState<string | null>(null);
+  const [chatSearchMediaFilter, setChatSearchMediaFilter] = useState<'all' | 'media' | 'photo' | 'video' | 'album'>('all');
+  const [chatSearchSenderFilter, setChatSearchSenderFilter] = useState('all');
+  const [chatSearchDateFilter, setChatSearchDateFilter] = useState('');
   const [showDetailedProgress, setShowDetailedProgress] = useState(false);
   const [bulkDownloadActive, setBulkDownloadActive] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
@@ -131,11 +156,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     status: string;
   } | null>(null);
   const [isCreatingTopic, setIsCreatingTopic] = useState(false);
+
+  const showDashboardToast = useCallback((toast: { tone: 'success' | 'error' | 'info'; title: string; message?: string }) => {
+    setDashboardToast(toast);
+  }, []);
+
+  useEffect(() => {
+    if (!dashboardToast) return;
+    const timeoutId = window.setTimeout(() => setDashboardToast(null), 3600);
+    return () => window.clearTimeout(timeoutId);
+  }, [dashboardToast]);
   const [newTopicTitle, setNewTopicTitle] = useState('');
   const [newTopicColor, setNewTopicColor] = useState(7322096);
 
   const { palette, density } = useAppearance();
-  const [infoOpen, setInfoOpen] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(() => appStorage.getBoolean(INFO_PANEL_KEY));
   const [emojiPickerMsgId, setEmojiPickerMsgId] = useState<number | null>(null);
   const [emojiPickerPos, setEmojiPickerPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [originalMsgModal, setOriginalMsgModal] = useState<{ msg: Message; original: { id: number; text: string; date: number } } | null>(null);
@@ -182,7 +217,56 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     return map;
   }, [messages]);
   const selectedMessageIdsSet = useMemo(() => new Set(selectedMessageIds), [selectedMessageIds]);
+  const selectableMediaIds = useMemo(
+    () => Array.from(new Set(messages.filter(message => message.hasMedia).map(message => Number(message.id)))),
+    [messages]
+  );
   const timelineItems = useMemo(() => getTimelineItems(messages), [messages]);
+  const chatMessageSearchTerm = chatMessageSearch.trim().toLowerCase();
+  const loadedChatSearchResults = useMemo(() => {
+    if (!chatMessageSearchTerm) return [];
+    return messages.filter(message => {
+      const haystack = [
+        message.text,
+        message.senderName,
+        message.senderId,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(chatMessageSearchTerm);
+    });
+  }, [chatMessageSearchTerm, messages]);
+  const chatSearchSourceResults = remoteChatSearchResults.length > 0 ? remoteChatSearchResults : loadedChatSearchResults;
+  const chatSearchSenderOptions = useMemo(() => {
+    const senders = new Map<string, string>();
+    [...messages, ...remoteChatSearchResults].forEach(message => {
+      if (message.senderId) senders.set(message.senderId, message.senderName || message.senderId);
+    });
+    return Array.from(senders.entries()).sort((left, right) => left[1].localeCompare(right[1], 'pt-BR'));
+  }, [messages, remoteChatSearchResults]);
+  const chatSearchResults = useMemo(() => chatSearchSourceResults.filter(message => {
+    if (chatSearchMediaFilter === 'media' && !message.hasMedia) return false;
+    if (chatSearchMediaFilter === 'photo' && !message.isPhoto) return false;
+    if (chatSearchMediaFilter === 'video' && !message.isVideo) return false;
+    if (chatSearchMediaFilter === 'album' && !message.groupedId) return false;
+    if (chatSearchSenderFilter !== 'all' && message.senderId !== chatSearchSenderFilter) return false;
+    if (chatSearchDateFilter) {
+      const messageDate = new Date(Number(message.date) * 1000).toISOString().slice(0, 10);
+      if (messageDate !== chatSearchDateFilter) return false;
+    }
+    return true;
+  }), [chatSearchSourceResults, chatSearchMediaFilter, chatSearchSenderFilter, chatSearchDateFilter]);
+  const activeChatSearchResult = chatSearchResults[chatSearchResultIndex] ?? null;
+  const searchMediaTimelineItems = useMemo<TimelineItem[]>(
+    () => getTimelineItems([...searchMediaResults].sort(compareTelegramMessages)),
+    [searchMediaResults]
+  );
+  const searchMediaMessageIds = useMemo(
+    () => searchMediaResults.map(item => Number(item.id)).filter(Number.isFinite),
+    [searchMediaResults]
+  );
+  const selectedSearchMediaIdsSet = useMemo(
+    () => new Set(selectedSearchMediaIds),
+    [selectedSearchMediaIds]
+  );
   const timelineFirstItemIndex = useMemo(
     () => Math.max(0, 100000 - timelineItems.length),
     [timelineItems.length]
@@ -340,6 +424,61 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, []);
 
   useEffect(() => {
+    const handleGlobalShortcuts = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && selectedChat) {
+        event.preventDefault();
+        setIsChatSearchOpen(true);
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      if (event.key === '/' && !isTyping) {
+        event.preventDefault();
+        if (selectedChat) setIsChatSearchOpen(true);
+        else setIsSearchOpen(true);
+        return;
+      }
+      if (event.key !== 'Escape') return;
+      setIsMenuOpen(false);
+      setIsSettingsMenuOpen(false);
+      setIsTopicDropdownOpen(false);
+      setMsgContextMenu(null);
+      setChatContextMenu(null);
+      setImgContextMenu(null);
+      setUserContextMenu(null);
+    };
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+  }, [selectedChat?.id]);
+
+  useEffect(() => {
+    appStorage.setBoolean(INFO_PANEL_KEY, infoOpen);
+  }, [infoOpen]);
+
+  useEffect(() => {
+    if (!selectedChat) return;
+    try {
+      const stored = appStorage.get(`${CHAT_SEARCH_FILTER_PREFIX}${selectedChat.id}`);
+      if (!stored) return;
+      const filters = JSON.parse(stored);
+      if (['all', 'media', 'photo', 'video', 'album'].includes(filters.media)) setChatSearchMediaFilter(filters.media);
+      if (typeof filters.sender === 'string') setChatSearchSenderFilter(filters.sender);
+      if (typeof filters.date === 'string') setChatSearchDateFilter(filters.date);
+    } catch {
+      appStorage.remove(`${CHAT_SEARCH_FILTER_PREFIX}${selectedChat.id}`);
+    }
+  }, [selectedChat?.id]);
+
+  useEffect(() => {
+    if (!selectedChat) return;
+    appStorage.set(`${CHAT_SEARCH_FILTER_PREFIX}${selectedChat.id}`, JSON.stringify({
+      media: chatSearchMediaFilter,
+      sender: chatSearchSenderFilter,
+      date: chatSearchDateFilter,
+    }));
+  }, [selectedChat?.id, chatSearchMediaFilter, chatSearchSenderFilter, chatSearchDateFilter]);
+
+  useEffect(() => {
     if (showDetailedProgress && progressDetailsListRef.current) {
       progressDetailsListRef.current.scrollTop = progressDetailsListRef.current.scrollHeight;
     }
@@ -359,6 +498,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     setVisibleMediaIds(new Set());
 
     if (selectedChat) {
+      appStorage.set(LAST_CHAT_KEY, selectedChat.id);
       shouldScrollToBottomRef.current = true;
       setIsDownloadModalOpen(false);
       setForumTopics([]);
@@ -377,6 +517,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setIsMenuOpen(false);
       setFullChatInfo(null);
       setSharedMedia([]);
+      setIsChatSearchOpen(false);
+      setChatMessageSearch('');
+      setChatSearchResultIndex(0);
+      setChatSearchMediaFilter('all');
+      setChatSearchSenderFilter('all');
+      setChatSearchDateFilter('');
       if (selectedChat.isInvite) {
         setFullChatInfo({
           about: selectedChat.about,
@@ -399,6 +545,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         }
       }
     } else {
+      if (restoredChatRef.current) appStorage.remove(LAST_CHAT_KEY);
       setMessages([]);
       setHasMoreMessages(false);
       setOldestMessageId(null);
@@ -413,6 +560,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setSelectedMessageIds([]);
       setIsCreatingTopic(false);
       setNewTopicTitle('');
+      setIsChatSearchOpen(false);
+      setChatMessageSearch('');
+      setChatSearchResultIndex(0);
+      setChatSearchMediaFilter('all');
+      setChatSearchSenderFilter('all');
+      setChatSearchDateFilter('');
     }
   }, [selectedChat?.id]);
 
@@ -494,6 +647,76 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [messages]);
 
   useEffect(() => {
+    setChatSearchResultIndex(0);
+    setRemoteChatSearchResults([]);
+    setRemoteChatSearchTotal(null);
+    setRemoteChatSearchNextFromMessageId(null);
+    setChatSearchError(null);
+  }, [chatMessageSearchTerm, selectedChat?.id, viewingTopic?.id]);
+
+  useEffect(() => {
+    if (!isChatSearchOpen || !selectedChat || !chatMessageSearchTerm) {
+      chatSearchSeqRef.current += 1;
+      setChatSearchLoading(false);
+      return;
+    }
+
+    const searchSeq = ++chatSearchSeqRef.current;
+    setChatSearchLoading(true);
+    setChatSearchError(null);
+    const timer = window.setTimeout(async () => {
+      try {
+        const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+        const res = await telegramService.searchChatMessages({
+          chatId: selectedChat.id,
+          query: chatMessageSearchTerm,
+          limit: 50,
+          topicId,
+          topicKind: viewingTopic?.kind,
+        });
+        if (searchSeq !== chatSearchSeqRef.current) return;
+        if (res?.success) {
+          const results = Array.isArray(res.messages) ? res.messages : [];
+          setRemoteChatSearchResults(results);
+          setRemoteChatSearchTotal(Number.isFinite(Number(res.totalCount)) ? Number(res.totalCount) : results.length);
+          setRemoteChatSearchNextFromMessageId(res.nextFromMessageId ?? null);
+          if (results.length) {
+            setMessages(current => {
+              const byId = new Map<number, Message>();
+              current.forEach(message => byId.set(Number(message.id), message));
+              results.forEach((message: Message) => byId.set(Number(message.id), message));
+              return Array.from(byId.values()).sort(compareTelegramMessages);
+            });
+          }
+        } else {
+          setRemoteChatSearchResults([]);
+          setRemoteChatSearchTotal(null);
+          setRemoteChatSearchNextFromMessageId(null);
+          setChatSearchError(res?.error || 'Falha ao buscar no histórico.');
+        }
+      } catch (caughtError) {
+        if (searchSeq !== chatSearchSeqRef.current) return;
+        setRemoteChatSearchResults([]);
+        setRemoteChatSearchTotal(null);
+        setRemoteChatSearchNextFromMessageId(null);
+        setChatSearchError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      } finally {
+        if (searchSeq === chatSearchSeqRef.current) setChatSearchLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isChatSearchOpen, selectedChat?.id, chatMessageSearchTerm, viewingTopic?.id, viewingTopic?.kind]);
+
+  useEffect(() => {
+    if (chatSearchResultIndex >= chatSearchResults.length) {
+      setChatSearchResultIndex(Math.max(0, chatSearchResults.length - 1));
+    }
+  }, [chatSearchResultIndex, chatSearchResults.length]);
+
+  useEffect(() => {
     if (!viewingTopic && !loadingTopics && selectedChat?.hasTopics && topicListRef.current) {
       topicListRef.current.scrollTop = topicListScrollRef.current;
     }
@@ -558,11 +781,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   }, [isSettingsMenuOpen]);
 
-  const fetchDialogs = async () => {
+  const fetchDialogs = async (limit = 250, loadingMore = false) => {
+    if (loadingMore) setLoadingMoreChats(true);
     try {
-      const res = await telegramService.getDialogs();
+      const res = await telegramService.getDialogs(limit);
       if (res.success && res.dialogs) {
         setChats(res.dialogs);
+        setHasMoreChats(Boolean(res.hasMore));
+        setChatLoadLimit(limit);
         const pendingFakeChatId = appStorage.get('plasma_twitter_pending_fake_chat');
         if (pendingFakeChatId) {
           const pendingChat = res.dialogs.find((chat: Chat) => chat.id === pendingFakeChatId);
@@ -571,6 +797,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             appStorage.remove('plasma_twitter_pending_fake_chat');
           }
         }
+        if (!restoredChatRef.current && !pendingFakeChatId) {
+          restoredChatRef.current = true;
+          const lastChatId = appStorage.get(LAST_CHAT_KEY);
+          const restoredChat = lastChatId ? res.dialogs.find((chat: Chat) => chat.id === lastChatId) : null;
+          if (restoredChat) setSelectedChat(restoredChat);
+        }
         // Preload only the first visible-ish window in the background.
         preloadAvatars(res.dialogs);
       }
@@ -578,9 +810,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     } catch (e: any) {
       setError(e.message || 'Unknown error');
     } finally {
-      setLoading(false);
+      if (loadingMore) setLoadingMoreChats(false);
+      else setLoading(false);
     }
   };
+
+  const loadMoreChats = useCallback(() => {
+    if (loadingMoreChats || !hasMoreChats) return;
+    void fetchDialogs(Math.min(chatLoadLimit + 250, 5000), true);
+  }, [chatLoadLimit, hasMoreChats, loadingMoreChats]);
 
   const preloadAvatars = async (dialogs: Chat[]) => {
     const BATCH_SIZE = 3;
@@ -637,13 +875,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       if (loadSeq !== topicsLoadSeqRef.current || String(selectedChatRef.current?.id) !== String(chat.id)) return;
       if (res.success && res.topics) {
         const seen = new Set<number>();
-        setForumTopics(res.topics.filter((topic: ForumTopic) => {
+        const nextTopics = res.topics.filter((topic: ForumTopic) => {
           if (topic.kind && topic.kind !== 'forum') return false;
           if (!Number.isFinite(Number(topic.id)) || Number(topic.id) <= 0) return false;
           if (seen.has(Number(topic.id))) return false;
           seen.add(Number(topic.id));
           return true;
-        }));
+        });
+        setForumTopics(nextTopics);
+        const savedTopicId = appStorage.get(`${LAST_TOPIC_PREFIX}${chat.id}`);
+        const savedTopic = savedTopicId && savedTopicId !== 'all'
+          ? nextTopics.find((topic: ForumTopic) => String(topic.id) === savedTopicId)
+          : null;
+        if (savedTopic) {
+          setViewingTopic(savedTopic);
+          setSelectedTopicId(String(savedTopic.id));
+          loadMessages(chat.id, 0, savedTopic.id, { refresh: true, topicKind: savedTopic.kind });
+        }
       } else if (!res.success) setError(res.error || 'Failed to fetch topics');
     } catch (e: any) {
       if (loadSeq === topicsLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chat.id)) {
@@ -671,6 +919,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic(topic);
     setSelectedTopicId(String(topic.id));
+    appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat!.id}`, String(topic.id));
     loadMessages(selectedChat!.id, 0, topic.id, { refresh: true, topicKind: topic.kind });
 
     if (topic.unreadCount > 0) {
@@ -684,6 +933,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleBackToTopics = () => {
     setViewingTopic(null);
     setSelectedTopicId('all');
+    if (selectedChat) appStorage.remove(`${LAST_TOPIC_PREFIX}${selectedChat.id}`);
     setMessages([]);
     setHasMoreMessages(false);
     setOldestMessageId(null);
@@ -693,6 +943,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic({ id: 0, title: 'Todos os tópicos', topMessageId: 0, unreadCount: 0, closed: false, pinned: false });
     setSelectedTopicId('all');
+    if (selectedChat) appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat.id}`, 'all');
     loadMessages(selectedChat!.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat?.lastMessageDate });
   };
 
@@ -766,7 +1017,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const handleSelectFolder = async () => {
     const res = await telegramService.selectFolder();
-    if (res.success && res.folderPath) setFolderPath(res.folderPath);
+    if (res.success && res.folderPath) {
+      setFolderPath(res.folderPath);
+      showDashboardToast({ tone: 'success', title: 'Pasta selecionada', message: res.folderPath });
+    }
   };
 
   const handleStartDownload = async () => {
@@ -806,8 +1060,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       .filter(msg => msg.hasMedia && normalizePeerId(msg.senderId) === normalizePeerId(userId))
       .map(msg => ({
         id: msg.id,
+        text: msg.text || '',
+        date: msg.date || 0,
+        out: msg.out,
+        senderId: msg.senderId,
+        senderName: msg.senderName || searchMediaUser?.senderName || null,
+        hasMedia: true,
+        isPhoto: msg.isPhoto,
         isVideo: msg.isVideo,
+        videoDuration: msg.videoDuration ?? null,
         mediaSize: msg.mediaSize ?? null,
+        thumbnailPath: msg.thumbnailPath ?? null,
+        thumbnailUrl: msg.thumbnailUrl ?? null,
+        groupedId: msg.groupedId ?? null,
       }));
     setSearchMediaResults(localMediaResults);
     try {
@@ -817,7 +1082,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         limit: 100
       });
       if (res.success && res.media) {
-        const merged = [...res.media, ...localMediaResults];
+        const nativeMediaResults = res.media.map((item: any) => ({
+          id: Number(item.id),
+          text: '',
+          date: Number(item.date || 0),
+          out: false,
+          senderId: item.senderId ? String(item.senderId) : userId,
+          senderName: item.senderName || searchMediaUser?.senderName || null,
+          hasMedia: item.hasMedia !== false,
+          isPhoto: Boolean(item.isPhoto ?? !item.isVideo),
+          isVideo: Boolean(item.isVideo),
+          mediaSize: item.mediaSize ?? null,
+          groupedId: item.groupedId ? String(item.groupedId) : null,
+        }));
+        const merged = [...nativeMediaResults, ...localMediaResults];
         const seen = new Set<number>();
         setSearchMediaResults(merged.filter(item => {
           if (seen.has(item.id)) return false;
@@ -835,10 +1113,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const handleBulkDownload = async (messageIds: number[]) => {
-    if (!selectedChat || !messageIds.length) return;
+    if (!selectedChat || !messageIds.length) return false;
 
     const folderRes = await telegramService.selectFolder();
-    if (!folderRes.success || !folderRes.folderPath) return;
+    if (!folderRes.success || !folderRes.folderPath) return false;
 
     setBulkDownloadActive(true);
     setBulkProgress({
@@ -854,10 +1132,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         messageIds,
         folderPath: folderRes.folderPath
       });
+      showDashboardToast({ tone: 'success', title: 'Download em lote iniciado', message: `${messageIds.length} mídias selecionadas.` });
+      return true;
     } catch (err) {
       debugWarn('Error during bulk download:', err);
       setBulkDownloadActive(false);
       setBulkProgress(null);
+      return false;
     }
   };
 
@@ -870,9 +1151,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
     try {
       const username = selectedChat.id.replace(/^twitter_profile_/, '');
+      const twitterCookies = await loadStoredTwitterCookies();
       const profile = await invoke('analyze_twitter_profile_native', {
         url: `https://x.com/${username}`,
-        cookies: getStoredTwitterCookies().trim() || null,
+        cookies: twitterCookies.trim() || null,
       });
       const res = updateTwitterProfileChat(profile);
       if (!res.success) {
@@ -908,7 +1190,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleSelectFile = async () => {
     if (selectedChat?.canSendMedia === false) return;
     const res = await telegramService.selectFile();
-    if (res.success && res.filePath) setSelectedFile({ filePath: res.filePath, fileName: res.fileName! });
+    if (res.success && res.filePath) {
+      setSelectedFile({ filePath: res.filePath, fileName: res.fileName! });
+      showDashboardToast({ tone: 'info', title: 'Arquivo anexado', message: res.fileName });
+    }
   };
 
   const handleSend = async () => {
@@ -955,6 +1240,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       }
 
       if (res.success) {
+        showDashboardToast({
+          tone: 'success',
+          title: fileToSend ? 'Mídia enviada' : 'Mensagem enviada',
+        });
         shouldScrollToBottomRef.current = true;
         // Refresh messages silently in background
         loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
@@ -1125,6 +1414,99 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
+  const findTimelineIndexForMessage = useCallback((targetMsgId: number) => {
+    return timelineItems.findIndex(item => {
+      if (Number(item.message.id) === Number(targetMsgId)) return true;
+      return item.messages?.some(message => Number(message.id) === Number(targetMsgId)) ?? false;
+    });
+  }, [timelineItems]);
+
+  const jumpToLoadedMessage = useCallback((targetMsgId: number) => {
+    const timelineIndex = findTimelineIndexForMessage(targetMsgId);
+    if (timelineIndex < 0) return false;
+    triggerJumpScroll(targetMsgId, timelineFirstItemIndex + timelineIndex);
+    return true;
+  }, [findTimelineIndexForMessage, timelineFirstItemIndex]);
+
+  const jumpToChatSearchResult = useCallback((nextIndex: number) => {
+    const result = chatSearchResults[nextIndex];
+    if (!result) return;
+    setChatSearchResultIndex(nextIndex);
+    jumpToLoadedMessage(Number(result.id));
+  }, [chatSearchResults, jumpToLoadedMessage]);
+
+  useEffect(() => {
+    if (!isChatSearchOpen || !chatMessageSearchTerm || !activeChatSearchResult) return;
+    jumpToLoadedMessage(Number(activeChatSearchResult.id));
+  }, [isChatSearchOpen, chatMessageSearchTerm, activeChatSearchResult?.id, jumpToLoadedMessage]);
+
+  const loadMoreChatSearchResults = useCallback(async () => {
+    if (!selectedChat || !chatMessageSearchTerm || !remoteChatSearchNextFromMessageId || chatSearchLoading) return false;
+    const searchSeq = ++chatSearchSeqRef.current;
+    setChatSearchLoading(true);
+    setChatSearchError(null);
+    try {
+      const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+      const res = await telegramService.searchChatMessages({
+        chatId: selectedChat.id,
+        query: chatMessageSearchTerm,
+        limit: 50,
+        fromMessageId: remoteChatSearchNextFromMessageId,
+        topicId,
+        topicKind: viewingTopic?.kind,
+      });
+      if (searchSeq !== chatSearchSeqRef.current) return false;
+      if (!res?.success) {
+        setChatSearchError(res?.error || 'Falha ao buscar mais resultados.');
+        return false;
+      }
+      const nextResults = Array.isArray(res.messages) ? res.messages : [];
+      setRemoteChatSearchResults(current => {
+        const byId = new Map<number, Message>();
+        current.forEach(message => byId.set(Number(message.id), message));
+        nextResults.forEach((message: Message) => byId.set(Number(message.id), message));
+        return Array.from(byId.values()).sort(compareTelegramMessages);
+      });
+      setRemoteChatSearchTotal(Number.isFinite(Number(res.totalCount)) ? Number(res.totalCount) : remoteChatSearchTotal);
+      setRemoteChatSearchNextFromMessageId(res.nextFromMessageId ?? null);
+      if (nextResults.length) {
+        setMessages(current => {
+          const byId = new Map<number, Message>();
+          current.forEach(message => byId.set(Number(message.id), message));
+          nextResults.forEach((message: Message) => byId.set(Number(message.id), message));
+          return Array.from(byId.values()).sort(compareTelegramMessages);
+        });
+      }
+      return nextResults.length > 0;
+    } catch (caughtError) {
+      if (searchSeq === chatSearchSeqRef.current) {
+        setChatSearchError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      }
+      return false;
+    } finally {
+      if (searchSeq === chatSearchSeqRef.current) setChatSearchLoading(false);
+    }
+  }, [selectedChat?.id, chatMessageSearchTerm, remoteChatSearchNextFromMessageId, chatSearchLoading, viewingTopic?.id, viewingTopic?.kind, remoteChatSearchTotal]);
+
+  const goToPreviousChatSearchResult = useCallback(() => {
+    if (!chatSearchResults.length) return;
+    const nextIndex = (chatSearchResultIndex - 1 + chatSearchResults.length) % chatSearchResults.length;
+    jumpToChatSearchResult(nextIndex);
+  }, [chatSearchResultIndex, chatSearchResults.length, jumpToChatSearchResult]);
+
+  const goToNextChatSearchResult = useCallback(async () => {
+    if (!chatSearchResults.length) return;
+    if (chatSearchResultIndex === chatSearchResults.length - 1 && remoteChatSearchNextFromMessageId) {
+      const loadedMore = await loadMoreChatSearchResults();
+      if (loadedMore) {
+        setChatSearchResultIndex(chatSearchResults.length);
+        return;
+      }
+    }
+    const nextIndex = (chatSearchResultIndex + 1) % chatSearchResults.length;
+    jumpToChatSearchResult(nextIndex);
+  }, [chatSearchResultIndex, chatSearchResults.length, remoteChatSearchNextFromMessageId, loadMoreChatSearchResults, jumpToChatSearchResult]);
+
   const handleJumpToMessage = async (replyToMsgId: number) => {
     let currentMessages = [...messagesRef.current];
     debugLog('[TelegramEnchanted] Jump to Message triggered. Target replyToMsgId:', replyToMsgId);
@@ -1244,6 +1626,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         : [...prevIds, messageId]
     );
   }, []);
+  const handleToggleSearchMedia = useCallback((messageId: number) => {
+    setSelectedSearchMediaIds(currentIds =>
+      currentIds.includes(messageId)
+        ? currentIds.filter(id => id !== messageId)
+        : [...currentIds, messageId]
+    );
+  }, []);
+  const handleToggleSearchMediaAlbum = useCallback((albumMessageIds: number[]) => {
+    setSelectedSearchMediaIds(currentIds => {
+      const currentSet = new Set(currentIds);
+      const isAlbumSelected = albumMessageIds.every(id => currentSet.has(id));
+      if (isAlbumSelected) return currentIds.filter(id => !albumMessageIds.includes(id));
+      albumMessageIds.forEach(id => currentSet.add(id));
+      return Array.from(currentSet);
+    });
+  }, []);
+  const closeSearchMediaModal = useCallback(() => {
+    setSearchMediaUser(null);
+    setIsSearchMediaSelectionMode(false);
+    setSelectedSearchMediaIds([]);
+  }, []);
   const handleShowEmojiPicker = useCallback((messageId: number, rect: DOMRect) => {
     const pickerHeight = 300;
     const y = (rect.bottom + pickerHeight > window.innerHeight)
@@ -1261,9 +1664,42 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleJumpToMessageStable = useCallback((messageId: number) => {
     handleJumpToMessageRef.current(messageId);
   }, []);
-  const handleBulkDownloadStable = useCallback((messageIds: number[]) => {
-    handleBulkDownloadRef.current(messageIds);
-  }, []);
+  const handleBulkDownloadStable = useCallback((messageIds: number[]) => handleBulkDownloadRef.current(messageIds), []);
+  const handleCopySelected = useCallback(async (messageIds: number[]) => {
+    const selectedMessages = messageIds.map(id => messagesById.get(id)).filter(Boolean) as Message[];
+    const text = selectedMessages
+      .map(message => [message.senderName, message.text].filter(Boolean).join(': '))
+      .filter(Boolean)
+      .join('\n\n');
+    await writeClipboardText(text || `${selectedMessages.length} mídias selecionadas`);
+    showDashboardToast({ tone: 'success', title: 'Conteúdo copiado', message: `${selectedMessages.length} itens selecionados.` });
+  }, [messagesById, showDashboardToast]);
+  const handleForwardSelected = useCallback(async (messageIds: number[]) => {
+    if (!selectedChat || isSending) return;
+    setIsSending(true);
+    setError('');
+    try {
+      const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+      for (const messageId of messageIds) {
+        const result = await telegramService.forwardMessage({
+          chatId: selectedChat.id,
+          messageId,
+          topicId,
+          topicKind: viewingTopic?.kind,
+        });
+        if (!result.success) throw new Error(result.error || 'Falha ao encaminhar uma das mensagens.');
+      }
+      shouldScrollToBottomRef.current = true;
+      await loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind: viewingTopic?.kind });
+      showDashboardToast({ tone: 'success', title: 'Mensagens encaminhadas', message: `${messageIds.length} itens enviados para este chat.` });
+      setIsSelectionMode(false);
+      setSelectedMessageIds([]);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setIsSending(false);
+    }
+  }, [selectedChat?.id, viewingTopic?.id, viewingTopic?.kind, isSending, showDashboardToast]);
   const handleSelectFolderStable = useCallback(() => {
     handleSelectFolderRef.current();
   }, []);
@@ -1309,16 +1745,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [selectedChat?.id, canSendMessages, canSendMedia]);
 
   if (loading) return (
-    <div className="full-screen-loader fade-in">
-      <div className="loader-content">
-        <div className="modern-loader" role="status" aria-label="Carregando conversas" />
-      </div>
+    <div className="full-screen-loader initial-dashboard-loader fade-in">
+      <InitialDashboardSkeleton />
     </div>
   );
 
   return (
     <>
       <div className={`app ${selectedChat ? 'has-selected-chat' : ''}`} data-palette={palette} data-density={density}>
+        {dashboardToast && (
+          <button
+            type="button"
+            className={`dashboard-toast ${dashboardToast.tone}`}
+            onClick={() => setDashboardToast(null)}
+            aria-live="polite"
+          >
+            <strong>{dashboardToast.title}</strong>
+            {dashboardToast.message && <span>{dashboardToast.message}</span>}
+          </button>
+        )}
 
         <DashboardChatList
           activeFolder={activeFolder}
@@ -1329,12 +1774,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           isSearchOpen={isSearchOpen}
           isSettingsMenuOpen={isSettingsMenuOpen}
           loading={loading}
+          loadingMore={loadingMoreChats}
+          hasMoreChats={hasMoreChats}
           selectedChat={selectedChat}
           skipLogin={skipLogin}
           unreadChatsCount={unreadChatsCount}
           formatMessageTime={formatMessageTime}
           getChatKind={getChatKind}
           onTelegramLoginRequest={onTelegramLoginRequest}
+          onLoadMoreChats={loadMoreChats}
           readChatHistory={readChatHistory}
           setActiveFolder={setActiveFolder}
           setChatContextMenu={setChatContextMenu}
@@ -1444,6 +1892,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     </button>
                   )}
                   <button
+                    className={`icon-btn ${isChatSearchOpen ? 'active' : ''}`}
+                    onClick={() => {
+                      setIsChatSearchOpen(value => !value);
+                      if (isChatSearchOpen) {
+                        setChatMessageSearch('');
+                        setChatSearchResultIndex(0);
+                      }
+                    }}
+                    title={isChatSearchOpen ? 'Fechar busca no chat' : 'Buscar no chat'}
+                  >
+                    <IconSearch />
+                  </button>
+                  <button
                     className={`icon-btn ${infoOpen ? 'active' : ''}`}
                     onClick={() => setInfoOpen(v => !v)}
                     title="Painel de informações"
@@ -1480,10 +1941,106 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       </div>
                     )}
                   </div>
-                </div>
-              </div>
+	                </div>
+	              </div>
 
-              {/* Panels */}
+	              {isChatSearchOpen && (
+	                <div className="chat-message-search-bar">
+	                  <div className="chat-message-search-input">
+	                    <IconSearch />
+	                    <input
+	                      autoFocus
+	                      type="text"
+	                      value={chatMessageSearch}
+		                      placeholder="Buscar no histórico do chat..."
+	                      onChange={event => setChatMessageSearch(event.target.value)}
+	                      onKeyDown={event => {
+	                        if (event.key === 'Enter') {
+	                          event.preventDefault();
+	                          if (event.shiftKey) goToPreviousChatSearchResult();
+	                          else goToNextChatSearchResult();
+	                        }
+	                        if (event.key === 'Escape') {
+	                          setIsChatSearchOpen(false);
+	                          setChatMessageSearch('');
+	                        }
+	                      }}
+	                    />
+	                  </div>
+	                  <select
+	                    className="chat-message-search-filter"
+	                    value={chatSearchMediaFilter}
+	                    onChange={event => setChatSearchMediaFilter(event.target.value as typeof chatSearchMediaFilter)}
+	                    aria-label="Filtrar busca por mídia"
+	                  >
+	                    <option value="all">Tudo</option>
+	                    <option value="media">Com mídia</option>
+	                    <option value="photo">Fotos</option>
+	                    <option value="video">Vídeos</option>
+	                    <option value="album">Álbuns</option>
+	                  </select>
+	                  <select
+	                    className="chat-message-search-filter sender"
+	                    value={chatSearchSenderFilter}
+	                    onChange={event => setChatSearchSenderFilter(event.target.value)}
+	                    aria-label="Filtrar busca por usuário"
+	                  >
+	                    <option value="all">Todos usuários</option>
+	                    {chatSearchSenderOptions.map(([senderId, senderName]) => (
+	                      <option key={senderId} value={senderId}>{senderName}</option>
+	                    ))}
+	                  </select>
+	                  <input
+	                    className="chat-message-search-date"
+	                    type="date"
+	                    value={chatSearchDateFilter}
+	                    onChange={event => setChatSearchDateFilter(event.target.value)}
+	                    aria-label="Filtrar busca por data"
+	                  />
+		                  <span className="chat-message-search-count">
+		                    {chatSearchLoading
+		                      ? 'Buscando...'
+		                      : chatSearchError
+		                        ? 'Erro'
+		                        : chatMessageSearchTerm
+		                          ? chatSearchResults.length
+		                            ? `${chatSearchResultIndex + 1}/${remoteChatSearchTotal || chatSearchResults.length}`
+		                            : '0 resultados'
+		                          : `${messages.length} mensagens`}
+		                  </span>
+	                  <button
+	                    type="button"
+	                    className="icon-btn"
+	                    disabled={!chatSearchResults.length}
+	                    onClick={goToPreviousChatSearchResult}
+	                    title="Resultado anterior"
+	                  >
+	                    ↑
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="icon-btn"
+	                    disabled={!chatSearchResults.length}
+	                    onClick={goToNextChatSearchResult}
+	                    title="Próximo resultado"
+	                  >
+	                    ↓
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="icon-btn"
+	                    onClick={() => {
+	                      setIsChatSearchOpen(false);
+	                      setChatMessageSearch('');
+	                    }}
+	                    title="Fechar busca"
+	                  >
+	                    ×
+	                  </button>
+	                </div>
+	              )}
+
+	              {/* Panels */}
               <div className="convo-panels">
                 {isDownloadModalOpen && (
                   <DashboardMassDownloadPanel
@@ -1555,11 +2112,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 /* Topic list */
                 <div className="topic-list-panel" ref={topicListRef} onClick={() => isMenuOpen && setIsMenuOpen(false)}>
                   {loadingTopics ? (
-                    <div className="loader-surface" role="status" aria-label="Carregando tópicos">
-                      <span className="modern-loader small" />
-                    </div>
+                    <TopicListSkeleton />
                   ) : forumTopics.length === 0 ? (
-                    <div className="messages-empty">Nenhum tópico encontrado.</div>
+                    <div className="dashboard-empty-state">
+                      <div className="dashboard-empty-icon">#</div>
+                      <h3>Nenhum tópico encontrado</h3>
+                      <p>Este grupo foi marcado como tópico, mas o Telegram não retornou tópicos válidos.</p>
+                    </div>
                   ) : (
                     <>
                       <div className="topic-search-row">
@@ -1607,11 +2166,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   <div className="timeline-bg" />
                   <div className="timeline-bg-overlay" />
                   {loadingMessages && messages.length === 0 ? (
-                    <div className="loader-surface" style={{ zIndex: 1 }} role="status" aria-label="Carregando mensagens">
-                      <span className="modern-loader small" />
-                    </div>
+                    <MessageListSkeleton />
                   ) : messages.length === 0 ? (
-                    <div className="messages-empty" style={{ zIndex: 1 }}>Nenhuma mensagem encontrada.</div>
+                    <div className="dashboard-empty-state timeline-empty">
+                      <div className="dashboard-empty-icon">{viewingTopic ? '#' : '∅'}</div>
+                      <h3>{viewingTopic ? 'Tópico sem mensagens' : 'Nenhuma mensagem encontrada'}</h3>
+                      <p>{viewingTopic ? 'Ainda não há mensagens carregadas neste tópico.' : 'O histórico deste chat ainda não retornou mensagens.'}</p>
+                    </div>
                   ) : (
                     <Virtuoso
                       ref={virtuosoRef}
@@ -1624,13 +2185,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       itemContent={(index, item) => {
                         const dataIndex = index - timelineFirstItemIndex;
                         const prevItem = timelineItems[dataIndex - 1];
-                        const mediaIds = item.type === 'album'
-                          ? (item.messages || []).filter(message => message.hasMedia).map(message => Number(message.id))
-                          : item.message.hasMedia ? [Number(item.message.id)] : [];
-                        const selectedMediaIdsKey = mediaIds.filter(id => selectedMessageIdsSet.has(id)).join('|');
-                        const visibleMediaIdsKey = mediaIds.filter(id => visibleMediaIds.has(id)).join('|');
+	                        const mediaIds = item.type === 'album'
+	                          ? (item.messages || []).filter(message => message.hasMedia).map(message => Number(message.id))
+	                          : item.message.hasMedia ? [Number(item.message.id)] : [];
+	                        const selectedMediaIdsKey = mediaIds.filter(id => selectedMessageIdsSet.has(id)).join('|');
+	                        const visibleMediaIdsKey = mediaIds.filter(id => visibleMediaIds.has(id)).join('|');
+	                        const isSearchHighlighted = activeChatSearchResult
+	                          ? Number(item.message.id) === Number(activeChatSearchResult.id)
+	                            || Boolean(item.messages?.some(message => Number(message.id) === Number(activeChatSearchResult.id)))
+	                          : false;
 
-                        return selectedChat ? (
+	                        return selectedChat ? (
                           <TimelineMessageItem
                             key={item.id}
                             item={item}
@@ -1639,7 +2204,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                             palette={palette}
                             density={density}
                             isSelectionMode={isSelectionMode}
-                            isHighlighted={highlightedMsgId === item.message.id}
+	                            isHighlighted={highlightedMsgId === item.message.id || isSearchHighlighted}
                             selectedMediaIdsKey={selectedMediaIdsKey}
                             visibleMediaIdsKey={visibleMediaIdsKey}
                             repliedMessage={item.message.replyToMsgId ? messagesById.get(Number(item.message.replyToMsgId)) : undefined}
@@ -1668,7 +2233,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               {isSelectionMode ? (
                 <SelectionActionBar
                   selectedMessageIds={selectedMessageIds}
+                  selectableMediaIds={selectableMediaIds}
+                  bulkDownloadActive={bulkDownloadActive}
+                  bulkProgress={bulkProgress}
                   handleBulkDownload={handleBulkDownloadStable}
+                  handleCopySelected={handleCopySelected}
+                  handleForwardSelected={handleForwardSelected}
                   setIsSelectionMode={setIsSelectionMode}
                   setSelectedMessageIds={setSelectedMessageIds}
                 />
@@ -1917,15 +2487,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             {
               label: 'Salvar como...',
               icon: <IconDownload />,
-              onClick: () => telegramService.saveMessageMediaFile({
-                chatId: selectedChat.id,
-                messageId: imgContextMenu.msg.id,
-                saveAs: true,
-                downloadMeta: getDownloadMeta(
-                  imgContextMenu.msg,
-                  imgContextMenu.msg.out ? 'Você' : imgContextMenu.msg.senderName || undefined
-                ),
-              }),
+              onClick: async () => {
+                const result = await telegramService.saveMessageMediaFile({
+                  chatId: selectedChat.id,
+                  messageId: imgContextMenu.msg.id,
+                  saveAs: true,
+                  downloadMeta: getDownloadMeta(
+                    imgContextMenu.msg,
+                    imgContextMenu.msg.out ? 'Você' : imgContextMenu.msg.senderName || undefined
+                  ),
+                });
+                if (result?.success) showDashboardToast({ tone: 'success', title: 'Mídia salva', message: result.filePath || undefined });
+              },
             },
             { separator: true },
             {
@@ -1955,6 +2528,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               onClick: () => {
                 const { senderId, senderName } = userContextMenu;
                 setUserContextMenu(null);
+                setIsSearchMediaSelectionMode(false);
+                setSelectedSearchMediaIds([]);
                 setSearchMediaUser({ senderId, senderName });
                 triggerUserMediaSearch(senderId);
               },
@@ -1964,7 +2539,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         />
       )}
       {searchMediaUser && selectedChat && (
-        <div className="search-media-modal-overlay" onClick={() => setSearchMediaUser(null)}>
+        <div className="search-media-modal-overlay" onClick={closeSearchMediaModal}>
           <div className="search-media-modal" onClick={e => e.stopPropagation()}>
             <div className="search-media-modal-header">
               <div className="search-media-user-info">
@@ -1972,20 +2547,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 <span className="search-media-subtitle">por {searchMediaUser.senderName}</span>
               </div>
               <div className="search-media-header-actions">
-                {searchMediaResults.length > 0 && (
+                {searchMediaResults.length > 0 && !isSearchMediaSelectionMode && (
                   <button
                     className="btn-download-all"
-                    onClick={() => handleBulkDownload(searchMediaResults.map(r => r.id))}
+                    onClick={() => handleBulkDownload(searchMediaMessageIds)}
                     title="Baixar todas as mídias da lista"
                   >
                     <IconDownload />
-                    <span>Baixar Todos ({searchMediaResults.length})</span>
+                    <span>Baixar Todos ({searchMediaMessageIds.length})</span>
                   </button>
                 )}
-                <button className="icon-btn close-btn" onClick={() => setSearchMediaUser(null)}>✕</button>
+                {searchMediaResults.length > 0 && (
+                  <button
+                    className={`search-media-selection-toggle ${isSearchMediaSelectionMode ? 'active' : ''}`}
+                    onClick={() => {
+                      setIsSearchMediaSelectionMode(current => !current);
+                      setSelectedSearchMediaIds([]);
+                    }}
+                    aria-pressed={isSearchMediaSelectionMode}
+                  >
+                    <IconCheck />
+                    <span>{isSearchMediaSelectionMode ? 'Sair da seleção' : 'Selecionar'}</span>
+                  </button>
+                )}
+                <button className="icon-btn close-btn" onClick={closeSearchMediaModal}>✕</button>
               </div>
             </div>
-            <div className="search-media-modal-body">
+            <div className={`search-media-modal-body ${isSearchMediaSelectionMode ? 'is-selection-mode' : ''}`}>
               {searchMediaLoading ? (
                 <div className="search-media-loading-state">
                   <div className="premium-spinner"></div>
@@ -1994,35 +2582,133 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               ) : searchMediaResults.length === 0 ? (
                 null
               ) : (
-                <VirtuosoGrid
-                  className="search-media-virtual-grid"
-                  data={searchMediaResults}
-                  computeItemKey={(_, item) => item.id}
-                  components={{
-                    List: React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>((props, ref) => (
-                      <div {...props} ref={ref} className="search-media-grid" />
-                    )),
-                    Item: ({ children, ...props }) => (
-                      <div {...props} className="search-media-grid-item">
-                        {children}
+                <div className="search-media-mixed-grid">
+                  {searchMediaTimelineItems.map(item => {
+                    if (item.type === 'album') {
+                      const albumMessages = item.messages || [];
+                      const albumMessageIds = albumMessages.map(message => Number(message.id));
+                      const selectedAlbumCount = albumMessageIds.filter(id => selectedSearchMediaIdsSet.has(id)).length;
+                      const albumMedias = albumMessages.map(message => ({
+                        id: message.id,
+                        isVideo: message.isVideo,
+                        videoDuration: message.videoDuration,
+                        messageDate: message.date,
+                        mediaSize: message.mediaSize,
+                      }));
+                      return (
+                        <div key={item.id} className="search-media-album-card">
+                          <div className="search-media-album-header">
+                            <div>
+                              <span>Álbum</span>
+                              <strong>{albumMessages.length} mídias</strong>
+                            </div>
+                            {isSearchMediaSelectionMode && (
+                              <button
+                                className={selectedAlbumCount === albumMessageIds.length ? 'active' : ''}
+                                onClick={() => handleToggleSearchMediaAlbum(albumMessageIds)}
+                              >
+                                {selectedAlbumCount === albumMessageIds.length
+                                  ? 'Desmarcar álbum'
+                                  : selectedAlbumCount > 0
+                                    ? `Selecionar álbum (${selectedAlbumCount}/${albumMessageIds.length})`
+                                    : 'Selecionar álbum'}
+                              </button>
+                            )}
+                          </div>
+                          <div className={`album-grid album-grid-${Math.min(9, albumMessages.length)}`}>
+                            {albumMessages.map(albumMsg => (
+                              <div
+                                key={albumMsg.id}
+                                className={`album-grid-item msg-media ${selectedSearchMediaIdsSet.has(Number(albumMsg.id)) ? 'media-selected' : ''}`}
+                                onClick={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(albumMsg.id)) : undefined}
+                              >
+                                <MessageMedia
+                                  chatId={selectedChat.id}
+                                  messageId={albumMsg.id}
+                                  isVideo={albumMsg.isVideo}
+                                  videoDuration={albumMsg.videoDuration}
+                                  messageDate={albumMsg.date}
+                                  mediaSize={albumMsg.mediaSize}
+                                  thumbnailUrl={albumMsg.thumbnailUrl}
+                                  palette={palette}
+                                  density={density}
+                                  downloadMeta={getDownloadMeta(albumMsg, albumMsg.senderName || searchMediaUser.senderName)}
+                                  albumMedias={albumMedias}
+                                  selectionMode={isSearchMediaSelectionMode}
+                                  onClickOverride={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(albumMsg.id)) : undefined}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const message = item.message;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`search-media-grid-item msg-media ${selectedSearchMediaIdsSet.has(Number(message.id)) ? 'media-selected' : ''}`}
+                        onClick={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(message.id)) : undefined}
+                      >
+                        <MessageMedia
+                          chatId={selectedChat.id}
+                          messageId={message.id}
+                          isVideo={message.isVideo}
+                          videoDuration={message.videoDuration}
+                          messageDate={message.date}
+                          mediaSize={message.mediaSize}
+                          thumbnailUrl={message.thumbnailUrl}
+                          palette={palette}
+                          density={density}
+                          downloadMeta={getDownloadMeta(message, message.senderName || searchMediaUser.senderName)}
+                          selectionMode={isSearchMediaSelectionMode}
+                          onClickOverride={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(message.id)) : undefined}
+                        />
                       </div>
-                    ),
-                  }}
-                  itemContent={(_, item) => (
-                      <MessageMedia
-                        chatId={selectedChat.id}
-                        messageId={item.id}
-                        isVideo={item.isVideo}
-                        mediaSize={item.mediaSize}
-                        thumbnailUrl={item.thumbnailUrl}
-                        palette={palette}
-                        density={density}
-                        downloadMeta={getDownloadMeta(item as Message)}
-                      />
-                  )}
-                />
+                    );
+                  })}
+                </div>
               )}
             </div>
+            {isSearchMediaSelectionMode && (
+              <div className="search-media-selection-bar">
+                <div className="search-media-selection-summary">
+                  <strong>{selectedSearchMediaIds.length}</strong>
+                  <span>{selectedSearchMediaIds.length === 1 ? 'mídia selecionada' : 'mídias selecionadas'}</span>
+                </div>
+                <div className="search-media-selection-actions">
+                  <button
+                    className="btn-selection-secondary"
+                    disabled={selectedSearchMediaIds.length === searchMediaMessageIds.length}
+                    onClick={() => setSelectedSearchMediaIds(searchMediaMessageIds)}
+                  >
+                    Selecionar tudo
+                  </button>
+                  <button
+                    className="btn-selection-secondary"
+                    disabled={selectedSearchMediaIds.length === 0}
+                    onClick={() => setSelectedSearchMediaIds([])}
+                  >
+                    Limpar
+                  </button>
+                  <button
+                    className="btn-download-selected"
+                    disabled={selectedSearchMediaIds.length === 0 || bulkDownloadActive}
+                    onClick={async () => {
+                      const started = await handleBulkDownload(selectedSearchMediaIds);
+                      if (started) {
+                        setIsSearchMediaSelectionMode(false);
+                        setSelectedSearchMediaIds([]);
+                      }
+                    }}
+                  >
+                    <IconDownload />
+                    <span>{bulkDownloadActive ? 'Baixando...' : `Baixar (${selectedSearchMediaIds.length})`}</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

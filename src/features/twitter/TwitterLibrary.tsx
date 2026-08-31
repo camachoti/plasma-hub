@@ -6,7 +6,7 @@ import { analyzeUrl, downloadMedia } from '../downloader/downloader';
 import { downloadService, type DownloadItem } from '../downloader/DownloadService';
 import type { MediaInfo } from '../downloader/types';
 import { createTwitterProfileChat } from '../telegram/TwitterFakeChatStore';
-import { getStoredTwitterCookies, onTwitterSettingsChanged } from './TwitterSettingsStore';
+import { getStoredTwitterCookies, loadStoredTwitterCookies, onTwitterSettingsChanged } from './TwitterSettingsStore';
 import '../../styles/TwitterLibrary.css';
 
 interface TwitterProfileInfo {
@@ -26,17 +26,26 @@ interface TwitterProfileInfo {
 }
 
 function getTwitterProfileUsername(input: string): string | null {
+  const cleanInput = input.trim();
+  const handleMatch = cleanInput.match(/^@([A-Za-z0-9_]{1,15})$/);
+  if (handleMatch) return handleMatch[1];
+  if (/^[A-Za-z0-9_]{1,15}$/.test(cleanInput)) return cleanInput;
+
   try {
-    const parsed = new URL(input);
+    const parsed = new URL(cleanInput);
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
     if (host !== 'x.com' && host !== 'twitter.com') return null;
     const parts = parsed.pathname.split('/').filter(Boolean);
     if (parts.length !== 1) return null;
     return /^[A-Za-z0-9_]{1,15}$/.test(parts[0]) ? parts[0] : null;
   } catch {
-    const match = input.match(/(?:x\.com|twitter\.com)\/([A-Za-z0-9_]{1,15})\/?$/);
+    const match = cleanInput.match(/(?:x\.com|twitter\.com)\/([A-Za-z0-9_]{1,15})\/?$/);
     return match?.[1] ?? null;
   }
+}
+
+function toTwitterProfileUrl(username: string): string {
+  return `https://x.com/${username}`;
 }
 
 export function TwitterLibrary() {
@@ -60,6 +69,9 @@ export function TwitterLibrary() {
   }, []);
 
   useEffect(() => onTwitterSettingsChanged(() => setCookies(getStoredTwitterCookies())), []);
+  useEffect(() => {
+    loadStoredTwitterCookies().then(setCookies).catch(() => {});
+  }, []);
 
   async function handleAnalyze() {
     const cleanUrl = url.trim();
@@ -72,10 +84,12 @@ export function TwitterLibrary() {
     setSelectedFormat('');
 
     try {
-      if (getTwitterProfileUsername(cleanUrl)) {
+      const currentCookies = await loadStoredTwitterCookies();
+      const profileUsername = getTwitterProfileUsername(cleanUrl);
+      if (profileUsername) {
         const info = await invoke<TwitterProfileInfo>('analyze_twitter_profile_native', {
-          url: cleanUrl,
-          cookies: cookies.trim() || null,
+          url: toTwitterProfileUrl(profileUsername),
+          cookies: currentCookies.trim() || null,
         });
         setProfile(info);
         return;
@@ -128,24 +142,38 @@ export function TwitterLibrary() {
       status: 'downloading',
       platform: 'twitter',
       thumbnailUrl: profile.thumbnailUrl || profile.avatarUrl,
+    }, {
+      cancel: async () => {
+        await invoke<boolean>('cancel_native_download', { id: downloadId });
+        downloadService.updateDownload(downloadId, {
+          status: 'canceled',
+          progress: 0,
+          error: 'Cancelado pelo usuário.',
+        });
+      },
+      retry: () => handleProfileDownload(),
     });
 
+    const unlisteners: Array<() => void> = [];
     try {
       const unlistenProgress = await listen<{id: string, progress: number}>('twitter-download-progress', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { progress: e.payload.progress });
         }
       });
+      unlisteners.push(unlistenProgress);
       const unlistenDone = await listen<{id: string}>('twitter-download-done', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
         }
       });
+      unlisteners.push(unlistenDone);
       const unlistenError = await listen<{id: string, error: string}>('twitter-download-error', (e) => {
         if (e.payload.id === downloadId) {
           downloadService.updateDownload(downloadId, { status: 'failed', error: e.payload.error });
         }
       });
+      unlisteners.push(unlistenError);
 
       await invoke('download_twitter_profile_native', {
         id: downloadId,
@@ -154,13 +182,13 @@ export function TwitterLibrary() {
         cookies: cookies.trim() || null,
       });
 
-      unlistenProgress();
-      unlistenDone();
-      unlistenError();
     } catch (err: any) {
+      if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
       downloadService.updateDownload(downloadId, { status: 'failed', error: err?.message || String(err) });
       setError(err?.message || 'Falha ao baixar mídias do perfil.');
     } finally {
+      unlisteners.forEach(unlisten => unlisten());
+      downloadService.clearActions(downloadId, ['cancel']);
       setDownloading(false);
     }
   }
@@ -203,7 +231,7 @@ export function TwitterLibrary() {
         <div className="twitter-content">
           <section className="twitter-panel twitter-tweet-tool">
             <div className="twitter-tool-header">
-              <label htmlFor="twitter-url">URL do tweet/status</label>
+              <label htmlFor="twitter-url">URL do tweet/status ou @perfil</label>
               {cookies.trim() && (
                 <span className="twitter-cookies-saved">Cookies configurados</span>
               )}
@@ -216,7 +244,7 @@ export function TwitterLibrary() {
                   value={url}
                   onChange={event => setUrl(event.target.value)}
                   onKeyDown={event => event.key === 'Enter' && handleAnalyze()}
-                  placeholder="https://x.com/usuario/status/123456789"
+                  placeholder="https://x.com/usuario/status/123456789 ou @usuario"
                 />
               </div>
               <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()}>

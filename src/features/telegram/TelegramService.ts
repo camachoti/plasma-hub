@@ -682,6 +682,10 @@ class TelegramService {
     return this.tdlibBridge.onAuthState(cb);
   }
 
+  onTdlibConnectionState(cb: (state: string) => void) {
+    return this.tdlibBridge.onConnectionState(cb);
+  }
+
   onTdlibDownloadProgress(cb: (data: any) => void) {
     return this.tdlibBridge.onDownloadProgress(cb);
   }
@@ -722,14 +726,14 @@ class TelegramService {
     return { success: false, error: 'TDLib nativo indisponível.' };
   }
 
-  async getDialogs() {
+  async getDialogs(limit = 250) {
     const fakeDialogs = twitterFakeDialogs();
     if (this.skipLogin) return { success: true, dialogs: fakeDialogs };
 
     if (this.useTdlibOnly()) {
       try {
         await this.tdlibInit();
-        const nativeRes: any = await this.tdlibBridge.getChats(100);
+        const nativeRes: any = await this.tdlibBridge.getChats(limit);
         if (nativeRes?.success) {
           return {
             success: true,
@@ -737,6 +741,7 @@ class TelegramService {
               ...fakeDialogs,
               ...(nativeRes.dialogs || []),
             ],
+            hasMore: Boolean(nativeRes.hasMore),
           };
         }
         return { success: false, error: nativeRes?.error || 'TDLib não retornou chats.' };
@@ -831,6 +836,66 @@ class TelegramService {
     }
 
     return { success: false, messages: [], hasMore: false, oldestMessageId: null, error: 'TDLib nativo indisponível.' };
+  }
+
+  async searchChatMessages({ chatId, query, limit = 50, fromMessageId = null, topicId = null, topicKind = 'forum' }: any) {
+    const trimmedQuery = String(query || '').trim();
+    if (!trimmedQuery) {
+      return { success: true, messages: [], totalCount: 0, nextFromMessageId: null };
+    }
+
+    const fakeChat = this.getTwitterFakeChat(chatId);
+    if (fakeChat) {
+      const normalized = trimmedQuery.toLowerCase();
+      const messages = fakeChat.messages
+        .filter(message => [message.text, fakeChat.title, fakeChat.username].filter(Boolean).join(' ').toLowerCase().includes(normalized))
+        .map(message => ({
+          id: message.id,
+          message: message.text,
+          date: message.date,
+          out: false,
+          senderId: fakeChat.id,
+          senderName: fakeChat.title,
+          replyToMsgId: null,
+          media: Boolean(message.url),
+          text: message.text,
+          hasMedia: Boolean(message.url),
+          isPhoto: Boolean(message.url) && !message.isVideo,
+          isVideo: message.isVideo,
+          videoDuration: null,
+          mediaSize: message.mediaSize ?? null,
+          isDeleted: false,
+        }))
+        .slice(-limit);
+      return { success: true, messages, totalCount: messages.length, nextFromMessageId: null };
+    }
+
+    if (!this.useTdlibOnly()) {
+      return { success: false, messages: [], totalCount: 0, nextFromMessageId: null, error: 'TDLib nativo indisponível.' };
+    }
+
+    try {
+      await this.tdlibInit();
+      const nativeRes: any = await this.tdlibBridge.searchChatMessages({
+        chatId,
+        query: trimmedQuery,
+        limit,
+        fromMessageId,
+        topicId,
+        topicKind,
+      });
+      if (nativeRes?.success) {
+        return {
+          ...nativeRes,
+          messages: Array.isArray(nativeRes.messages)
+            ? this.normalizeNativeMessages(chatId, nativeRes.messages)
+            : [],
+        };
+      }
+      return { success: false, messages: [], totalCount: 0, nextFromMessageId: null, error: nativeRes?.error || 'TDLib não retornou resultados.' };
+    } catch (error) {
+      return { success: false, messages: [], totalCount: 0, nextFromMessageId: null, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async getChatCapabilities(chatId: any) {
@@ -1924,6 +1989,9 @@ class TelegramService {
       platform: 'telegram',
       thumbnailUrl: thumbnailUrl || undefined,
       ...downloadMeta,
+    }, {
+      cancel: () => this.cancelMessageMediaDownload({ chatId, messageId }),
+      retry: () => this.saveMessageMediaFile({ chatId, messageId, downloadMeta, saveAs }),
     });
 
     try {

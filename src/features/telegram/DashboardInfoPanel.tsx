@@ -1,6 +1,7 @@
 import React from 'react';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
+import { SharedMediaSkeleton } from '../../components/Skeletons';
 import { hashColor } from './TelegramDashboardConstants';
 import type { Chat, ChatFullInfo, ForumTopic, Message } from './TelegramDashboardTypes';
 
@@ -97,9 +98,7 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
         <div className="info-section">
           <h3>Mídia Compartilhada</h3>
           {loadingSharedMedia ? (
-            <div className="loader-surface compact" role="status" aria-label="Carregando mídia compartilhada">
-              <span className="modern-loader small" />
-            </div>
+            <SharedMediaSkeleton />
           ) : sharedMedia.length > 0 ? (
             <div className="info-media-grid">
               {sharedMedia.map(media => (
