@@ -281,10 +281,9 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
   }, []);
 
   useEffect(() => {
-    if (!isVideo) return;
-
     let isMounted = true;
-    telegramService.isMessageMediaFileCached({ chatId, messageId, mimeType: 'video/mp4' })
+    const mimeType = isVideo ? 'video/mp4' : IMAGE_MEDIA_MIME_TYPE;
+    telegramService.isMessageMediaFileCached({ chatId, messageId, mimeType })
       .then(isCached => {
         if (isMounted) setHasCachedFullMedia(isCached);
       })

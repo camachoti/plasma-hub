@@ -202,8 +202,25 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
         {onCancelControl(messageId)}
 
         {inlineError && !inlineLoading && !shouldShowProgress && (
-          <div className="media-status-chip error">
-            {inlineError}
+          <div
+            className="media-status-chip error media-retry-chip"
+            role="button"
+            tabIndex={0}
+            onClick={event => {
+              event.stopPropagation();
+              onInlinePlay(event);
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                event.stopPropagation();
+                onInlinePlay(event as unknown as React.MouseEvent);
+              }
+            }}
+            title="Tentar reproduzir novamente"
+          >
+            <span>{inlineError}</span>
+            <strong>Tentar novamente</strong>
           </div>
         )}
 
@@ -220,7 +237,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
         )}
 
         {previewSrc && hasCachedFullMedia && !shouldShowProgress && (
-          <div className="media-status-chip cached">Em cache</div>
+          <div className="media-status-chip cached" title="Mídia disponível no cache local">Em cache</div>
         )}
 
         {previewSrc && isVideo && videoDuration != null && (

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { invokeCommand as invoke } from '../../shared/platform/tauri';
+import { convertFileSrc, invokeCommand as invoke, listenNativeDragDrop } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
@@ -19,7 +19,7 @@ import { debugLog, debugWarn } from '../../shared/debug/logger';
 import { QUICK_REACTIONS, TOPIC_ICON_COLORS, hashColor } from './TelegramDashboardConstants';
 import type { Chat, ChatFullInfo, ForumTopic, Message, TimelineItem } from './TelegramDashboardTypes';
 import { getTimelineItems, getTopicColor, ListContainer } from './DashboardHelpers';
-import { compareTelegramMessages } from './TelegramMessageUtils';
+import { basename, compareTelegramMessages } from './TelegramMessageUtils';
 import { DashboardChatList } from './DashboardChatList';
 import { DashboardInfoPanel } from './DashboardInfoPanel';
 import { DashboardMassDownloadPanel } from './DashboardMassDownloadPanel';
@@ -46,6 +46,13 @@ interface DownloadItem {
   size: number;
 }
 
+interface PendingDroppedMedia {
+  filePath: string;
+  fileName: string;
+  previewUrl: string;
+  isVideo: boolean;
+}
+
 interface DownloadProgress {
   total: number;
   downloaded: number;
@@ -62,8 +69,101 @@ interface DashboardProps {
 
 const LAST_CHAT_KEY = 'plasma_last_chat_id';
 const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
+const CHAT_SCROLL_PREFIX = 'plasma_chat_scroll_';
 const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
 const INFO_PANEL_KEY = 'plasma_info_panel_open';
+
+const revokeDroppedPreview = (previewUrl: string) => {
+  if (previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
+};
+
+const isSupportedDroppedMedia = (fileName: string, mimeType = '') => {
+  const isVideo = mimeType.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(fileName);
+  const isImage = mimeType.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp|heic|avif)$/i.test(fileName);
+  return { isSupported: isVideo || isImage, isVideo };
+};
+
+const DroppedVideoPreview: React.FC<{ filePath: string; src: string; fileName: string }> = ({ filePath, src, fileName }) => {
+  const [posterUrl, setPosterUrl] = useState<string | null>(null);
+  const [hasFrame, setHasFrame] = useState(false);
+  const inlineVideoRef = useRef<HTMLVideoElement>(null);
+
+  const captureRenderedFrame = useCallback(() => {
+    const video = inlineVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+    setHasFrame(true);
+    if (posterUrl) return;
+    try {
+      const maxSide = 420;
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      setPosterUrl(canvas.toDataURL('image/jpeg', 0.78));
+    } catch {
+      setHasFrame(true);
+    }
+  }, [posterUrl]);
+
+  const seekToPreviewFrame = useCallback(() => {
+    const video = inlineVideoRef.current;
+    if (!video) return;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const targetTime = duration > 1 ? Math.min(1, duration * 0.08) : 0.05;
+    try {
+      if (Math.abs(video.currentTime - targetTime) > 0.01) {
+        video.currentTime = targetTime;
+      } else {
+        captureRenderedFrame();
+      }
+    } catch {
+      captureRenderedFrame();
+    }
+  }, [captureRenderedFrame]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPosterUrl(null);
+    setHasFrame(false);
+    const video = inlineVideoRef.current;
+    video?.load();
+
+    invoke<string>('generate_video_thumbnail', { filePath })
+      .then((thumbnailPath) => {
+        if (cancelled || !thumbnailPath) return;
+        setPosterUrl(convertFileSrc(thumbnailPath));
+        setHasFrame(true);
+      })
+      .catch((error) => debugWarn('Não foi possível gerar thumbnail nativa do vídeo:', error));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, src]);
+
+  return (
+    <div className={`drop-video-preview ${hasFrame || posterUrl ? 'has-frame' : ''} ${posterUrl ? 'has-poster' : ''}`}>
+      {posterUrl && <img className="drop-video-poster" src={posterUrl} alt="" aria-hidden="true" />}
+      <video
+        ref={inlineVideoRef}
+        src={src}
+        poster={posterUrl || undefined}
+        muted
+        preload="auto"
+        playsInline
+        onLoadedMetadata={seekToPreviewFrame}
+        onLoadedData={captureRenderedFrame}
+        onCanPlay={captureRenderedFrame}
+        onSeeked={captureRenderedFrame}
+        aria-label={fileName}
+      />
+      <span className="drop-video-play" aria-hidden="true">▶</span>
+    </div>
+  );
+};
 
 export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTelegramLoginRequest }) => {
   const PAGE_SIZE = 50;
@@ -75,6 +175,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const selectedChatRef = useRef<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const sentMediaThumbnailUrlsRef = useRef(new Map<string, string>());
   const [visibleMediaIds, setVisibleMediaIds] = useState<Set<number>>(new Set());
   const visibleMediaIdsRef = useRef<Set<number>>(new Set());
   const visibleRangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
@@ -97,6 +198,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const topicsLoadSeqRef = useRef(0);
   const chatSearchSeqRef = useRef(0);
   const restoredChatRef = useRef(false);
+
+  const withTransientSentThumbnail = useCallback((chatId: string, message: Message): Message => {
+    if (message.thumbnailUrl || !message.hasMedia) return message;
+    const thumbnailUrl = sentMediaThumbnailUrlsRef.current.get(`${chatId}_${message.id}`);
+    return thumbnailUrl ? { ...message, thumbnailUrl } : message;
+  }, []);
 
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -136,6 +243,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [searchMediaLoading, setSearchMediaLoading] = useState(false);
   const [isSearchMediaSelectionMode, setIsSearchMediaSelectionMode] = useState(false);
   const [selectedSearchMediaIds, setSelectedSearchMediaIds] = useState<number[]>([]);
+  const searchMediaModalRef = useRef<HTMLDivElement>(null);
   const [isChatSearchOpen, setIsChatSearchOpen] = useState(false);
   const [chatMessageSearch, setChatMessageSearch] = useState('');
   const [chatSearchResultIndex, setChatSearchResultIndex] = useState(0);
@@ -178,6 +286,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [activeFolder, setActiveFolder] = useState<'all' | 'unread'>('all');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [pendingDroppedMedia, setPendingDroppedMedia] = useState<PendingDroppedMedia[]>([]);
+  const pendingDroppedMediaRef = useRef<PendingDroppedMedia[]>([]);
+  const dropMediaModalRef = useRef<HTMLDivElement>(null);
+  const [dropTargetChatId, setDropTargetChatId] = useState<string | null>(null);
+  const [dropCaption, setDropCaption] = useState('');
+  const [isDropPreviewOpen, setIsDropPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    pendingDroppedMediaRef.current = pendingDroppedMedia;
+  }, [pendingDroppedMedia]);
+
+  useEffect(() => () => {
+    pendingDroppedMediaRef.current.forEach(file => revokeDroppedPreview(file.previewUrl));
+  }, []);
   const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
   const [fullChatInfo, setFullChatInfo] = useState<ChatFullInfo | null>(null);
   const [loadingFullInfo, setLoadingFullInfo] = useState(false);
@@ -271,6 +393,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     () => Math.max(0, 100000 - timelineItems.length),
     [timelineItems.length]
   );
+  const timelineScrollStorageKey = selectedChat
+    ? `${CHAT_SCROLL_PREFIX}${selectedChat.id}_${viewingTopic?.id ?? 'all'}`
+    : null;
   const updateVisibleMediaIds = useCallback((range: { startIndex: number; endIndex: number }) => {
     visibleRangeRef.current = range;
     if (visibleRangeRafRef.current !== null) return;
@@ -282,6 +407,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       const rawStart = Number(latestRange.startIndex || 0);
       const rawEnd = Number(latestRange.endIndex || rawStart);
+      if (timelineScrollStorageKey && timelineItems.length > 0) {
+        const firstVisibleIndex = Math.max(0, Math.min(
+          timelineItems.length - 1,
+          rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart
+        ));
+        const firstVisibleItem = timelineItems[firstVisibleIndex];
+        if (firstVisibleItem) {
+          appStorage.set(timelineScrollStorageKey, JSON.stringify({ messageId: firstVisibleItem.message.id }));
+        }
+      }
       const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
       const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
       const ids = new Set<number>();
@@ -310,7 +445,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
       setVisibleMediaIds(ids);
     });
-  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
+  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems, timelineScrollStorageKey]);
 
   const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
 
@@ -571,17 +706,34 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   useEffect(() => {
     if (shouldScrollToBottomRef.current && virtuosoRef.current && messages.length > 0) {
-      const lastIndex = Math.max(0, 100000 - messages.length) + messages.length - 1;
-      virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end' });
+      let targetIndex: number | null = null;
+      if (timelineScrollStorageKey) {
+        try {
+          const stored = appStorage.get(timelineScrollStorageKey);
+          const anchorMessageId = stored ? Number(JSON.parse(stored).messageId) : NaN;
+          if (Number.isFinite(anchorMessageId)) {
+            const itemIndex = timelineItems.findIndex(item => (
+              Number(item.message.id) === anchorMessageId
+              || Boolean(item.messages?.some(message => Number(message.id) === anchorMessageId))
+            ));
+            if (itemIndex >= 0) targetIndex = timelineFirstItemIndex + itemIndex;
+          }
+        } catch {
+          appStorage.remove(timelineScrollStorageKey);
+        }
+      }
+      const lastIndex = timelineFirstItemIndex + timelineItems.length - 1;
+      const scrollIndex = targetIndex ?? lastIndex;
+      virtuosoRef.current.scrollToIndex({ index: scrollIndex, align: targetIndex === null ? 'end' : 'center' });
       const timer = setTimeout(() => {
         if (virtuosoRef.current) {
-          virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end', behavior: 'smooth' });
+          virtuosoRef.current.scrollToIndex({ index: scrollIndex, align: targetIndex === null ? 'end' : 'center', behavior: 'smooth' });
         }
       }, 100);
       shouldScrollToBottomRef.current = false;
       return () => clearTimeout(timer);
     }
-  }, [messages]);
+  }, [messages, timelineItems, timelineFirstItemIndex, timelineScrollStorageKey]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -623,7 +775,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setMessages(current => {
         const byId = new Map<number, Message>();
         current.forEach(item => byId.set(Number(item.id), item));
-        byId.set(Number(message.id), message);
+        byId.set(Number(message.id), withTransientSentThumbnail(String(chatId), message));
         return Array.from(byId.values()).sort(compareTelegramMessages);
       });
 
@@ -631,7 +783,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     });
 
     return () => unsubscribe();
-  }, [selectedChat?.id, viewingTopic?.id]);
+  }, [selectedChat?.id, viewingTopic?.id, withTransientSentThumbnail]);
 
   useEffect(() => {
     if (pendingJumpToMsgIdRef.current) {
@@ -890,6 +1042,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         if (savedTopic) {
           setViewingTopic(savedTopic);
           setSelectedTopicId(String(savedTopic.id));
+          shouldScrollToBottomRef.current = true;
           loadMessages(chat.id, 0, savedTopic.id, { refresh: true, topicKind: savedTopic.kind });
         }
       } else if (!res.success) setError(res.error || 'Failed to fetch topics');
@@ -919,6 +1072,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic(topic);
     setSelectedTopicId(String(topic.id));
+    shouldScrollToBottomRef.current = true;
     appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat!.id}`, String(topic.id));
     loadMessages(selectedChat!.id, 0, topic.id, { refresh: true, topicKind: topic.kind });
 
@@ -943,9 +1097,31 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic({ id: 0, title: 'Todos os tópicos', topMessageId: 0, unreadCount: 0, closed: false, pinned: false });
     setSelectedTopicId('all');
+    shouldScrollToBottomRef.current = true;
     if (selectedChat) appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat.id}`, 'all');
     loadMessages(selectedChat!.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat?.lastMessageDate });
   };
+
+  const seedSentMediaThumbnail = useCallback(async (chatId: string, message: Message | null | undefined, filePath: string, isVideo: boolean) => {
+    if (!message?.hasMedia || !filePath) return;
+
+    let thumbnailUrl = convertFileSrc(filePath);
+    if (isVideo) {
+      try {
+        const thumbnailPath = await invoke<string>('generate_video_thumbnail', { filePath });
+        if (thumbnailPath) thumbnailUrl = convertFileSrc(thumbnailPath);
+      } catch (error) {
+        debugWarn('Não foi possível gerar a miniatura da mídia enviada:', error);
+        return;
+      }
+    }
+
+    sentMediaThumbnailUrlsRef.current.set(`${chatId}_${message.id}`, thumbnailUrl);
+    setMessages(current => current.map(item => Number(item.id) === Number(message.id)
+      ? { ...item, thumbnailUrl: item.thumbnailUrl || thumbnailUrl }
+      : item
+    ));
+  }, []);
 
   const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null; topicKind?: string } = {}) => {
     const loadSeq = ++messagesLoadSeqRef.current;
@@ -955,8 +1131,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         const cached = await telegramService.getCachedMessages({ chatId, limit: PAGE_SIZE, topicId, topicKind: options.topicKind });
         if (loadSeq !== messagesLoadSeqRef.current) return;
         if (cached.success && cached.messages?.length) {
-          setMessages(cached.messages);
-          preloadInitialThumbnails(chatId, cached.messages);
+          const cachedMessages = cached.messages.map((message: Message) => withTransientSentThumbnail(chatId, message));
+          setMessages(cachedMessages);
+          preloadInitialThumbnails(chatId, cachedMessages);
           setHasMoreMessages(Boolean(cached.hasMore));
           setOldestMessageId(cached.oldestMessageId ?? null);
           setLoadingMessages(false);
@@ -969,8 +1146,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId, topicKind: options.topicKind, refresh: options.refresh });
       if (loadSeq !== messagesLoadSeqRef.current) return;
       if (res.success && res.messages) {
-        setMessages(res.messages);
-        preloadInitialThumbnails(chatId, res.messages);
+        const loadedMessages = res.messages.map((message: Message) => withTransientSentThumbnail(chatId, message));
+        setMessages(loadedMessages);
+        preloadInitialThumbnails(chatId, loadedMessages);
         setHasMoreMessages(Boolean(res.hasMore));
         setOldestMessageId(res.oldestMessageId ?? null);
       }
@@ -1196,6 +1374,188 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
+  const openDroppedMediaPreview = useCallback((nextFiles: PendingDroppedMedia[]) => {
+    if (!selectedChat || selectedChat.canSendMedia === false) return;
+    if (!nextFiles.length) {
+      showDashboardToast({ tone: 'error', title: 'Mídia não reconhecida', message: 'Arraste fotos ou vídeos para enviar.' });
+      return;
+    }
+    setPendingDroppedMedia(nextFiles);
+    setDropTargetChatId(selectedChat.id);
+    setDropCaption('');
+    setIsDropPreviewOpen(true);
+  }, [selectedChat, showDashboardToast]);
+
+  const handleDroppedFiles = useCallback((fileList: FileList) => {
+    if (!selectedChat || selectedChat.canSendMedia === false) return;
+    const nextFiles: PendingDroppedMedia[] = [];
+    Array.from(fileList).forEach(file => {
+      const { isSupported, isVideo } = isSupportedDroppedMedia(file.name, file.type);
+      if (!isSupported) return;
+      const filePath = telegramService.getPathForFile(file) || (file as File & { path?: string }).path || '';
+      if (!filePath) return;
+      const previewUrl = convertFileSrc(filePath);
+      nextFiles.push({ filePath, fileName: file.name, previewUrl, isVideo });
+    });
+    openDroppedMediaPreview(nextFiles);
+  }, [openDroppedMediaPreview, selectedChat]);
+
+  const handleDroppedFilePaths = useCallback((paths: string[]) => {
+    const nextFiles = paths.reduce<PendingDroppedMedia[]>((files, filePath) => {
+      const fileName = basename(filePath);
+      const { isSupported, isVideo } = isSupportedDroppedMedia(fileName);
+      if (!isSupported) return files;
+      files.push({ filePath, fileName, previewUrl: convertFileSrc(filePath), isVideo });
+      return files;
+    }, []);
+    openDroppedMediaPreview(nextFiles);
+  }, [openDroppedMediaPreview]);
+
+  const discardDroppedMedia = useCallback(() => {
+    pendingDroppedMedia.forEach(file => revokeDroppedPreview(file.previewUrl));
+    setPendingDroppedMedia([]);
+    setDropTargetChatId(null);
+    setDropCaption('');
+    setIsDropPreviewOpen(false);
+  }, [pendingDroppedMedia]);
+
+  const handleRemoveDroppedMedia = useCallback((indexToRemove: number) => {
+    setPendingDroppedMedia(currentFiles => {
+      const removedFile = currentFiles[indexToRemove];
+      if (removedFile) revokeDroppedPreview(removedFile.previewUrl);
+      const nextFiles = currentFiles.filter((_, index) => index !== indexToRemove);
+      if (nextFiles.length === 0) {
+        setDropTargetChatId(null);
+        setDropCaption('');
+        setIsDropPreviewOpen(false);
+      }
+      return nextFiles;
+    });
+  }, []);
+
+  const handleSendDroppedMedia = async () => {
+    if (!selectedChat || !pendingDroppedMedia.length || isSending || selectedChat.id !== dropTargetChatId) return;
+    const filesToSend = pendingDroppedMedia;
+    const topicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+    const topicKind = viewingTopic?.kind;
+    const replyToId = replyTo?.id;
+    const caption = dropCaption.trim();
+    setIsDropPreviewOpen(false);
+    setIsSending(true);
+    setSendProgress(0);
+    try {
+      const unsub = telegramService.onSendProgress((data) => {
+        const itemProgress = Math.max(0, Math.min(100, Number(data.progress) || 0));
+        const currentIndex = Math.min(filesToSend.length - 1, Math.floor((itemProgress / 100) * filesToSend.length));
+        setSendProgress(Math.min(99, ((currentIndex + itemProgress / 100) / filesToSend.length) * 100));
+      });
+      try {
+        for (let index = 0; index < filesToSend.length; index += 1) {
+          const file = filesToSend[index];
+          const result = await telegramService.sendMedia({
+            chatId: selectedChat.id,
+            filePath: file.filePath,
+            caption: index === 0 ? caption || undefined : undefined,
+            replyToId: index === 0 ? replyToId : undefined,
+            topicId,
+            topicKind,
+          });
+          if (!result.success) throw new Error(result.error || `Falha ao enviar ${file.fileName}.`);
+          await seedSentMediaThumbnail(selectedChat.id, result.message, file.filePath, file.isVideo);
+          setSendProgress(((index + 1) / filesToSend.length) * 100);
+        }
+      } finally {
+        unsub();
+      }
+      filesToSend.forEach(file => revokeDroppedPreview(file.previewUrl));
+      setPendingDroppedMedia([]);
+      setDropTargetChatId(null);
+      setDropCaption('');
+      setReplyTo(null);
+      showDashboardToast({
+        tone: 'success',
+        title: filesToSend.length === 1 ? 'Mídia enviada' : 'Mídias enviadas',
+        message: `${filesToSend.length} ${filesToSend.length === 1 ? 'arquivo enviado' : 'arquivos enviados'}.`,
+      });
+      shouldScrollToBottomRef.current = true;
+      loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
+    } catch (error: any) {
+      setPendingDroppedMedia(filesToSend);
+      setIsDropPreviewOpen(true);
+      setError(error?.message || 'Erro ao enviar as mídias.');
+    } finally {
+      setIsSending(false);
+      setSendProgress(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedChat || selectedChat.canSendMedia === false) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listenNativeDragDrop((event) => {
+      if (disposed) return;
+      if (event.type === 'enter' || event.type === 'over') {
+        setIsDraggingOver(true);
+        return;
+      }
+      setIsDraggingOver(false);
+      if (event.type === 'drop') handleDroppedFilePaths(event.paths);
+    })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+          return;
+        }
+        unlisten = nextUnlisten;
+      })
+      .catch((error) => debugWarn('Não foi possível registrar drag/drop nativo:', error));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleDroppedFilePaths, selectedChat]);
+
+  useEffect(() => {
+    if (!isDropPreviewOpen || !dropTargetChatId) return;
+    if (selectedChat?.id !== dropTargetChatId && !isSending) discardDroppedMedia();
+  }, [discardDroppedMedia, dropTargetChatId, isDropPreviewOpen, isSending, selectedChat?.id]);
+
+  useEffect(() => {
+    if (!isDropPreviewOpen) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusModal = window.requestAnimationFrame(() => dropMediaModalRef.current?.focus());
+    const handleDropModalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (!isSending) discardDroppedMedia();
+        return;
+      }
+      if (event.key !== 'Tab' || !dropMediaModalRef.current) return;
+      const focusable = Array.from(dropMediaModalRef.current.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), textarea:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleDropModalKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusModal);
+      document.removeEventListener('keydown', handleDropModalKeyDown);
+      previouslyFocused?.focus?.();
+    };
+  }, [discardDroppedMedia, isDropPreviewOpen, isSending]);
+
   const handleSend = async () => {
     if (!selectedChat || (!inputText.trim() && !selectedFile) || isSending) return;
     const canSendMessages = selectedChat.canSendMessages !== false;
@@ -1240,6 +1600,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       }
 
       if (res.success) {
+        if (fileToSend) {
+          const { isVideo } = isSupportedDroppedMedia(fileToSend.fileName);
+          await seedSentMediaThumbnail(selectedChat.id, res.message, fileToSend.filePath, isVideo);
+        }
         showDashboardToast({
           tone: 'success',
           title: fileToSend ? 'Mídia enviada' : 'Mensagem enviada',
@@ -1647,6 +2011,39 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     setIsSearchMediaSelectionMode(false);
     setSelectedSearchMediaIds([]);
   }, []);
+
+  useEffect(() => {
+    if (!searchMediaUser) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusModal = window.requestAnimationFrame(() => searchMediaModalRef.current?.focus());
+    const handleModalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSearchMediaModal();
+        return;
+      }
+      if (event.key !== 'Tab' || !searchMediaModalRef.current) return;
+      const focusable = Array.from(searchMediaModalRef.current.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleModalKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusModal);
+      document.removeEventListener('keydown', handleModalKeyDown);
+      previouslyFocused?.focus?.();
+    };
+  }, [closeSearchMediaModal, searchMediaUser]);
   const handleShowEmojiPicker = useCallback((messageId: number, rect: DOMRect) => {
     const pickerHeight = 300;
     const y = (rect.bottom + pickerHeight > window.innerHeight)
@@ -1809,13 +2206,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             setIsDraggingOver(false);
             if (selectedChat?.canSendMedia === false) return;
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-              const file = e.dataTransfer.files[0] as File & { path?: string };
-              const realPath = telegramService.getPathForFile ? telegramService.getPathForFile(file) : file.path;
-              if (realPath) {
-                setSelectedFile({ filePath: realPath, fileName: file.name });
-              } else {
-                setError('O arquivo precisa ser arrastado de uma pasta do seu computador.');
-              }
+              handleDroppedFiles(e.dataTransfer.files);
             }
           }}
         >
@@ -2114,10 +2505,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   {loadingTopics ? (
                     <TopicListSkeleton />
                   ) : forumTopics.length === 0 ? (
-                    <div className="dashboard-empty-state">
+                    <div className="dashboard-empty-state" role="status">
                       <div className="dashboard-empty-icon">#</div>
-                      <h3>Nenhum tópico encontrado</h3>
-                      <p>Este grupo foi marcado como tópico, mas o Telegram não retornou tópicos válidos.</p>
+                      <h3>Nenhum tópico disponível</h3>
+                      <p>Este grupo ainda não possui tópicos visíveis para você.</p>
                     </div>
                   ) : (
                     <>
@@ -2168,10 +2559,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   {loadingMessages && messages.length === 0 ? (
                     <MessageListSkeleton />
                   ) : messages.length === 0 ? (
-                    <div className="dashboard-empty-state timeline-empty">
+                    <div className="dashboard-empty-state timeline-empty" role="status">
                       <div className="dashboard-empty-icon">{viewingTopic ? '#' : '∅'}</div>
                       <h3>{viewingTopic ? 'Tópico sem mensagens' : 'Nenhuma mensagem encontrada'}</h3>
-                      <p>{viewingTopic ? 'Ainda não há mensagens carregadas neste tópico.' : 'O histórico deste chat ainda não retornou mensagens.'}</p>
+                      <p>
+                        {viewingTopic
+                          ? 'Ainda não há mensagens neste tópico.'
+                          : selectedChat.canSendMessages === false
+                            ? 'Não há mensagens disponíveis neste chat.'
+                            : 'Comece a conversa enviando a primeira mensagem.'}
+                      </p>
                     </div>
                   ) : (
                     <Virtuoso
@@ -2297,6 +2694,70 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           setInfoOpen={setInfoOpen}
         />
       </div>
+
+      {isDropPreviewOpen && pendingDroppedMedia.length > 0 && selectedChat && (
+        <div className="drop-media-modal-overlay" onClick={() => !isSending && discardDroppedMedia()}>
+          <div
+            ref={dropMediaModalRef}
+            className="drop-media-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="drop-media-modal-title"
+            tabIndex={-1}
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="drop-media-modal-header">
+              <div>
+                <h3 id="drop-media-modal-title">Enviar mídias</h3>
+                <span>{pendingDroppedMedia.length} {pendingDroppedMedia.length === 1 ? 'arquivo selecionado' : 'arquivos selecionados'}</span>
+              </div>
+              <button type="button" className="icon-btn close-btn" onClick={discardDroppedMedia} disabled={isSending} aria-label="Fechar pré-visualização">✕</button>
+            </div>
+            <div className="drop-media-grid">
+              {pendingDroppedMedia.map((file, index) => (
+                <div className="drop-media-item" key={`${file.filePath}-${index}`}>
+                  {file.isVideo ? (
+                    <DroppedVideoPreview filePath={file.filePath} src={file.previewUrl} fileName={file.fileName} />
+                  ) : (
+                    <img src={file.previewUrl} alt={file.fileName} />
+                  )}
+                  <span title={file.fileName}>{file.fileName}</span>
+                  <button
+                    type="button"
+                    className="drop-media-remove"
+                    disabled={isSending}
+                    onClick={() => handleRemoveDroppedMedia(index)}
+                    aria-label={`Remover ${file.fileName}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="drop-media-caption">
+              <textarea
+                value={dropCaption}
+                onChange={event => setDropCaption(event.target.value)}
+                placeholder="Adicionar uma legenda..."
+                rows={3}
+                disabled={isSending}
+                autoFocus
+              />
+            </div>
+            {sendProgress !== null && isSending && (
+              <div className="drop-media-progress" role="status">
+                <div className="drop-media-progress-fill" style={{ width: `${sendProgress}%` }} />
+              </div>
+            )}
+            <div className="drop-media-modal-actions">
+              <button type="button" className="btn-cancel-selection" onClick={discardDroppedMedia} disabled={isSending}>Cancelar</button>
+              <button type="button" className="btn-download-selected drop-media-send-btn" onClick={() => void handleSendDroppedMedia()} disabled={isSending || pendingDroppedMedia.length === 0}>
+                {isSending ? 'Enviando...' : `Enviar ${pendingDroppedMedia.length > 1 ? `${pendingDroppedMedia.length} mídias` : 'mídia'}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Context menu portal */}
       {chatContextMenu && (
@@ -2540,10 +3001,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       )}
       {searchMediaUser && selectedChat && (
         <div className="search-media-modal-overlay" onClick={closeSearchMediaModal}>
-          <div className="search-media-modal" onClick={e => e.stopPropagation()}>
+          <div
+            ref={searchMediaModalRef}
+            className="search-media-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="search-media-modal-title"
+            tabIndex={-1}
+            onClick={e => e.stopPropagation()}
+          >
             <div className="search-media-modal-header">
               <div className="search-media-user-info">
-                <h3>Mídias Enviadas</h3>
+                <h3 id="search-media-modal-title">Mídias Enviadas</h3>
                 <span className="search-media-subtitle">por {searchMediaUser.senderName}</span>
               </div>
               <div className="search-media-header-actions">
@@ -2570,7 +3039,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     <span>{isSearchMediaSelectionMode ? 'Sair da seleção' : 'Selecionar'}</span>
                   </button>
                 )}
-                <button className="icon-btn close-btn" onClick={closeSearchMediaModal}>✕</button>
+                <button className="icon-btn close-btn" onClick={closeSearchMediaModal} aria-label="Fechar mídias enviadas" title="Fechar">✕</button>
               </div>
             </div>
             <div className={`search-media-modal-body ${isSearchMediaSelectionMode ? 'is-selection-mode' : ''}`}>
@@ -2580,7 +3049,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   <span>Procurando fotos e vídeos...</span>
                 </div>
               ) : searchMediaResults.length === 0 ? (
-                null
+                <div className="search-media-empty-state" role="status">
+                  <div className="search-media-empty-icon" aria-hidden="true">⌁</div>
+                  <strong>Nenhuma mídia encontrada</strong>
+                  <span>Não foram encontradas fotos ou vídeos enviados por este usuário.</span>
+                </div>
               ) : (
                 <div className="search-media-mixed-grid">
                   {searchMediaTimelineItems.map(item => {

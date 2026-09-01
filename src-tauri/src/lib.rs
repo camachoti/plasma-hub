@@ -31,6 +31,7 @@ pub fn run() {
             filesystem::append_download_file_chunk,
             filesystem::finish_download_file,
             filesystem::abort_download_file,
+            filesystem::generate_video_thumbnail,
             filesystem::load_twitter_cookies,
             filesystem::save_twitter_cookies,
             services::message_cache::telegram_message_cache_get,

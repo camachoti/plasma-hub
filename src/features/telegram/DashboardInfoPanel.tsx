@@ -116,10 +116,10 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
               ))}
             </div>
           ) : (
-            <div className="info-media-grid-preview">
-              <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-3)', fontSize: 12, border: '1px dashed var(--line-soft)', borderRadius: 8 }}>
-                Nenhuma mídia encontrada
-              </div>
+            <div className="info-media-empty" role="status">
+              <span className="info-media-empty-icon" aria-hidden="true">⌁</span>
+              <strong>Nenhuma mídia encontrada</strong>
+              <span>As fotos e vídeos compartilhados aparecerão aqui.</span>
             </div>
           )}
         </div>

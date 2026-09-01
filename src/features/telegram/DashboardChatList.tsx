@@ -247,7 +247,22 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
         Footer: () => loadingMore ? (
           <div className="chat-list-loading-more" role="status">Carregando mais conversas…</div>
         ) : !filteredChats.length && !loading && !skipLogin ? (
-          <div className="messages-empty">Nenhum chat encontrado.</div>
+          <div className="chat-list-empty-state" role="status">
+            <div className="chat-list-empty-icon" aria-hidden="true">⌁</div>
+            <strong>{chatSearch.trim() ? 'Nenhum chat encontrado' : activeFolder === 'unread' ? 'Tudo em dia' : 'Nenhuma conversa disponível'}</strong>
+            <span>
+              {chatSearch.trim()
+                ? `Não há conversas correspondentes a “${chatSearch.trim()}”.`
+                : activeFolder === 'unread'
+                  ? 'Você não possui mensagens não lidas.'
+                  : 'As conversas carregadas aparecerão aqui.'}
+            </span>
+            {chatSearch.trim() ? (
+              <button type="button" onClick={() => setChatSearch('')}>Limpar pesquisa</button>
+            ) : activeFolder === 'unread' ? (
+              <button type="button" onClick={() => setActiveFolder('all')}>Mostrar todos</button>
+            ) : null}
+          </div>
         ) : null,
       }}
       itemContent={(_, chat) => (

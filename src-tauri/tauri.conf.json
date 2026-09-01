@@ -26,8 +26,10 @@
         "scope": [
           "$APPCACHE/plasma-media/**",
           "$APPCACHE/telegram-media-cache/**",
+          "$APPCACHE/drop-video-thumbnails/**",
           "$APPDATA/**",
           "$APPLOCALDATA/**",
+          "$HOME/**",
           "$DOWNLOAD/**",
           "$TEMP/**"
         ]

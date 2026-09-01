@@ -1,6 +1,12 @@
 import { runtimeCapabilities } from "./runtime";
 import { convertFileSrc as tauriConvertFileSrc } from "@tauri-apps/api/core";
 
+export type NativeDragDropEvent =
+  | { type: "enter"; paths: string[] }
+  | { type: "over" }
+  | { type: "drop"; paths: string[] }
+  | { type: "leave" };
+
 export async function invokeCommand<T = unknown>(command: string, args?: Record<string, unknown>) {
   if (!runtimeCapabilities.isTauri) {
     throw new Error(`Comando nativo indisponível fora do Tauri: ${command}`);
@@ -20,6 +26,24 @@ export async function listenEvent<T>(
 
   const { listen } = await import("@tauri-apps/api/event");
   return listen<T>(event, handler);
+}
+
+export async function listenNativeDragDrop(
+  handler: (event: NativeDragDropEvent) => void,
+) {
+  if (!runtimeCapabilities.isTauri) return () => {};
+
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  return getCurrentWebview().onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (payload.type === "enter") {
+      handler({ type: "enter", paths: payload.paths });
+    } else if (payload.type === "drop") {
+      handler({ type: "drop", paths: payload.paths });
+    } else {
+      handler({ type: payload.type });
+    }
+  });
 }
 
 export function convertFileSrc(filePath: string) {
