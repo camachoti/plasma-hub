@@ -2,7 +2,6 @@ import React from 'react';
 import { Play, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react';
 import {
   formatDuration,
-  formatMessageTime,
   MediaProgressBadge,
   MediaSkeleton,
 } from './MessageMediaPrimitives';
@@ -52,7 +51,6 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
   messageId,
   isVideo,
   videoDuration,
-  messageDate,
   previewSrc,
   inlineStreamUrl,
   shouldRenderInlinePlayer,
@@ -174,6 +172,11 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
             onContextMenu={onContextMenu}
             onError={onPreviewImageError}
           />
+        ) : isVideo ? (
+          <div className="video-preview-unavailable" onContextMenu={onContextMenu}>
+            <span className="video-preview-unavailable-icon"><Play size={20} weight="fill" /></span>
+            <span>Prévia indisponível</span>
+          </div>
         ) : (
           <div className="media-preview media-skeleton" onContextMenu={onContextMenu} style={{ border: 'none', width: '100%', height: '100%' }}>
             <MediaSkeleton compact={inlineLoading || shouldShowProgress} />
@@ -230,14 +233,13 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           </div>
         )}
 
-        {previewSrc && shouldShowVideoSizeChip && (
-          <div className="media-overlay-pill top-left media-size-overlay">
-            {mediaSizeLabel}
+        {previewSrc && (shouldShowVideoSizeChip || (hasCachedFullMedia && !shouldShowProgress)) && (
+          <div className="media-overlay-meta top-left">
+            {shouldShowVideoSizeChip && <span className="media-meta-label">{mediaSizeLabel}</span>}
+            {hasCachedFullMedia && !shouldShowProgress && (
+              <span className="media-cache-indicator" title="Mídia disponível no cache local" aria-label="Mídia em cache" />
+            )}
           </div>
-        )}
-
-        {previewSrc && hasCachedFullMedia && !shouldShowProgress && (
-          <div className="media-status-chip cached" title="Mídia disponível no cache local">Em cache</div>
         )}
 
         {previewSrc && isVideo && videoDuration != null && (
@@ -246,11 +248,6 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           </div>
         )}
 
-        {previewSrc && !isVideo && messageDate != null && (
-          <div className="media-overlay-pill bottom-right">
-            {formatMessageTime(messageDate)}
-          </div>
-        )}
       </button>
     )}
   </div>

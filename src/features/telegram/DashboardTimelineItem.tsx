@@ -8,7 +8,11 @@ import { hashColor } from './TelegramDashboardConstants';
 import type { Chat, Message, TimelineItem } from './TelegramDashboardTypes';
 import { telegramService } from './TelegramService';
 
-const URL_REGEX = /(https?:\/\/[^\s<>\u0000-\u001F\u007F\u00A0\u2000-\u200D\u2028\u2029\uFEFF]+)/g;
+const URL_REGEX = /(?:https?:\/\/|www\.)[^\s<>\u0000-\u001F\u007F\u00A0\u2000-\u200D\u2028\u2029\uFEFF]+|(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63})(?:\/[^\s<>\u0000-\u001F\u007F\u00A0\u2000-\u200D\u2028\u2029\uFEFF]*)?/gi;
+
+const toExternalHref = (url: string) => (
+  /^(?:https?:\/\/|tg:\/\/)/i.test(url) ? url : `https://${url}`
+);
 
 export const isTelegramLink = (url: string) => {
   if (url.startsWith('tg://')) return true;
@@ -135,16 +139,17 @@ export const TimelineMessageItem = React.memo(({
     const regex = new RegExp(URL_REGEX.source, 'g');
     while ((match = regex.exec(msg.text)) !== null) {
       if (match.index > lastIndex) parts.push(msg.text.slice(lastIndex, match.index));
-      const url = match[1];
+      const url = match[0];
       const trailing = url.match(/[)\]}"',;.!?]+$/);
       const cleanUrl = trailing ? url.slice(0, url.length - trailing[0].length) : url;
       const displayUrl = cleanUrl.length > 60 ? cleanUrl.slice(0, 57) + '...' : cleanUrl;
-      if (isTelegramLink(cleanUrl)) {
-        parts.push(<a key={match.index} href="#" onClick={e => { e.preventDefault(); onTelegramLink(cleanUrl); }} className="message-link message-link-tg">{displayUrl}</a>);
+      const href = toExternalHref(cleanUrl);
+      if (isTelegramLink(href)) {
+        parts.push(<a key={match.index} href="#" onClick={e => { e.preventDefault(); onTelegramLink(href); }} className="message-link message-link-tg">{displayUrl}</a>);
       } else {
-        parts.push(<a key={match.index} href={cleanUrl} target="_blank" rel="noopener noreferrer" className="message-link">{displayUrl}</a>);
+        parts.push(<a key={match.index} href={href} target="_blank" rel="noopener noreferrer" className="message-link">{displayUrl}</a>);
       }
-      lastIndex = match.index + cleanUrl.length;
+      lastIndex = match.index + url.length;
     }
     if (lastIndex < msg.text.length) parts.push(msg.text.slice(lastIndex));
     return parts;

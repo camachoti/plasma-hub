@@ -57,6 +57,7 @@ interface TdlibChatCapabilitiesResult {
 
 interface TdlibForumTopicsResult {
   success: boolean;
+  isForum: boolean;
   topics: ForumTopic[];
   error?: string | null;
 }
@@ -84,6 +85,11 @@ interface TdlibNewMessageEvent {
   topicId?: number | null;
   topicKind?: string | null;
   message: Message;
+}
+
+interface TdlibDeletedMessagesEvent {
+  chatId: number;
+  messageIds: number[];
 }
 
 interface DownloadMessageMediaRequest {
@@ -427,6 +433,10 @@ export class TelegramTdlibBridge {
 
   onNewMessage(cb: (data: TdlibNewMessageEvent) => void) {
     return listen<TdlibNewMessageEvent>('tdlib-new-message', event => cb(event.payload));
+  }
+
+  onMessagesDeleted(cb: (data: TdlibDeletedMessagesEvent) => void) {
+    return listen<TdlibDeletedMessagesEvent>('tdlib-messages-deleted', event => cb(event.payload));
   }
 
   onNativeMediaProgress(cb: (data: NativeMediaProgress) => void) {

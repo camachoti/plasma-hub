@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -24,9 +25,10 @@ use tdlib_rs::{
         MessageTopicForum, MessageTopicThread, Photo,
     },
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 
 const STALE_NATIVE_PARTIAL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const SENDER_NAME_RESOLUTION_CONCURRENCY: usize = 8;
 
 mod media_http;
 pub use media_http::start_server as start_plasma_media_http_server;
@@ -289,6 +291,7 @@ pub struct TdlibForumTopicInfo {
 #[serde(rename_all = "camelCase")]
 pub struct TdlibForumTopicsResult {
     success: bool,
+    is_forum: bool,
     topics: Vec<TdlibForumTopicInfo>,
     error: Option<String>,
 }
@@ -356,6 +359,13 @@ struct TdlibNewMessageEvent {
     topic_id: Option<i64>,
     topic_kind: Option<String>,
     message: TdlibMessageInfo,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TdlibDeletedMessagesEvent {
+    chat_id: i64,
+    message_ids: Vec<i64>,
 }
 
 struct PendingMassDownload {
@@ -1240,6 +1250,16 @@ fn sender_id_to_string(sender: &MessageSender) -> String {
     }
 }
 
+fn is_hidden_membership_service_message(content: &MessageContent) -> bool {
+    matches!(
+        content,
+        MessageContent::MessageChatAddMembers(_)
+            | MessageContent::MessageChatJoinByLink
+            | MessageContent::MessageChatJoinByRequest
+            | MessageContent::MessageChatDeleteMember(_)
+    )
+}
+
 async fn resolve_sender_name(client_id: i32, sender_id: &str) -> String {
     match sender_id.parse::<i64>() {
         Ok(sender_id) if sender_id > 0 => match functions::get_user(sender_id, client_id).await {
@@ -1451,18 +1471,38 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
 
 async fn resolve_message_sender_names(client_id: i32, messages: &mut [TdlibMessageInfo]) {
     let mut sender_names = HashMap::<String, String>::new();
-    for message in messages {
-        if message.out {
-            continue;
-        }
-        if let Some(sender_name) = sender_names.get(&message.sender_id) {
-            message.sender_name = sender_name.clone();
-            continue;
+    let sender_ids = messages
+        .iter()
+        .filter(|message| !message.out)
+        .map(|message| message.sender_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    for sender_batch in sender_ids.chunks(SENDER_NAME_RESOLUTION_CONCURRENCY) {
+        let mut tasks = JoinSet::new();
+        for sender_id in sender_batch {
+            let sender_id = sender_id.clone();
+            tasks.spawn(async move {
+                let sender_name = resolve_sender_name(client_id, &sender_id).await;
+                (sender_id, sender_name)
+            });
         }
 
-        let sender_name = resolve_sender_name(client_id, &message.sender_id).await;
-        sender_names.insert(message.sender_id.clone(), sender_name.clone());
-        message.sender_name = sender_name;
+        while let Some(result) = tasks.join_next().await {
+            if let Ok((sender_id, sender_name)) = result {
+                sender_names.insert(sender_id, sender_name);
+            }
+        }
+    }
+
+    for message in messages {
+        if !message.out {
+            message.sender_name = sender_names
+                .get(&message.sender_id)
+                .cloned()
+                .unwrap_or_default();
+        }
     }
 }
 
@@ -1729,6 +1769,16 @@ fn emit_new_message(app: &AppHandle, chat_id: i64, message: TdlibMessageInfo) {
     );
 }
 
+fn emit_deleted_messages(app: &AppHandle, chat_id: i64, message_ids: Vec<i64>) {
+    let _ = app.emit(
+        "tdlib-messages-deleted",
+        TdlibDeletedMessagesEvent {
+            chat_id,
+            message_ids,
+        },
+    );
+}
+
 async fn set_state(inner: &Arc<Mutex<TdlibInner>>, app: &AppHandle, state: AuthorizationState) {
     let label = state_label(&state).to_string();
     {
@@ -1796,10 +1846,7 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                     );
                 }
                 Ok(Some((Update::NewMessage(update), client_id))) => {
-                    if matches!(
-                        &update.message.content,
-                        MessageContent::MessageChatDeleteMember(_)
-                    ) {
+                    if is_hidden_membership_service_message(&update.message.content) {
                         continue;
                     }
 
@@ -1827,6 +1874,19 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                             };
                             emit_new_message(&app, chat_id, message);
                         });
+                    }
+                }
+                Ok(Some((Update::DeleteMessages(update), _client_id))) => {
+                    if update.is_permanent && !update.from_cache {
+                        emit_deleted_messages(
+                            &app,
+                            update.chat_id,
+                            update
+                                .message_ids
+                                .into_iter()
+                                .map(app_message_id_from_tdlib)
+                                .collect(),
+                        );
                     }
                 }
                 Ok(Some((_update, _client_id))) => {}
@@ -2040,6 +2100,43 @@ async fn download_thumbnail_to_cache(
         Ok(_) => Some(destination.to_string_lossy().to_string()),
         Err(_) => Some(source_path),
     }
+}
+
+fn generate_video_thumbnail_to_cache(source_path: &str, destination: &Path) -> Option<String> {
+    if destination.is_file() {
+        return Some(destination.to_string_lossy().to_string());
+    }
+    if !Path::new(source_path).is_file() {
+        return None;
+    }
+    std::fs::create_dir_all(destination.parent()?).ok()?;
+
+    for seek in ["1", "0.25", "0"] {
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                seek,
+                "-i",
+                source_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=420:-2",
+                &destination.to_string_lossy(),
+            ])
+            .status();
+
+        if matches!(status, Ok(exit_status) if exit_status.success()) && destination.is_file() {
+            return Some(destination.to_string_lossy().to_string());
+        }
+        let _ = std::fs::remove_file(destination);
+    }
+
+    None
 }
 
 async fn download_avatar_to_cache(
@@ -2552,24 +2649,8 @@ pub async fn tdlib_get_messages(
         .messages
         .into_iter()
         .flatten()
-        .filter(|message| !matches!(message.content, MessageContent::MessageChatDeleteMember(_)))
+        .filter(|message| !is_hidden_membership_service_message(&message.content))
         .collect();
-
-    let mut thumbnail_prefetch_count = 0;
-    for message in raw_messages.iter().rev() {
-        if thumbnail_prefetch_count >= 16 {
-            break;
-        }
-        if local_thumbnail_path(message_thumbnail_file(message.content.clone())).is_some() {
-            continue;
-        }
-        if let Some(thumbnail) = message_thumbnail_file(message.content.clone()) {
-            thumbnail_prefetch_count += 1;
-            tokio::spawn(async move {
-                let _ = download_thumbnail_path(client_id, Some(thumbnail)).await;
-            });
-        }
-    }
 
     let mut messages: Vec<TdlibMessageInfo> =
         raw_messages.into_iter().map(tdlib_message_to_app).collect();
@@ -2652,9 +2733,7 @@ pub async fn tdlib_search_chat_messages(
             let raw_messages: Vec<tdlib_rs::types::Message> = found
                 .messages
                 .into_iter()
-                .filter(|message| {
-                    !matches!(message.content, MessageContent::MessageChatDeleteMember(_))
-                })
+                .filter(|message| !is_hidden_membership_service_message(&message.content))
                 .collect();
 
             let mut messages: Vec<TdlibMessageInfo> =
@@ -3107,11 +3186,48 @@ pub async fn tdlib_get_forum_topics(
         Err(status) => {
             return Ok(TdlibForumTopicsResult {
                 success: false,
+                is_forum: false,
                 topics: Vec::new(),
                 error: status.error.or(Some(status.state)),
             });
         }
     };
+
+    let is_forum = match functions::get_chat(chat_id, client_id).await {
+        Ok(tdlib_rs::enums::Chat::Chat(chat)) => match chat.r#type {
+            ChatType::Supergroup(group) => {
+                match functions::get_supergroup(group.supergroup_id, client_id).await {
+                    Ok(tdlib_rs::enums::Supergroup::Supergroup(info)) => info.is_forum,
+                    Err(error) => {
+                        return Ok(TdlibForumTopicsResult {
+                            success: false,
+                            is_forum: false,
+                            topics: Vec::new(),
+                            error: Some(error.message),
+                        });
+                    }
+                }
+            }
+            _ => false,
+        },
+        Err(error) => {
+            return Ok(TdlibForumTopicsResult {
+                success: false,
+                is_forum: false,
+                topics: Vec::new(),
+                error: Some(error.message),
+            });
+        }
+    };
+
+    if !is_forum {
+        return Ok(TdlibForumTopicsResult {
+            success: true,
+            is_forum: false,
+            topics: Vec::new(),
+            error: None,
+        });
+    }
 
     match functions::get_forum_topics(
         chat_id,
@@ -3126,6 +3242,7 @@ pub async fn tdlib_get_forum_topics(
     {
         Ok(tdlib_rs::enums::ForumTopics::ForumTopics(topics)) => Ok(TdlibForumTopicsResult {
             success: true,
+            is_forum: true,
             topics: topics
                 .topics
                 .into_iter()
@@ -3142,6 +3259,7 @@ pub async fn tdlib_get_forum_topics(
         }),
         Err(error) => Ok(TdlibForumTopicsResult {
             success: false,
+            is_forum: true,
             topics: Vec::new(),
             error: Some(error.message),
         }),
@@ -3750,13 +3868,15 @@ pub async fn tdlib_download_message_thumbnail(
         },
     };
 
-    let Some(thumbnail) = message_thumbnail_file(message.content) else {
-        return Ok(TdlibThumbnailResult {
-            success: false,
-            file_path: None,
-            error: Some("Mensagem sem thumbnail disponivel pelo TDLib.".to_string()),
-        });
-    };
+    let local_video_path = match &message.content {
+        MessageContent::MessageVideo(content) => Some(content.video.video.local.path.clone()),
+        MessageContent::MessageVideoNote(content) => {
+            Some(content.video_note.video.local.path.clone())
+        }
+        _ => None,
+    }
+    .filter(|path| !path.is_empty());
+    let thumbnail = message_thumbnail_file(message.content);
 
     let media_dir = match native_media_dir(&app, chat_id, message_id) {
         Ok(dir) => dir,
@@ -3769,7 +3889,16 @@ pub async fn tdlib_download_message_thumbnail(
         }
     };
 
-    match download_thumbnail_to_cache(client_id, Some(thumbnail), &media_dir).await {
+    let thumbnail_path = match thumbnail {
+        Some(thumbnail) => {
+            download_thumbnail_to_cache(client_id, Some(thumbnail), &media_dir).await
+        }
+        None => local_video_path.and_then(|path| {
+            generate_video_thumbnail_to_cache(&path, &media_dir.join("thumbnail.jpg"))
+        }),
+    };
+
+    match thumbnail_path {
         Some(path) => {
             let mut meta = read_native_media_meta(&app, chat_id, message_id)
                 .unwrap_or_else(|_| empty_native_media_meta(chat_id, message_id));
@@ -3790,7 +3919,7 @@ pub async fn tdlib_download_message_thumbnail(
             Ok(TdlibThumbnailResult {
                 success: false,
                 file_path: None,
-                error: Some("TDLib nao concluiu o download da thumbnail.".to_string()),
+                error: Some("TDLib nao disponibilizou uma thumbnail para esta mídia.".to_string()),
             })
         }
     }

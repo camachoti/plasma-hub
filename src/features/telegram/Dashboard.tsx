@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { createPortal } from 'react-dom';
 import { convertFileSrc, invokeCommand as invoke, listenNativeDragDrop } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
@@ -7,7 +6,6 @@ import { MessageMedia } from '../../components/MessageMedia';
 import { ContextMenu, IcoCopy, IcoForward, IcoReply } from '../../components/ContextMenu';
 import { InitialDashboardSkeleton, MessageListSkeleton, TopicListSkeleton } from '../../components/Skeletons';
 import { telegramService } from './TelegramService';
-import { Settings } from './Settings';
 import { Virtuoso } from 'react-virtuoso';
 import appIcon from '../../../build/icon.png';
 import { useAppearance } from '../appearance/AppearanceStore';
@@ -69,7 +67,6 @@ interface DashboardProps {
 
 const LAST_CHAT_KEY = 'plasma_last_chat_id';
 const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
-const CHAT_SCROLL_PREFIX = 'plasma_chat_scroll_';
 const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
 const INFO_PANEL_KEY = 'plasma_info_panel_open';
 
@@ -85,6 +82,7 @@ const isSupportedDroppedMedia = (fileName: string, mimeType = '') => {
 
 const DroppedVideoPreview: React.FC<{ filePath: string; src: string; fileName: string }> = ({ filePath, src, fileName }) => {
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
+  const [posterFailed, setPosterFailed] = useState(false);
   const [hasFrame, setHasFrame] = useState(false);
   const inlineVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -127,6 +125,7 @@ const DroppedVideoPreview: React.FC<{ filePath: string; src: string; fileName: s
   useEffect(() => {
     let cancelled = false;
     setPosterUrl(null);
+    setPosterFailed(false);
     setHasFrame(false);
     const video = inlineVideoRef.current;
     video?.load();
@@ -145,8 +144,16 @@ const DroppedVideoPreview: React.FC<{ filePath: string; src: string; fileName: s
   }, [filePath, src]);
 
   return (
-    <div className={`drop-video-preview ${hasFrame || posterUrl ? 'has-frame' : ''} ${posterUrl ? 'has-poster' : ''}`}>
-      {posterUrl && <img className="drop-video-poster" src={posterUrl} alt="" aria-hidden="true" />}
+    <div className={`drop-video-preview ${hasFrame || posterUrl ? 'has-frame' : ''} ${posterUrl && !posterFailed ? 'has-poster' : ''}`}>
+      {posterUrl && !posterFailed && (
+        <img
+          className="drop-video-poster"
+          src={posterUrl}
+          alt=""
+          aria-hidden="true"
+          onError={() => setPosterFailed(true)}
+        />
+      )}
       <video
         ref={inlineVideoRef}
         src={src}
@@ -195,6 +202,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
   const messagesLoadSeqRef = useRef(0);
   const sharedMediaLoadSeqRef = useRef(0);
+  const fullChatLoadSeqRef = useRef(0);
+  const fullChatRequestedChatIdRef = useRef<string | null>(null);
   const topicsLoadSeqRef = useRef(0);
   const chatSearchSeqRef = useRef(0);
   const restoredChatRef = useRef(false);
@@ -284,7 +293,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [originalMsgModal, setOriginalMsgModal] = useState<{ msg: Message; original: { id: number; text: string; date: number } } | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
   const [activeFolder, setActiveFolder] = useState<'all' | 'unread'>('all');
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [pendingDroppedMedia, setPendingDroppedMedia] = useState<PendingDroppedMedia[]>([]);
   const pendingDroppedMediaRef = useRef<PendingDroppedMedia[]>([]);
@@ -300,7 +308,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => () => {
     pendingDroppedMediaRef.current.forEach(file => revokeDroppedPreview(file.previewUrl));
   }, []);
-  const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
   const [fullChatInfo, setFullChatInfo] = useState<ChatFullInfo | null>(null);
   const [loadingFullInfo, setLoadingFullInfo] = useState(false);
   const [sharedMedia, setSharedMedia] = useState<any[]>([]);
@@ -393,9 +400,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     () => Math.max(0, 100000 - timelineItems.length),
     [timelineItems.length]
   );
-  const timelineScrollStorageKey = selectedChat
-    ? `${CHAT_SCROLL_PREFIX}${selectedChat.id}_${viewingTopic?.id ?? 'all'}`
-    : null;
   const updateVisibleMediaIds = useCallback((range: { startIndex: number; endIndex: number }) => {
     visibleRangeRef.current = range;
     if (visibleRangeRafRef.current !== null) return;
@@ -407,16 +411,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       const rawStart = Number(latestRange.startIndex || 0);
       const rawEnd = Number(latestRange.endIndex || rawStart);
-      if (timelineScrollStorageKey && timelineItems.length > 0) {
-        const firstVisibleIndex = Math.max(0, Math.min(
-          timelineItems.length - 1,
-          rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart
-        ));
-        const firstVisibleItem = timelineItems[firstVisibleIndex];
-        if (firstVisibleItem) {
-          appStorage.set(timelineScrollStorageKey, JSON.stringify({ messageId: firstVisibleItem.message.id }));
-        }
-      }
       const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
       const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
       const ids = new Set<number>();
@@ -445,7 +439,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
       setVisibleMediaIds(ids);
     });
-  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems, timelineScrollStorageKey]);
+  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
 
   const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
 
@@ -575,7 +569,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       }
       if (event.key !== 'Escape') return;
       setIsMenuOpen(false);
-      setIsSettingsMenuOpen(false);
       setIsTopicDropdownOpen(false);
       setMsgContextMenu(null);
       setChatContextMenu(null);
@@ -630,7 +623,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
     visibleMediaIdsRef.current = new Set();
     visibleRangeRef.current = null;
+    fullChatLoadSeqRef.current += 1;
+    fullChatRequestedChatIdRef.current = null;
     setVisibleMediaIds(new Set());
+    setLoadingFullInfo(false);
 
     if (selectedChat) {
       appStorage.set(LAST_CHAT_KEY, selectedChat.id);
@@ -669,7 +665,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         setMessages([]);
         setHasMoreMessages(false);
         setOldestMessageId(null);
-        fetchFullChat(selectedChat.id);
         if (selectedChat.hasTopics) {
           fetchForumTopics(selectedChat);
           topicListScrollRef.current = 0;
@@ -677,6 +672,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           topicsLoadSeqRef.current += 1;
           setLoadingTopics(false);
           loadMessages(selectedChat.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat.lastMessageDate });
+          if (selectedChat.isGroup) {
+            void fetchForumTopics(selectedChat, { detectOnly: true });
+          }
         }
       }
     } else {
@@ -706,34 +704,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   useEffect(() => {
     if (shouldScrollToBottomRef.current && virtuosoRef.current && messages.length > 0) {
-      let targetIndex: number | null = null;
-      if (timelineScrollStorageKey) {
-        try {
-          const stored = appStorage.get(timelineScrollStorageKey);
-          const anchorMessageId = stored ? Number(JSON.parse(stored).messageId) : NaN;
-          if (Number.isFinite(anchorMessageId)) {
-            const itemIndex = timelineItems.findIndex(item => (
-              Number(item.message.id) === anchorMessageId
-              || Boolean(item.messages?.some(message => Number(message.id) === anchorMessageId))
-            ));
-            if (itemIndex >= 0) targetIndex = timelineFirstItemIndex + itemIndex;
-          }
-        } catch {
-          appStorage.remove(timelineScrollStorageKey);
-        }
-      }
       const lastIndex = timelineFirstItemIndex + timelineItems.length - 1;
-      const scrollIndex = targetIndex ?? lastIndex;
-      virtuosoRef.current.scrollToIndex({ index: scrollIndex, align: targetIndex === null ? 'end' : 'center' });
+      virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end' });
       const timer = setTimeout(() => {
         if (virtuosoRef.current) {
-          virtuosoRef.current.scrollToIndex({ index: scrollIndex, align: targetIndex === null ? 'end' : 'center', behavior: 'smooth' });
+          virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end', behavior: 'smooth' });
         }
       }, 100);
       shouldScrollToBottomRef.current = false;
       return () => clearTimeout(timer);
     }
-  }, [messages, timelineItems, timelineFirstItemIndex, timelineScrollStorageKey]);
+  }, [messages, timelineItems, timelineFirstItemIndex]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -784,6 +765,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
     return () => unsubscribe();
   }, [selectedChat?.id, viewingTopic?.id, withTransientSentThumbnail]);
+
+  useEffect(() => {
+    const unsubscribe = telegramService.onMessagesDeleted(({ chatId, messageIds }) => {
+      const activeChat = selectedChatRef.current;
+      if (!activeChat || String(activeChat.id) !== String(chatId)) return;
+
+      const deletedIds = new Set(messageIds.map(Number));
+      setMessages(current => current.map(message => (
+        deletedIds.has(Number(message.id)) ? { ...message, isDeleted: true } : message
+      )));
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (pendingJumpToMsgIdRef.current) {
@@ -910,6 +905,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [infoOpen, selectedChat?.id, sharedMedia.length, loadingSharedMedia]);
 
   useEffect(() => {
+    if (!infoOpen || !selectedChat || selectedChat.isInvite) return;
+    if (fullChatRequestedChatIdRef.current === selectedChat.id) return;
+    fullChatRequestedChatIdRef.current = selectedChat.id;
+    fetchFullChat(selectedChat.id);
+  }, [infoOpen, selectedChat?.id]);
+
+  useEffect(() => {
     const handleClickOutside = () => setIsTopicDropdownOpen(false);
     if (isTopicDropdownOpen) {
       document.addEventListener('click', handleClickOutside);
@@ -924,14 +926,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       return () => document.removeEventListener('click', handleClickOutside);
     }
   }, [isMenuOpen]);
-
-  useEffect(() => {
-    const handleClickOutside = () => setIsSettingsMenuOpen(false);
-    if (isSettingsMenuOpen) {
-      setTimeout(() => document.addEventListener('click', handleClickOutside), 0);
-      return () => document.removeEventListener('click', handleClickOutside);
-    }
-  }, [isSettingsMenuOpen]);
 
   const fetchDialogs = async (limit = 250, loadingMore = false) => {
     if (loadingMore) setLoadingMoreChats(true);
@@ -1013,8 +1007,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   };
 
-  const fetchForumTopics = async (chat: Chat) => {
-    if (!chat.hasTopics) {
+  const fetchForumTopics = async (chat: Chat, { detectOnly = false }: { detectOnly?: boolean } = {}) => {
+    if (!chat.hasTopics && !detectOnly) {
       topicsLoadSeqRef.current += 1;
       setForumTopics([]);
       setLoadingTopics(false);
@@ -1025,7 +1019,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     try {
       const res = await telegramService.getForumTopics(chat.id);
       if (loadSeq !== topicsLoadSeqRef.current || String(selectedChatRef.current?.id) !== String(chat.id)) return;
-      if (res.success && res.topics) {
+      if (res.success && res.isForum && res.topics) {
         const seen = new Set<number>();
         const nextTopics = res.topics.filter((topic: ForumTopic) => {
           if (topic.kind && topic.kind !== 'forum') return false;
@@ -1035,6 +1029,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           return true;
         });
         setForumTopics(nextTopics);
+        if (detectOnly && nextTopics.length > 0) {
+          setChats(current => current.map(item => String(item.id) === String(chat.id)
+            ? { ...item, hasTopics: true }
+            : item
+          ));
+          setSelectedChat(current => current && String(current.id) === String(chat.id)
+            ? { ...current, hasTopics: true }
+            : current
+          );
+          setMessages([]);
+          setHasMoreMessages(false);
+          setOldestMessageId(null);
+          topicListScrollRef.current = 0;
+          return;
+        }
         const savedTopicId = appStorage.get(`${LAST_TOPIC_PREFIX}${chat.id}`);
         const savedTopic = savedTopicId && savedTopicId !== 'all'
           ? nextTopics.find((topic: ForumTopic) => String(topic.id) === savedTopicId)
@@ -1045,9 +1054,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           shouldScrollToBottomRef.current = true;
           loadMessages(chat.id, 0, savedTopic.id, { refresh: true, topicKind: savedTopic.kind });
         }
-      } else if (!res.success) setError(res.error || 'Failed to fetch topics');
+      } else if (res.success && !res.isForum) {
+        setForumTopics([]);
+        setChats(current => current.map(item => String(item.id) === String(chat.id)
+          ? { ...item, hasTopics: false }
+          : item
+        ));
+        setSelectedChat(current => current && String(current.id) === String(chat.id)
+          ? { ...current, hasTopics: false }
+          : current
+        );
+      } else if (!detectOnly) setError(res.error || 'Failed to fetch topics');
     } catch (e: any) {
-      if (loadSeq === topicsLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chat.id)) {
+      if (!detectOnly && loadSeq === topicsLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chat.id)) {
         setError(e.message || 'Unknown error');
       }
     } finally {
@@ -1058,14 +1077,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   };
 
   const fetchFullChat = async (chatId: string) => {
+    const loadSeq = ++fullChatLoadSeqRef.current;
     setLoadingFullInfo(true);
     try {
       const res = await telegramService.getFullChat(chatId);
+      if (loadSeq !== fullChatLoadSeqRef.current || String(selectedChatRef.current?.id) !== String(chatId)) return;
       if (res.success && res.fullInfo) {
         setFullChatInfo(res.fullInfo);
       }
     } catch (e) { debugWarn(e); }
-    finally { setLoadingFullInfo(false); }
+    finally {
+      if (loadSeq === fullChatLoadSeqRef.current && String(selectedChatRef.current?.id) === String(chatId)) {
+        setLoadingFullInfo(false);
+      }
+    }
   };
 
   const handleSelectTopic = (topic: ForumTopic) => {
@@ -2120,7 +2145,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const preloadInitialThumbnails = useCallback((chatId: string, nextMessages: Message[]) => {
     const estimatedItemHeight = density === 'compact' ? 120 : density === 'roomy' ? 180 : 150;
     const viewportItems = Math.ceil(window.innerHeight / estimatedItemHeight);
-    const limit = Math.max(12, Math.min(36, viewportItems * 3));
+    const limit = Math.max(8, Math.min(16, viewportItems + 4));
     telegramService.preloadMessageThumbnails({ chatId, messages: nextMessages, limit });
   }, [density]);
 
@@ -2169,7 +2194,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           error={error}
           filteredChats={filteredChats}
           isSearchOpen={isSearchOpen}
-          isSettingsMenuOpen={isSettingsMenuOpen}
           loading={loading}
           loadingMore={loadingMoreChats}
           hasMoreChats={hasMoreChats}
@@ -2187,8 +2211,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           setChats={setChats}
           setError={setError}
           setIsSearchOpen={setIsSearchOpen}
-          setIsSettingsMenuOpen={setIsSettingsMenuOpen}
-          setIsSettingsOpen={setIsSettingsOpen}
           setSelectedChat={setSelectedChat}
         />
 
@@ -2889,10 +2911,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             </div>
           </div>
         </div>
-      )}
-      {isSettingsOpen && createPortal(
-        <Settings onClose={() => setIsSettingsOpen(false)} />,
-        document.body
       )}
       {confirmModal && (
         <div className="confirm-modal-overlay" onClick={() => setConfirmModal(null)}>

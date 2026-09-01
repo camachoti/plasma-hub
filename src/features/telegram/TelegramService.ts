@@ -38,6 +38,11 @@ type TelegramNewMessageEvent = {
   message: Message;
 };
 
+type TelegramDeletedMessagesEvent = {
+  chatId: string;
+  messageIds: number[];
+};
+
 type MediaProgressPayload = {
   chatId: unknown;
   messageId: unknown;
@@ -49,7 +54,7 @@ type MediaProgressPayload = {
 
 class TelegramService {
   private static readonly MESSAGE_CACHE_FRESH_MS = 30 * 1000;
-  private static readonly MAX_THUMBNAIL_DOWNLOADS = 8;
+  private static readonly MAX_THUMBNAIL_DOWNLOADS = 3;
   private static readonly MAX_AVATAR_DOWNLOADS = 4;
   private static readonly MAX_FULL_MEDIA_DOWNLOADS = 2;
   private mediaProgressCallbacks: Set<(data: MediaProgressPayload) => void> = new Set();
@@ -58,6 +63,8 @@ class TelegramService {
   private saveMultipleProgressCallbacks: Set<Function> = new Set();
   private sendProgressCallbacks: Set<Function> = new Set();
   private newMessageCallbacks: Set<(data: TelegramNewMessageEvent) => void> = new Set();
+  private deletedMessagesCallbacks: Set<(data: TelegramDeletedMessagesEvent) => void> = new Set();
+  private messageCacheKeysByChat = new Map<string, Set<string>>();
   private activeDownloadAborted = false;
   private saveMultipleAborted = false;
   private serviceWorkerMessageHandler: (event: MessageEvent) => void;
@@ -134,6 +141,17 @@ class TelegramService {
         this.newMessageCallbacks.forEach(cb => cb({ chatId, topicId, topicKind, message }));
       }).catch(error => {
         debugWarn('[TelegramService] Failed to listen to native new messages:', error);
+      });
+      this.tdlibBridge.onMessagesDeleted(data => {
+        const chatId = String(data.chatId);
+        const messageIds = data.messageIds.map(Number).filter(Number.isFinite);
+        if (!messageIds.length) return;
+        this.markMessagesDeletedInCache(chatId, messageIds).catch(error => {
+          debugWarn('[TelegramService] Failed to retain deleted messages in cache:', error);
+        });
+        this.deletedMessagesCallbacks.forEach(cb => cb({ chatId, messageIds }));
+      }).catch(error => {
+        debugWarn('[TelegramService] Failed to listen to native message deletions:', error);
       });
     }
   }
@@ -321,14 +339,51 @@ class TelegramService {
     }
   }
 
+  private registerMessageCacheKey(chatId: string, cacheKey: string) {
+    const keys = this.messageCacheKeysByChat.get(chatId) ?? new Set<string>();
+    keys.add(cacheKey);
+    this.messageCacheKeysByChat.set(chatId, keys);
+  }
+
+  private async saveMessagePage(cacheKey: string, messages: any[], meta?: { lastFetchedAt?: number }) {
+    const cached = await mediaCache.getMessages(cacheKey);
+    const latestIds = new Set(messages.map(message => Number(message.id)));
+    const locallyDeleted = cached.filter(message => message?.isDeleted && !latestIds.has(Number(message.id)));
+    const merged = [...messages, ...locallyDeleted].sort(compareTelegramMessages);
+    await mediaCache.saveMessages(cacheKey, merged, meta);
+  }
+
+  private async markMessagesDeletedInCache(chatId: string, messageIds: number[]) {
+    const deletedIds = new Set(messageIds.map(Number));
+    const cacheKeys = new Set([
+      messageCacheKey(chatId),
+      ...(this.messageCacheKeysByChat.get(chatId) ?? []),
+    ]);
+
+    await Promise.all(Array.from(cacheKeys, async cacheKey => {
+      const cached = await mediaCache.getMessages(cacheKey);
+      if (!cached.length) return;
+      let changed = false;
+      const retained = cached.map(message => {
+        if (!deletedIds.has(Number(message.id)) || message.isDeleted) return message;
+        changed = true;
+        return { ...message, isDeleted: true };
+      });
+      if (changed) await mediaCache.saveMessages(cacheKey, retained);
+    }));
+  }
+
   private async mergeMessageIntoCache(chatId: string, message: any, topicId?: number | null, topicKind = 'forum') {
     const keys = [messageCacheKey(chatId, topicId ?? undefined, topicKind)];
     if (topicId) keys.push(messageCacheKey(chatId));
+    keys.forEach(key => this.registerMessageCacheKey(chatId, key));
     await Promise.all(keys.map(key => this.enqueueMessageCacheMerge(key, message)));
   }
 
   private normalizeNativeMessages(chatId: any, messages: any[]) {
-    return messages.map(message => {
+    return messages
+      .filter(message => message?.hasMedia || String(message?.text || message?.message || '').trim().length > 0)
+      .map(message => {
       const thumbnailPath = message?.thumbnailPath || message?.thumbnail_path;
       if (!thumbnailPath || message.thumbnailUrl) return message;
 
@@ -338,7 +393,7 @@ class TelegramService {
         ...message,
         thumbnailUrl,
       };
-    });
+      });
   }
 
   private isMessageCacheFresh(meta: any) {
@@ -757,9 +812,15 @@ class TelegramService {
     const fakeChat = this.getTwitterFakeChat(chatId);
     if (fakeChat) return this.getMessages({ chatId, limit, topicId });
 
-    const cached = await mediaCache.getMessages(messageCacheKey(chatId, topicId, topicKind));
-    const cacheMeta = await mediaCache.getMessagePageMeta(messageCacheKey(chatId, topicId, topicKind));
-    const ordered = [...cached].sort(compareTelegramMessages);
+    const cacheKey = messageCacheKey(chatId, topicId, topicKind);
+    this.registerMessageCacheKey(String(chatId), cacheKey);
+    const [cached, cacheMeta] = await Promise.all([
+      mediaCache.getMessages(cacheKey),
+      mediaCache.getMessagePageMeta(cacheKey),
+    ]);
+    const ordered = cached
+      .filter(message => message?.hasMedia || String(message?.text || message?.message || '').trim().length > 0)
+      .sort(compareTelegramMessages);
     const page = ordered.slice(-limit);
     const newestMessageDate = ordered.reduce((newest, message) => {
       const date = Number(message?.date || 0);
@@ -812,6 +873,7 @@ class TelegramService {
     if (this.useTdlibOnly()) {
       try {
         const cacheKey = messageCacheKey(chatId, topicId, topicKind);
+        this.registerMessageCacheKey(String(chatId), cacheKey);
         if (!offsetId && !refresh) {
           const cached = await this.getCachedMessages({ chatId, limit, topicId, topicKind });
           const hasMissingSenderNames = cached.messages?.some((message: any) => !message.out && !message.senderName);
@@ -825,7 +887,7 @@ class TelegramService {
             ? this.normalizeNativeMessages(chatId, nativeRes.messages)
             : [];
           if (!offsetId && Array.isArray(nativeRes.messages)) {
-            await mediaCache.saveMessages(cacheKey, messages, { lastFetchedAt: Date.now() });
+            await this.saveMessagePage(cacheKey, messages, { lastFetchedAt: Date.now() });
           }
           return { ...nativeRes, messages };
         }
@@ -1705,6 +1767,11 @@ class TelegramService {
   onNewMessage(cb: (data: TelegramNewMessageEvent) => void) {
     this.newMessageCallbacks.add(cb);
     return () => { this.newMessageCallbacks.delete(cb); };
+  }
+
+  onMessagesDeleted(cb: (data: TelegramDeletedMessagesEvent) => void) {
+    this.deletedMessagesCallbacks.add(cb);
+    return () => { this.deletedMessagesCallbacks.delete(cb); };
   }
   
   async checkInvite(_url: string): Promise<any> { return { success: false, chat: null, alreadyMember: false }; }

@@ -3,10 +3,15 @@ import { At, ChatCircle, DownloadSimple, Gear as SettingsIcon } from "@phosphor-
 import { runtimeCapabilities } from "../shared/platform/runtime";
 import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
 
-const Dashboard = lazy(() => import("../features/telegram/Dashboard").then(module => ({ default: module.Dashboard })));
-const Downloads = lazy(() => import("../features/telegram/Downloads").then(module => ({ default: module.Downloads })));
-const TelegramSettings = lazy(() => import("../features/telegram/Settings").then(module => ({ default: module.Settings })));
-const TwitterLibrary = lazy(() => import("../features/twitter/TwitterLibrary").then(module => ({ default: module.TwitterLibrary })));
+const loadDashboard = () => import("../features/telegram/Dashboard");
+const loadDownloads = () => import("../features/telegram/Downloads");
+const loadTelegramSettings = () => import("../features/telegram/Settings");
+const loadTwitterLibrary = () => import("../features/twitter/TwitterLibrary");
+
+const Dashboard = lazy(() => loadDashboard().then(module => ({ default: module.Dashboard })));
+const Downloads = lazy(() => loadDownloads().then(module => ({ default: module.Downloads })));
+const TelegramSettings = lazy(() => loadTelegramSettings().then(module => ({ default: module.Settings })));
+const TwitterLibrary = lazy(() => loadTwitterLibrary().then(module => ({ default: module.TwitterLibrary })));
 
 export type AppTab = "telegram" | "downloads" | "twitter";
 
@@ -36,6 +41,21 @@ export function AppShell({
   onTelegramLoginRequest,
 }: AppShellProps) {
   const [downloadToast, setDownloadToast] = useState<DownloadItem | null>(null);
+  const [visitedTabs, setVisitedTabs] = useState<Set<AppTab>>(() => new Set(["telegram"]));
+
+  const activateTab = (tab: AppTab) => {
+    setVisitedTabs(current => current.has(tab) ? current : new Set(current).add(tab));
+    onActiveTabChange(tab);
+  };
+
+  const preloadTab = (tab: AppTab) => {
+    if (tab === "downloads") void loadDownloads();
+    if (tab === "twitter") void loadTwitterLibrary();
+  };
+
+  const preloadSettings = () => {
+    void loadTelegramSettings();
+  };
 
   useEffect(() => {
     let timeoutId: number | undefined;
@@ -51,6 +71,10 @@ export function AppShell({
       window.clearTimeout(timeoutId);
     };
   }, []);
+
+  useEffect(() => {
+    setVisitedTabs(current => current.has(activeTab) ? current : new Set(current).add(activeTab));
+  }, [activeTab]);
   const fallback = (
     <div className="app-loading">
       <div className="loader-surface" role="status" aria-label="Carregando">
@@ -93,7 +117,7 @@ export function AppShell({
       <div className="sidebar">
         <button
           className={`sidebar-item ${activeTab === "telegram" ? "active" : ""}`}
-          onClick={() => onActiveTabChange("telegram")}
+          onClick={() => activateTab("telegram")}
           title="Telegram"
           aria-label="Abrir Telegram"
         >
@@ -101,7 +125,9 @@ export function AppShell({
         </button>
         <button
           className={`sidebar-item ${activeTab === "downloads" ? "active" : ""}`}
-          onClick={() => onActiveTabChange("downloads")}
+          onClick={() => activateTab("downloads")}
+          onPointerEnter={() => preloadTab("downloads")}
+          onFocus={() => preloadTab("downloads")}
           title="Downloads"
           aria-label="Abrir downloads"
         >
@@ -109,7 +135,9 @@ export function AppShell({
         </button>
         <button
           className={`sidebar-item ${activeTab === "twitter" ? "active" : ""}`}
-          onClick={() => onActiveTabChange("twitter")}
+          onClick={() => activateTab("twitter")}
+          onPointerEnter={() => preloadTab("twitter")}
+          onFocus={() => preloadTab("twitter")}
           title="Twitter / X"
           aria-label="Abrir Twitter / X"
         >
@@ -119,6 +147,9 @@ export function AppShell({
         <button
           className={`sidebar-item ${isSettingsOpen ? "active" : ""}`}
           onClick={onSettingsOpen}
+          onPointerEnter={preloadSettings}
+          onFocus={preloadSettings}
+          onPointerDown={preloadSettings}
           title="Configurações"
           aria-label="Abrir configurações"
         >
@@ -127,23 +158,29 @@ export function AppShell({
       </div>
 
       <div className="main-content" style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <Suspense fallback={fallback}>
-          {activeTab === "telegram" && (
-            <div style={{ width: "100%", height: "100%" }}>
+        {visitedTabs.has("telegram") && (
+          <div className={`app-tab-panel ${activeTab === "telegram" ? "active" : "inactive"}`} aria-hidden={activeTab !== "telegram"}>
+            <Suspense fallback={fallback}>
               <Dashboard skipLogin={skipLogin} onTelegramLoginRequest={onTelegramLoginRequest} />
-            </div>
-          )}
-          {activeTab === "downloads" && (
-            <div style={{ width: "100%", height: "100%" }}>
+            </Suspense>
+          </div>
+        )}
+        {visitedTabs.has("downloads") && (
+          <div className={`app-tab-panel ${activeTab === "downloads" ? "active" : "inactive"}`} aria-hidden={activeTab !== "downloads"}>
+            <Suspense fallback={activeTab === "downloads" ? fallback : null}>
               <Downloads />
-            </div>
-          )}
-          {activeTab === "twitter" && (
-            <div style={{ width: "100%", height: "100%" }}>
+            </Suspense>
+          </div>
+        )}
+        {visitedTabs.has("twitter") && (
+          <div className={`app-tab-panel ${activeTab === "twitter" ? "active" : "inactive"}`} aria-hidden={activeTab !== "twitter"}>
+            <Suspense fallback={activeTab === "twitter" ? fallback : null}>
               <TwitterLibrary />
-            </div>
-          )}
-          {isSettingsOpen && (
+            </Suspense>
+          </div>
+        )}
+        {isSettingsOpen && (
+          <Suspense fallback={null}>
             <div style={{
               position: "absolute",
               top: 0,
@@ -159,8 +196,8 @@ export function AppShell({
             }}>
               <TelegramSettings onClose={onSettingsClose} />
             </div>
-          )}
-        </Suspense>
+          </Suspense>
+        )}
       </div>
     </div>
   );

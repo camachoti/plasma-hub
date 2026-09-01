@@ -4,7 +4,7 @@ import { ChatAvatar } from '../../components/ChatAvatar';
 import { ChatListSkeleton } from '../../components/Skeletons';
 import type { Chat } from './TelegramDashboardTypes';
 import { hashColor } from './TelegramDashboardConstants';
-import { IconLogOut, IconSearch, IconSettings } from './DashboardIcons';
+import { IconLogOut, IconSearch } from './DashboardIcons';
 import { debugWarn } from '../../shared/debug/logger';
 
 interface DashboardChatListProps {
@@ -14,7 +14,6 @@ interface DashboardChatListProps {
   error: string;
   filteredChats: Chat[];
   isSearchOpen: boolean;
-  isSettingsMenuOpen: boolean;
   loading: boolean;
   loadingMore: boolean;
   hasMoreChats: boolean;
@@ -32,8 +31,6 @@ interface DashboardChatListProps {
   setChats: React.Dispatch<React.SetStateAction<Chat[]>>;
   setError: React.Dispatch<React.SetStateAction<string>>;
   setIsSearchOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setIsSettingsMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  setIsSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedChat: React.Dispatch<React.SetStateAction<Chat | null>>;
 }
 
@@ -124,7 +121,6 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   error,
   filteredChats,
   isSearchOpen,
-  isSettingsMenuOpen,
   loading,
   loadingMore,
   hasMoreChats,
@@ -142,8 +138,6 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   setChats,
   setError,
   setIsSearchOpen,
-  setIsSettingsMenuOpen,
-  setIsSettingsOpen,
   setSelectedChat,
 }) => (
   <div className="list">
@@ -285,25 +279,6 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
       <div>
         <div className="name">Você</div>
         <div className="sub"><span className="pip-dot" style={{ background: 'var(--good)', marginRight: 4 }} />online</div>
-      </div>
-      <div className="user-card-actions" style={{ position: 'relative' }}>
-        <button
-          className={`icon-btn ${isSettingsMenuOpen ? 'active' : ''}`}
-          onClick={event => {
-            event.stopPropagation();
-            setIsSettingsMenuOpen(value => !value);
-          }}
-          title="Configurações e Aparência"
-        >
-          <IconSettings />
-        </button>
-        {isSettingsMenuOpen && (
-          <div className="dropdown-menu" style={{ bottom: 'calc(100% + 8px)', top: 'auto', right: 0 }} onClick={event => event.stopPropagation()}>
-            <div className="dropdown-item" onClick={() => { setIsSettingsOpen(true); setIsSettingsMenuOpen(false); }}>
-              <IconSettings /> Configurações Gerais
-            </div>
-          </div>
-        )}
       </div>
     </div>
   </div>
