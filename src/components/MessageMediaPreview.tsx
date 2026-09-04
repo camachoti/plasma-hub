@@ -235,7 +235,11 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
 
         {previewSrc && (shouldShowVideoSizeChip || (hasCachedFullMedia && !shouldShowProgress)) && (
           <div className="media-overlay-meta top-left">
-            {shouldShowVideoSizeChip && <span className="media-meta-label">{mediaSizeLabel}</span>}
+            {shouldShowVideoSizeChip && (
+              <span className="media-meta-label">
+                {shouldShowProgress ? progressBytesLabel || mediaSizeLabel : mediaSizeLabel}
+              </span>
+            )}
             {hasCachedFullMedia && !shouldShowProgress && (
               <span className="media-cache-indicator" title="Mídia disponível no cache local" aria-label="Mídia em cache" />
             )}

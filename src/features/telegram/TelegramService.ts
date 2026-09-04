@@ -318,9 +318,26 @@ class TelegramService {
     throw new Error('Use TDLib nativo.');
   }
 
-  private async enqueueMessageCacheMerge(key: string, message: any) {
+  private async enqueueMessageCacheWrite<T>(key: string, write: () => Promise<T>): Promise<T> {
     const previous = this.messageCacheMergeQueues.get(key) ?? Promise.resolve();
+    let result: T;
     const next = previous.catch(() => undefined).then(async () => {
+      result = await write();
+    });
+
+    this.messageCacheMergeQueues.set(key, next);
+    try {
+      await next;
+      return result!;
+    } finally {
+      if (this.messageCacheMergeQueues.get(key) === next) {
+        this.messageCacheMergeQueues.delete(key);
+      }
+    }
+  }
+
+  private async enqueueMessageCacheMerge(key: string, message: any) {
+    await this.enqueueMessageCacheWrite(key, async () => {
       const cached = await mediaCache.getMessages(key);
       const byId = new Map<number, any>();
       cached.forEach(item => byId.set(Number(item.id), item));
@@ -328,15 +345,6 @@ class TelegramService {
       const merged = Array.from(byId.values()).sort(compareTelegramMessages);
       await mediaCache.saveMessages(key, merged);
     });
-
-    this.messageCacheMergeQueues.set(key, next);
-    try {
-      await next;
-    } finally {
-      if (this.messageCacheMergeQueues.get(key) === next) {
-        this.messageCacheMergeQueues.delete(key);
-      }
-    }
   }
 
   private registerMessageCacheKey(chatId: string, cacheKey: string) {
@@ -346,11 +354,14 @@ class TelegramService {
   }
 
   private async saveMessagePage(cacheKey: string, messages: any[], meta?: { lastFetchedAt?: number }) {
-    const cached = await mediaCache.getMessages(cacheKey);
-    const latestIds = new Set(messages.map(message => Number(message.id)));
-    const locallyDeleted = cached.filter(message => message?.isDeleted && !latestIds.has(Number(message.id)));
-    const merged = [...messages, ...locallyDeleted].sort(compareTelegramMessages);
-    await mediaCache.saveMessages(cacheKey, merged, meta);
+    return this.enqueueMessageCacheWrite(cacheKey, async () => {
+      const cached = await mediaCache.getMessages(cacheKey);
+      const latestIds = new Set(messages.map(message => Number(message.id)));
+      const locallyDeleted = cached.filter(message => message?.isDeleted && !latestIds.has(Number(message.id)));
+      const merged = [...messages, ...locallyDeleted].sort(compareTelegramMessages);
+      await mediaCache.saveMessages(cacheKey, merged, meta);
+      return merged;
+    });
   }
 
   private async markMessagesDeletedInCache(chatId: string, messageIds: number[]) {
@@ -361,15 +372,17 @@ class TelegramService {
     ]);
 
     await Promise.all(Array.from(cacheKeys, async cacheKey => {
-      const cached = await mediaCache.getMessages(cacheKey);
-      if (!cached.length) return;
-      let changed = false;
-      const retained = cached.map(message => {
-        if (!deletedIds.has(Number(message.id)) || message.isDeleted) return message;
-        changed = true;
-        return { ...message, isDeleted: true };
+      await this.enqueueMessageCacheWrite(cacheKey, async () => {
+        const cached = await mediaCache.getMessages(cacheKey);
+        if (!cached.length) return;
+        let changed = false;
+        const retained = cached.map(message => {
+          if (!deletedIds.has(Number(message.id)) || message.isDeleted) return message;
+          changed = true;
+          return { ...message, isDeleted: true };
+        });
+        if (changed) await mediaCache.saveMessages(cacheKey, retained);
       });
-      if (changed) await mediaCache.saveMessages(cacheKey, retained);
     }));
   }
 
@@ -887,7 +900,8 @@ class TelegramService {
             ? this.normalizeNativeMessages(chatId, nativeRes.messages)
             : [];
           if (!offsetId && Array.isArray(nativeRes.messages)) {
-            await this.saveMessagePage(cacheKey, messages, { lastFetchedAt: Date.now() });
+            const cachedMessages = await this.saveMessagePage(cacheKey, messages, { lastFetchedAt: Date.now() });
+            return { ...nativeRes, messages: cachedMessages };
           }
           return { ...nativeRes, messages };
         }

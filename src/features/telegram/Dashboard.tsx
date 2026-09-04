@@ -51,6 +51,44 @@ interface PendingDroppedMedia {
   isVideo: boolean;
 }
 
+interface ChatSearchSelectProps {
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  ariaLabel: string;
+  className?: string;
+  onChange: (value: string) => void;
+}
+
+const ChatSearchSelect: React.FC<ChatSearchSelectProps> = React.memo(({ value, options, ariaLabel, className, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const selected = options.find(option => option.value === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [open]);
+
+  return (
+    <div className={`custom-select chat-search-custom-select ${className || ''} ${open ? 'open' : ''}`}>
+      <button type="button" className="custom-select-trigger" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={event => { event.stopPropagation(); setOpen(current => !current); }}>
+        <span>{selected?.label || ''}</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+      </button>
+      {open && (
+        <div className="custom-select-options" role="listbox" aria-label={ariaLabel} onClick={event => event.stopPropagation()}>
+          {options.map(option => (
+            <button key={option.value} type="button" role="option" aria-selected={option.value === value} className={`custom-select-option ${option.value === value ? 'selected' : ''}`} onClick={() => { onChange(option.value); setOpen(false); }}>
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
 interface DownloadProgress {
   total: number;
   downloaded: number;
@@ -187,6 +225,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const visibleMediaIdsRef = useRef<Set<number>>(new Set());
   const visibleRangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
   const visibleRangeRafRef = useRef<number | null>(null);
+  const [isNearLatest, setIsNearLatest] = useState(true);
+  const isNearLatestRef = useRef(true);
+  const [pendingIncomingMessages, setPendingIncomingMessages] = useState(0);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -263,7 +304,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [chatSearchError, setChatSearchError] = useState<string | null>(null);
   const [chatSearchMediaFilter, setChatSearchMediaFilter] = useState<'all' | 'media' | 'photo' | 'video' | 'album'>('all');
   const [chatSearchSenderFilter, setChatSearchSenderFilter] = useState('all');
-  const [chatSearchDateFilter, setChatSearchDateFilter] = useState('');
   const [showDetailedProgress, setShowDetailedProgress] = useState(false);
   const [bulkDownloadActive, setBulkDownloadActive] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
@@ -377,12 +417,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (chatSearchMediaFilter === 'video' && !message.isVideo) return false;
     if (chatSearchMediaFilter === 'album' && !message.groupedId) return false;
     if (chatSearchSenderFilter !== 'all' && message.senderId !== chatSearchSenderFilter) return false;
-    if (chatSearchDateFilter) {
-      const messageDate = new Date(Number(message.date) * 1000).toISOString().slice(0, 10);
-      if (messageDate !== chatSearchDateFilter) return false;
-    }
     return true;
-  }), [chatSearchSourceResults, chatSearchMediaFilter, chatSearchSenderFilter, chatSearchDateFilter]);
+  }), [chatSearchSourceResults, chatSearchMediaFilter, chatSearchSenderFilter]);
   const activeChatSearchResult = chatSearchResults[chatSearchResultIndex] ?? null;
   const searchMediaTimelineItems = useMemo<TimelineItem[]>(
     () => getTimelineItems([...searchMediaResults].sort(compareTelegramMessages)),
@@ -411,6 +447,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       const rawStart = Number(latestRange.startIndex || 0);
       const rawEnd = Number(latestRange.endIndex || rawStart);
+      const visibleEnd = rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd;
+      const nextIsNearLatest = visibleEnd >= timelineItems.length - 2;
+      if (isNearLatestRef.current !== nextIsNearLatest) {
+        isNearLatestRef.current = nextIsNearLatest;
+        setIsNearLatest(nextIsNearLatest);
+      }
+      if (nextIsNearLatest) setPendingIncomingMessages(0);
       const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
       const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
       const ids = new Set<number>();
@@ -440,6 +483,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setVisibleMediaIds(ids);
     });
   }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
+
+  const scrollToLatestMessages = useCallback(() => {
+    const latestIndex = timelineFirstItemIndex + timelineItems.length - 1;
+    if (latestIndex < timelineFirstItemIndex) return;
+    isNearLatestRef.current = true;
+    setIsNearLatest(true);
+    setPendingIncomingMessages(0);
+    virtuosoRef.current?.scrollToIndex({ index: latestIndex, align: 'end', behavior: 'smooth' });
+  }, [timelineFirstItemIndex, timelineItems.length]);
 
   const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
 
@@ -591,7 +643,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       const filters = JSON.parse(stored);
       if (['all', 'media', 'photo', 'video', 'album'].includes(filters.media)) setChatSearchMediaFilter(filters.media);
       if (typeof filters.sender === 'string') setChatSearchSenderFilter(filters.sender);
-      if (typeof filters.date === 'string') setChatSearchDateFilter(filters.date);
     } catch {
       appStorage.remove(`${CHAT_SEARCH_FILTER_PREFIX}${selectedChat.id}`);
     }
@@ -602,9 +653,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     appStorage.set(`${CHAT_SEARCH_FILTER_PREFIX}${selectedChat.id}`, JSON.stringify({
       media: chatSearchMediaFilter,
       sender: chatSearchSenderFilter,
-      date: chatSearchDateFilter,
     }));
-  }, [selectedChat?.id, chatSearchMediaFilter, chatSearchSenderFilter, chatSearchDateFilter]);
+  }, [selectedChat?.id, chatSearchMediaFilter, chatSearchSenderFilter]);
 
   useEffect(() => {
     if (showDetailedProgress && progressDetailsListRef.current) {
@@ -623,6 +673,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
     visibleMediaIdsRef.current = new Set();
     visibleRangeRef.current = null;
+    isNearLatestRef.current = true;
+    setIsNearLatest(true);
+    setPendingIncomingMessages(0);
     fullChatLoadSeqRef.current += 1;
     fullChatRequestedChatIdRef.current = null;
     setVisibleMediaIds(new Set());
@@ -653,7 +706,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setChatSearchResultIndex(0);
       setChatSearchMediaFilter('all');
       setChatSearchSenderFilter('all');
-      setChatSearchDateFilter('');
       if (selectedChat.isInvite) {
         setFullChatInfo({
           about: selectedChat.about,
@@ -698,7 +750,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setChatSearchResultIndex(0);
       setChatSearchMediaFilter('all');
       setChatSearchSenderFilter('all');
-      setChatSearchDateFilter('');
     }
   }, [selectedChat?.id]);
 
@@ -760,7 +811,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         return Array.from(byId.values()).sort(compareTelegramMessages);
       });
 
-      shouldScrollToBottomRef.current = true;
+      if (isNearLatestRef.current) {
+        shouldScrollToBottomRef.current = true;
+      } else {
+        setPendingIncomingMessages(current => current + 1);
+      }
     });
 
     return () => unsubscribe();
@@ -2380,35 +2435,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 	                      }}
 	                    />
 	                  </div>
-	                  <select
-	                    className="chat-message-search-filter"
+	                  <ChatSearchSelect
 	                    value={chatSearchMediaFilter}
-	                    onChange={event => setChatSearchMediaFilter(event.target.value as typeof chatSearchMediaFilter)}
-	                    aria-label="Filtrar busca por mídia"
-	                  >
-	                    <option value="all">Tudo</option>
-	                    <option value="media">Com mídia</option>
-	                    <option value="photo">Fotos</option>
-	                    <option value="video">Vídeos</option>
-	                    <option value="album">Álbuns</option>
-	                  </select>
-	                  <select
-	                    className="chat-message-search-filter sender"
-	                    value={chatSearchSenderFilter}
-	                    onChange={event => setChatSearchSenderFilter(event.target.value)}
-	                    aria-label="Filtrar busca por usuário"
-	                  >
-	                    <option value="all">Todos usuários</option>
-	                    {chatSearchSenderOptions.map(([senderId, senderName]) => (
-	                      <option key={senderId} value={senderId}>{senderName}</option>
-	                    ))}
-	                  </select>
-	                  <input
-	                    className="chat-message-search-date"
-	                    type="date"
-	                    value={chatSearchDateFilter}
-	                    onChange={event => setChatSearchDateFilter(event.target.value)}
-	                    aria-label="Filtrar busca por data"
+	                    onChange={value => setChatSearchMediaFilter(value as typeof chatSearchMediaFilter)}
+	                    ariaLabel="Filtrar busca por mídia"
+	                    options={[{ value: 'all', label: 'Tudo' }, { value: 'media', label: 'Com mídia' }, { value: 'photo', label: 'Fotos' }, { value: 'video', label: 'Vídeos' }, { value: 'album', label: 'Álbuns' }]}
+	                  />
+                  <ChatSearchSelect
+                    value={chatSearchSenderFilter}
+                    className="sender"
+	                    onChange={setChatSearchSenderFilter}
+	                    ariaLabel="Filtrar busca por usuário"
+	                    options={[{ value: 'all', label: 'Todos usuários' }, ...chatSearchSenderOptions.map(([senderId, senderName]) => ({ value: senderId, label: senderName }))]}
 	                  />
 		                  <span className="chat-message-search-count">
 		                    {chatSearchLoading
@@ -2593,6 +2631,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       </p>
                     </div>
                   ) : (
+                    <>
                     <Virtuoso
                       ref={virtuosoRef}
                       style={{ height: '100%', width: '100%', outline: 'none', zIndex: 1 }}
@@ -2645,6 +2684,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         ) : null;
                       }}
                     />
+                    {!isNearLatest && (
+                      <button type="button" className="timeline-latest-button" onClick={scrollToLatestMessages}>
+                        <span aria-hidden="true">↓</span>
+                        {pendingIncomingMessages > 0
+                          ? `${pendingIncomingMessages} ${pendingIncomingMessages === 1 ? 'nova mensagem' : 'novas mensagens'}`
+                          : 'Ir para recentes'}
+                      </button>
+                    )}
+                    </>
                   )}
                 </div>
               )}

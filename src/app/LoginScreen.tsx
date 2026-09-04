@@ -1,5 +1,6 @@
 import appIcon from "../assets/plasma-hub-logo.png";
 import { runtimeCapabilities } from "../shared/platform/runtime";
+import { Select } from "../design-system";
 
 interface LoginScreenProps {
   palette: string;
@@ -58,25 +59,7 @@ export function LoginScreen({
           <div className="login-form slide-up">
             <label>País e Número de Telefone</label>
             <div className="login-phone-row">
-              <select
-                value={countryCode}
-                onChange={event => onCountryCodeChange(event.target.value)}
-                disabled={isLoading}
-                className="login-input"
-              >
-                <option value="+55">🇧🇷 +55</option>
-                <option value="+1">🇺🇸 +1</option>
-                <option value="+351">🇵🇹 +351</option>
-                <option value="+44">🇬🇧 +44</option>
-                <option value="+49">🇩🇪 +49</option>
-                <option value="+33">🇫🇷 +33</option>
-                <option value="+39">🇮🇹 +39</option>
-                <option value="+34">🇪🇸 +34</option>
-                <option value="+54">🇦🇷 +54</option>
-                <option value="+56">🇨🇱 +56</option>
-                <option value="+57">🇨🇴 +57</option>
-                <option value="+52">🇲🇽 +52</option>
-              </select>
+              <Select value={countryCode} onChange={onCountryCodeChange} disabled={isLoading} className="login-input" ariaLabel="Código do país" options={[['+55','🇧🇷 +55'],['+1','🇺🇸 +1'],['+351','🇵🇹 +351'],['+44','🇬🇧 +44'],['+49','🇩🇪 +49'],['+33','🇫🇷 +33'],['+39','🇮🇹 +39'],['+34','🇪🇸 +34'],['+54','🇦🇷 +54'],['+56','🇨🇱 +56'],['+57','🇨🇴 +57'],['+52','🇲🇽 +52']].map(([value, label]) => ({ value, label }))} />
               <input
                 type="text"
                 inputMode="numeric"

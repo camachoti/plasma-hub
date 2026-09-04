@@ -7,6 +7,7 @@ import { downloadService, type DownloadItem } from '../downloader/DownloadServic
 import type { MediaInfo } from '../downloader/types';
 import { createTwitterProfileChat } from '../telegram/TwitterFakeChatStore';
 import { getStoredTwitterCookies, loadStoredTwitterCookies, onTwitterSettingsChanged } from './TwitterSettingsStore';
+import { Select } from '../../design-system';
 import '../../styles/TwitterLibrary.css';
 
 interface TwitterProfileInfo {
@@ -269,13 +270,7 @@ export function TwitterLibrary() {
                 <p>{media.author} {media.duration !== '—' ? `· ${media.duration}` : ''}</p>
                 <h3>{media.title}</h3>
                 <div className="twitter-format-row">
-                  <select value={selectedFormat} onChange={event => setSelectedFormat(event.target.value)}>
-                    {media.formats.video.map(format => (
-                      <option key={format.id} value={format.id} disabled={!format.url}>
-                        {format.label} {format.size !== '—' ? `(${format.size})` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <Select value={selectedFormat} onChange={setSelectedFormat} ariaLabel="Formato do vídeo" options={media.formats.video.map(format => ({ value: format.id, label: `${format.label} ${format.size !== '—' ? `(${format.size})` : ''}`, disabled: !format.url }))} />
                   <button className="twitter-primary-btn" onClick={handleDownload} disabled={!canDownload || downloading}>
                     {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
                     <span>{downloading ? 'Baixando' : 'Baixar'}</span>

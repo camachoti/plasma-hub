@@ -143,7 +143,10 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   <div className="list">
     <div className="list-header">
       <div className="list-title">
-        <h1>Chats</h1>
+        <div className="list-title-copy">
+          <span>Telegram</span>
+          <h1>Conversas</h1>
+        </div>
         <div className="list-title-actions">
           <button
             className={`icon-btn ${isSearchOpen ? 'active' : ''}`}

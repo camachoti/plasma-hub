@@ -4,6 +4,7 @@ import { CheckCircle, TelegramLogo, Trash, TwitterLogo, WarningCircle } from '@p
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
 import { getStoredTwitterCookies, loadStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
+import { Dialog, Select } from '../../design-system';
 
 interface CacheStats {
   totalSize: number;
@@ -185,11 +186,10 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
       : tdlibState.replace(/_/g, ' ');
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div className="settings-panel" onClick={e => e.stopPropagation()}>
+    <Dialog className="settings-panel" label="Configurações Gerais" onClose={onClose}>
         <div className="settings-header">
-          <h2>Configurações Gerais</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2 id="settings-title">Configurações Gerais</h2>
+          <button className="icon-btn" onClick={onClose} aria-label="Fechar configurações">✕</button>
         </div>
         <div className="settings-tabs" role="tablist" aria-label="Seções de configurações">
           <button
@@ -373,14 +373,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   <h3>Limite de Cache</h3>
                   <div className="settings-field">
                     <label>Tamanho máximo</label>
-                    <select
-                      value={settings.maxCacheSize}
-                      onChange={e => setSettings(s => ({ ...s, maxCacheSize: Number(e.target.value) }))}
-                    >
-                      {SIZE_OPTIONS.map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
+                    <Select value={String(settings.maxCacheSize)} options={SIZE_OPTIONS.map(o => ({ value: String(o.value), label: o.label }))} onChange={value => setSettings(s => ({ ...s, maxCacheSize: Number(value) }))} ariaLabel="Tamanho máximo do cache" />
                   </div>
                   <p className="settings-hint">
                     Quando o limite é atingido, os arquivos de mídia menos utilizados são removidos automaticamente (LRU).
@@ -391,14 +384,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   <h3>Atualização de Avatares</h3>
                   <div className="settings-field">
                     <label>Intervalo de atualização</label>
-                    <select
-                      value={settings.avatarRefreshHours}
-                      onChange={e => setSettings(s => ({ ...s, avatarRefreshHours: Number(e.target.value) }))}
-                    >
-                      {AVATAR_REFRESH_OPTIONS.map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
+                    <Select value={String(settings.avatarRefreshHours)} options={AVATAR_REFRESH_OPTIONS.map(o => ({ value: String(o.value), label: o.label }))} onChange={value => setSettings(s => ({ ...s, avatarRefreshHours: Number(value) }))} ariaLabel="Intervalo de atualização de avatares" />
                   </div>
                 </div>
 
@@ -406,14 +392,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   <h3>Desempenho de Download</h3>
                   <div className="settings-field">
                     <label>Conexões Simultâneas (Workers)</label>
-                    <select
-                      value={settings.downloadWorkers}
-                      onChange={e => setSettings(s => ({ ...s, downloadWorkers: Number(e.target.value) }))}
-                    >
-                      {WORKER_OPTIONS.map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
+                    <Select value={String(settings.downloadWorkers)} options={WORKER_OPTIONS.map(o => ({ value: String(o.value), label: o.label }))} onChange={value => setSettings(s => ({ ...s, downloadWorkers: Number(value) }))} ariaLabel="Conexões simultâneas" />
                   </div>
                   <p className="settings-hint">
                     Aumentar as conexões simultâneas acelera drasticamente o Mass Download, permitindo extrair a velocidade máxima de sua conta Telegram Premium.
@@ -467,7 +446,6 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </Dialog>
   );
 };

@@ -291,6 +291,7 @@
   font-size: 13px;
   transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
 }
+.twitter-format-row .ds-select { min-width: 0; }
 
 .twitter-format-row select:focus {
   outline: none;

@@ -8,6 +8,7 @@ import { getDownloadDir, joinPath, openSystemPath, revealSystemItem } from '../.
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { SHARED_DOWNLOAD_URL_EVENT, takePendingSharedDownloadUrl } from '../../shared/platform/sharedDownloadIntent';
 import { debugWarn } from '../../shared/debug/logger';
+import { Select } from '../../design-system';
 
 function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['video'][number]) {
   if (!format || format.id === 'na' || format.id === 'web-limit') return false;
@@ -25,6 +26,7 @@ function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['vide
 
 export const Downloads: React.FC = () => {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [downloadFilter, setDownloadFilter] = useState<'all' | 'active' | 'completed' | 'issues'>('all');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [url, setUrl] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
@@ -172,11 +174,18 @@ export const Downloads: React.FC = () => {
     item.senderName ? `Usuário: ${item.senderName}` : null,
   ].filter(Boolean);
 
+  const filteredDownloads = useMemo(() => downloads.filter(item => {
+    if (downloadFilter === 'active') return item.status === 'downloading';
+    if (downloadFilter === 'completed') return item.status === 'completed';
+    if (downloadFilter === 'issues') return item.status === 'failed' || item.status === 'canceled';
+    return true;
+  }), [downloadFilter, downloads]);
+
   const groupedDownloads = useMemo(() => {
     const groups = new Map<string, DownloadItem[]>();
     const entries: Array<{ type: 'single'; item: DownloadItem } | { type: 'group'; id: string; items: DownloadItem[] }> = [];
 
-    for (const item of downloads) {
+    for (const item of filteredDownloads) {
       if (item.batchId) {
         if (!groups.has(item.batchId)) groups.set(item.batchId, []);
         groups.get(item.batchId)!.push(item);
@@ -192,9 +201,9 @@ export const Downloads: React.FC = () => {
     return entries.sort((a, b) => {
       const aItem = a.type === 'single' ? a.item : a.items[0];
       const bItem = b.type === 'single' ? b.item : b.items[0];
-      return downloads.indexOf(aItem) - downloads.indexOf(bItem);
+      return filteredDownloads.indexOf(aItem) - filteredDownloads.indexOf(bItem);
     });
-  }, [downloads]);
+  }, [filteredDownloads]);
 
   const groupSummary = (items: DownloadItem[]) => {
     const visibleTotal = items.length || 1;
@@ -436,25 +445,10 @@ export const Downloads: React.FC = () => {
               <p className="media-author">{media.author} • {media.duration}</p>
               
               <div className="format-selection">
-                <select 
-                  value={selectedFormat} 
-                  onChange={(e) => setSelectedFormat(e.target.value)}
-                >
-                  <optgroup label="Vídeo">
-                    {media.formats.video.map(f => (
-                      <option key={f.id} value={f.id} disabled={!canDownloadFormat(media, f)}>
-                        {f.label} {f.size !== '—' ? `(${f.size})` : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="Áudio">
-                    {media.formats.audio.map(f => (
-                      <option key={f.id} value={f.id} disabled={!canDownloadFormat(media, f)}>
-                        {f.label} {f.size !== '—' ? `(${f.size})` : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                </select>
+                <Select value={selectedFormat} onChange={setSelectedFormat} ariaLabel="Formato para download" options={[
+                  ...media.formats.video.map(f => ({ value: f.id, label: `Vídeo · ${f.label} ${f.size !== '—' ? `(${f.size})` : ''}`, disabled: !canDownloadFormat(media, f) })),
+                  ...media.formats.audio.map(f => ({ value: f.id, label: `Áudio · ${f.label} ${f.size !== '—' ? `(${f.size})` : ''}`, disabled: !canDownloadFormat(media, f) })),
+                ]} />
                 <button className="download-btn" onClick={handleDownload} disabled={!selectedDownloadable}>
                   <CloudArrowDown size={18} /> Confirmar
                 </button>
@@ -466,17 +460,36 @@ export const Downloads: React.FC = () => {
 
         <div className="downloads-section-header">
           <h2 className="downloads-section-title">
-            Active Downloads
+            Atividade
             {runningCount > 0 && (
               <span className="running-badge">{runningCount} RUNNING</span>
             )}
           </h2>
+          <div className="download-filter-tabs" role="tablist" aria-label="Filtrar downloads">
+            {[
+              ['all', 'Todos'],
+              ['active', 'Ativos'],
+              ['completed', 'Concluídos'],
+              ['issues', 'Falhas'],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={downloadFilter === value}
+                className={downloadFilter === value ? 'active' : ''}
+                onClick={() => setDownloadFilter(value as typeof downloadFilter)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {downloads.length === 0 ? (
+        {filteredDownloads.length === 0 ? (
           <div className="empty-state">
             <HardDrive size={52} />
-            <p>Nenhum download em andamento.</p>
+            <p>{downloads.length ? 'Nenhum item neste filtro.' : 'Nenhum download registrado.'}</p>
           </div>
         ) : (
           <div className="downloads-list">

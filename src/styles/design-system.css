@@ -1,0 +1,112 @@
+@layer tokens, base, components, utilities;
+
+@layer tokens {
+  :root {
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --space-6: 32px;
+    --space-7: 48px;
+
+    --radius-control: var(--radius-sm);
+    --radius-surface: var(--radius);
+    --radius-dialog: var(--radius-lg);
+    --control-height: 36px;
+    --control-height-touch: 44px;
+    --focus-ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--accent);
+    --motion-fast: 120ms;
+    --motion-base: 180ms;
+    --motion-slow: 260ms;
+  }
+}
+
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  :where(button, [role="button"], input, select, textarea, a):focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 1ms !important;
+    }
+  }
+}
+
+@layer components {
+  .ds-button,
+  .ds-icon-button {
+    min-height: var(--control-height);
+    border-radius: var(--radius-control);
+    transition:
+      background-color var(--motion-fast) ease,
+      border-color var(--motion-fast) ease,
+      color var(--motion-fast) ease,
+      transform var(--motion-fast) ease;
+  }
+
+  .ds-icon-button {
+    display: inline-grid;
+    place-items: center;
+    min-width: var(--control-height);
+    padding: 0;
+  }
+
+  .ds-surface {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-surface);
+    background: var(--bg-1);
+    box-shadow: var(--shadow-md);
+  }
+
+  .ds-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .ds-select .custom-select-trigger:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 42%, transparent);
+  }
+
+  .ds-select .custom-select-option:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .ds-dialog-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 6000;
+    display: grid;
+    place-items: center;
+    padding: var(--space-6);
+    background: color-mix(in oklch, var(--bg-0) 66%, transparent);
+    backdrop-filter: blur(10px);
+  }
+
+  .ds-dialog {
+    width: min(680px, 100%);
+    max-height: min(82dvh, 860px);
+    overflow: auto;
+    outline: none;
+  }
+
+  @media (max-width: 640px) {
+    .ds-dialog-overlay { padding: var(--space-3); }
+  }
+}

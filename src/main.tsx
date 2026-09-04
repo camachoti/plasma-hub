@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { registerAppServiceWorker } from "./shared/platform/serviceWorker";
 import "./styles/index.css";
+import "./styles/design-system.css";
 
 class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: Error | null}> {
   constructor(props: {children: React.ReactNode}) {

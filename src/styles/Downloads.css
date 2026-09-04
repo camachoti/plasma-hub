@@ -266,6 +266,7 @@
   font: inherit;
   font-size: 13px;
 }
+.format-selection .ds-select { flex: 1; }
 
 .downloads-section-header {
   display: flex;
@@ -274,6 +275,32 @@
   width: 100%;
   margin-bottom: 8px;
 }
+
+.download-filter-tabs {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 2px;
+  padding: 3px;
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--bg-1);
+}
+
+.download-filter-tabs button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  font: 650 11px var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.download-filter-tabs button:hover { color: var(--text-1); background: var(--bg-hover); }
+.download-filter-tabs button.active { background: var(--bg-3); color: var(--text-0); }
 
 .downloads-section-title {
   display: flex;

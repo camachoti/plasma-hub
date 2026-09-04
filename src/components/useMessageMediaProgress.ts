@@ -39,7 +39,7 @@ export function useMessageMediaProgress({
   isInlinePlaying,
   hasCachedFullMedia,
 }: UseMessageMediaProgressOptions) {
-  const isSavingInBackground = savingMedia || (mediaStage === 'saving' || mediaStage === 'downloading') && mediaProgress > 0 && mediaProgress < 100;
+  const isSavingInBackground = savingMedia || (mediaStage === 'saving' || mediaStage === 'downloading') && mediaProgress < 100;
   const shouldShowProgress = loadingFullMedia || isSavingInBackground;
   const visiblePlayerProgress = playerProgress > 0 && playerProgress < 100 ? playerProgress : mediaProgress;
   const activeMediaSize = normalizeMediaBytes(albumMedias?.find(item => item.id === activeMessageId)?.mediaSize ?? mediaSize);

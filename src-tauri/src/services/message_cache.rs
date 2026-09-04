@@ -195,6 +195,13 @@ pub fn telegram_message_cache_save(
         .map_err(|error| error.to_string())?;
     let updated_at = now_millis();
 
+    transaction
+        .execute(
+            "DELETE FROM telegram_messages WHERE cache_key = ?1",
+            params![cache_key],
+        )
+        .map_err(|error| error.to_string())?;
+
     {
         let mut statement = transaction
             .prepare(

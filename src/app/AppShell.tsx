@@ -1,7 +1,8 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { At, ChatCircle, DownloadSimple, Gear as SettingsIcon } from "@phosphor-icons/react";
 import { runtimeCapabilities } from "../shared/platform/runtime";
 import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
+import { Dialog, IconButton } from "../design-system";
 
 const loadDashboard = () => import("../features/telegram/Dashboard");
 const loadDownloads = () => import("../features/telegram/Downloads");
@@ -42,6 +43,9 @@ export function AppShell({
 }: AppShellProps) {
   const [downloadToast, setDownloadToast] = useState<DownloadItem | null>(null);
   const [visitedTabs, setVisitedTabs] = useState<Set<AppTab>>(() => new Set(["telegram"]));
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
 
   const activateTab = (tab: AppTab) => {
     setVisitedTabs(current => current.has(tab) ? current : new Set(current).add(tab));
@@ -75,6 +79,31 @@ export function AppShell({
   useEffect(() => {
     setVisitedTabs(current => current.has(activeTab) ? current : new Set(current).add(activeTab));
   }, [activeTab]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandQuery("");
+        setActiveCommandIndex(0);
+        setIsCommandPaletteOpen(true);
+      }
+      if (event.key === "Escape") setIsCommandPaletteOpen(false);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  const commands = useMemo(() => [
+    { id: "telegram", label: "Abrir conversas", hint: "Telegram", run: () => activateTab("telegram") },
+    { id: "downloads", label: "Abrir downloads", hint: "Downloads", run: () => activateTab("downloads") },
+    { id: "twitter", label: "Abrir biblioteca Twitter / X", hint: "Twitter / X", run: () => activateTab("twitter") },
+    { id: "settings", label: "Abrir configurações", hint: "Preferências", run: () => { preloadSettings(); onSettingsOpen(); } },
+  ], [onSettingsOpen]);
+  const visibleCommands = commands.filter(command => {
+    const query = commandQuery.trim().toLocaleLowerCase("pt-BR");
+    return !query || `${command.label} ${command.hint}`.toLocaleLowerCase("pt-BR").includes(query);
+  });
   const fallback = (
     <div className="app-loading">
       <div className="loader-surface" role="status" aria-label="Carregando">
@@ -115,15 +144,15 @@ export function AppShell({
         </button>
       )}
       <div className="sidebar">
-        <button
+        <IconButton
           className={`sidebar-item ${activeTab === "telegram" ? "active" : ""}`}
           onClick={() => activateTab("telegram")}
           title="Telegram"
           aria-label="Abrir Telegram"
         >
           <ChatCircle size={22} />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
           className={`sidebar-item ${activeTab === "downloads" ? "active" : ""}`}
           onClick={() => activateTab("downloads")}
           onPointerEnter={() => preloadTab("downloads")}
@@ -132,8 +161,8 @@ export function AppShell({
           aria-label="Abrir downloads"
         >
           <DownloadSimple size={22} />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
           className={`sidebar-item ${activeTab === "twitter" ? "active" : ""}`}
           onClick={() => activateTab("twitter")}
           onPointerEnter={() => preloadTab("twitter")}
@@ -142,9 +171,9 @@ export function AppShell({
           aria-label="Abrir Twitter / X"
         >
           <At size={22} />
-        </button>
+        </IconButton>
         <div style={{ flex: 1 }} />
-        <button
+        <IconButton
           className={`sidebar-item ${isSettingsOpen ? "active" : ""}`}
           onClick={onSettingsOpen}
           onPointerEnter={preloadSettings}
@@ -154,7 +183,7 @@ export function AppShell({
           aria-label="Abrir configurações"
         >
           <SettingsIcon size={22} />
-        </button>
+        </IconButton>
       </div>
 
       <div className="main-content" style={{ flex: 1, position: "relative", overflow: "hidden" }}>
@@ -181,24 +210,60 @@ export function AppShell({
         )}
         {isSettingsOpen && (
           <Suspense fallback={null}>
-            <div style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: "100%",
-              background: "rgba(0,0,0,0.6)",
-              backdropFilter: "blur(4px)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 100,
-            }}>
-              <TelegramSettings onClose={onSettingsClose} />
-            </div>
+            <TelegramSettings onClose={onSettingsClose} />
           </Suspense>
         )}
       </div>
+      {isCommandPaletteOpen && (
+        <Dialog className="command-palette ds-surface" label="Comandos rápidos" onClose={() => setIsCommandPaletteOpen(false)} overlayClassName="command-palette-overlay">
+            <div className="command-palette-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                autoFocus
+                value={commandQuery}
+                onChange={event => {
+                  setCommandQuery(event.target.value);
+                  setActiveCommandIndex(0);
+                }}
+                placeholder="Buscar ação..."
+                onKeyDown={event => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setActiveCommandIndex(current => Math.min(current + 1, Math.max(visibleCommands.length - 1, 0)));
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setActiveCommandIndex(current => Math.max(current - 1, 0));
+                  }
+                  if (event.key === "Enter" && visibleCommands[activeCommandIndex]) {
+                    visibleCommands[activeCommandIndex].run();
+                    setIsCommandPaletteOpen(false);
+                  }
+                }}
+              />
+              <kbd>Esc</kbd>
+            </div>
+            <div className="command-palette-list">
+              {visibleCommands.map((command, index) => (
+                <button
+                  key={command.id}
+                  type="button"
+                  className={`command-palette-item ${index === activeCommandIndex ? "active" : ""}`}
+                  onMouseEnter={() => setActiveCommandIndex(index)}
+                  onClick={() => {
+                    command.run();
+                    setIsCommandPaletteOpen(false);
+                  }}
+                >
+                  <span>{command.label}</span>
+                  <small>{command.hint}</small>
+                </button>
+              ))}
+              {!visibleCommands.length && <div className="command-palette-empty">Nenhuma ação encontrada.</div>}
+            </div>
+            <div className="command-palette-footer"><kbd>Ctrl</kbd><span>+</span><kbd>K</kbd><span> para abrir</span></div>
+        </Dialog>
+      )}
     </div>
   );
 }

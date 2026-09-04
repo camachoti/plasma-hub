@@ -1471,6 +1471,7 @@ input.login-input:disabled {
   display: flex;
   align-items: stretch;
   gap: 10px;
+  flex-wrap: wrap;
   width: 100%;
 }
 .mass-download-main-row .start-btn,
@@ -1492,6 +1493,21 @@ input.login-input:disabled {
   width: 100%;
 }
 .inline-folder { flex: 1 1 auto; min-width: 240px; }
+
+@media (max-width: 1320px) and (min-width: 641px) {
+  .inline-folder {
+    min-width: min(100%, 240px);
+  }
+
+  .mass-download-topic-selection {
+    flex: 1 1 200px;
+  }
+
+  .mass-download-main-row .start-btn,
+  .mass-download-main-row .stop-btn {
+    margin-left: auto;
+  }
+}
 .split-album-selection {
   display: flex;
   align-items: center;
@@ -1784,6 +1800,11 @@ input.login-input:disabled {
   background: var(--bg-1); border: 1px solid var(--line-soft); border-radius: 8px;
   color: var(--text-0); font-size: 13px;
 }
+.custom-select-search input:focus-visible {
+  outline: none;
+  border-color: color-mix(in oklch, var(--accent) 42%, var(--line-soft));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent);
+}
 .custom-select-option {
   display: flex; align-items: center; gap: 8px;
   width: 100%; padding: 8px 12px;
@@ -1965,6 +1986,8 @@ input.login-input:disabled {
   display: flex; flex-direction: column; gap: 8px;
   padding: 8px 16px 0;
   flex-shrink: 0;
+  position: relative;
+  z-index: 3;
 }
 
 /* ── Message states (deleted / edited) ─────────────────────── */
