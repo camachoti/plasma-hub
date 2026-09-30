@@ -1,4 +1,5 @@
 import React from 'react';
+import { IconX } from "../../design-system/icons";
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
 import { SharedMediaSkeleton } from '../../components/Skeletons';
@@ -41,7 +42,7 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
       <>
         <div className="info-header">
           <span className="title">Informações</span>
-          <button className="icon-btn" onClick={() => setInfoOpen(false)}>✕</button>
+          <button className="icon-btn" onClick={() => setInfoOpen(false)} aria-label="Fechar painel de informações"><IconX size={18} stroke={2} /></button>
         </div>
         <div className="info-hero">
           <div className={`info-avatar color-${hashColor(selectedChat.id)}`}>

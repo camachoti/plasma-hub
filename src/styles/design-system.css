@@ -48,6 +48,78 @@
 }
 
 @layer components {
+  @keyframes loader-orbit {
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes loader-breathe {
+    0%, 100% { transform: scale(0.72); opacity: 0.48; }
+    50% { transform: scale(1); opacity: 0.9; }
+  }
+
+  .loader-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-4);
+    color: var(--text-2);
+  }
+
+  .modern-loader {
+    --loader-size: 42px;
+    position: relative;
+    width: var(--loader-size);
+    height: var(--loader-size);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    filter: drop-shadow(0 0 16px var(--accent-glow));
+  }
+
+  .modern-loader::before,
+  .modern-loader::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+  }
+
+  .modern-loader::before {
+    border: 2px solid color-mix(in oklch, var(--accent) 18%, transparent);
+    border-top-color: var(--accent);
+    border-right-color: color-mix(in oklch, var(--accent-text) 72%, var(--accent));
+    animation: loader-orbit 0.85s linear infinite;
+  }
+
+  .modern-loader::after {
+    inset: 9px;
+    background:
+      radial-gradient(circle, color-mix(in oklch, var(--accent) 72%, #fff 8%) 0 28%, transparent 30%),
+      radial-gradient(circle, var(--accent-glow), transparent 68%);
+    animation: loader-breathe 1.25s ease-in-out infinite;
+  }
+
+  .modern-loader.small { --loader-size: 24px; }
+  .modern-loader.small::before { border-width: 1.5px; }
+  .modern-loader.small::after { inset: 6px; }
+
+  .loader-surface {
+    width: fit-content;
+    margin: 24px auto 0;
+    padding: var(--space-3);
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--bg-2) 86%, transparent);
+    box-shadow: 0 12px 34px color-mix(in oklch, var(--bg-0) 68%, transparent);
+    backdrop-filter: blur(10px);
+  }
+
+  .loader-surface.compact {
+    margin: 0 auto;
+    padding: var(--space-2);
+  }
+
   .ds-button,
   .ds-icon-button {
     min-height: var(--control-height);

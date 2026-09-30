@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowsInSimple, ArrowsOutSimple, DownloadSimple, X } from '@phosphor-icons/react';
+import { IconArrowsMaximize, IconArrowsMinimize, IconDownload, IconX } from "../design-system/icons";
 import { ContextMenu } from './ContextMenu';
 import { MessageMediaMini } from './MessageMediaPrimitives';
 
@@ -110,7 +110,7 @@ export const MessageMediaLightbox: React.FC<MessageMediaLightboxProps> = ({
         title={savingMedia ? 'Cancelar download' : 'Download'}
         aria-label={savingMedia ? 'Cancelar download da mídia' : 'Salvar mídia'}
       >
-        {savingMedia ? <X size={20} weight="bold" /> : <DownloadSimple size={20} weight="bold" />}
+        {savingMedia ? <IconX size={20} stroke={2} /> : <IconDownload size={20} stroke={2} />}
       </button>
       <button
         type="button"
@@ -195,7 +195,7 @@ export const MessageMediaLightbox: React.FC<MessageMediaLightboxProps> = ({
             aria-label={isPlayerFullscreen ? 'Sair da tela cheia' : 'Entrar em tela cheia'}
             title={isPlayerFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
           >
-            {isPlayerFullscreen ? <ArrowsInSimple size={20} weight="bold" /> : <ArrowsOutSimple size={20} weight="bold" />}
+            {isPlayerFullscreen ? <IconArrowsMinimize size={20} stroke={2} /> : <IconArrowsMaximize size={20} stroke={2} />}
           </button>
           {(lightboxBuffering || shouldShowProgress) && (
             <div

@@ -1,4 +1,5 @@
 import React from 'react';
+import { IconChevronDown, IconCircleX, IconX } from "../../design-system/icons";
 import { Virtuoso } from 'react-virtuoso';
 import type { ForumTopic } from './TelegramDashboardTypes';
 import { formatBytes } from './DashboardHelpers';
@@ -6,7 +7,7 @@ import { IconMagic } from './DashboardIcons';
 
 interface DownloadItem {
   name: string;
-  status: 'pending' | 'downloading' | 'completed' | 'skipped' | 'failed';
+  status: 'pending' | 'downloading' | 'completed' | 'skipped' | 'failed' | 'stopped';
   progress: number;
   size: number;
 }
@@ -77,7 +78,10 @@ const ProgressItemRow = React.memo(({ item }: { item: DownloadItem }) => (
         <span className="item-badge skipped">⌥ Já existe</span>
       )}
       {item.status === 'failed' && (
-        <span className="item-badge failed">✕ Falhou</span>
+        <span className="item-badge failed"><IconCircleX size={14} stroke={2} aria-hidden="true" /> Falhou</span>
+      )}
+      {item.status === 'stopped' && (
+        <span className="item-badge stopped">Interrompido</span>
       )}
     </div>
   </div>
@@ -111,14 +115,29 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
   setSplitByAlbum,
   setSplitByUser,
   setTopicSearch,
-}) => (
+}) => {
+  const itemSummary = (progress?.items || []).reduce(
+    (summary, item) => {
+      if (item.status === 'completed') summary.completed += 1;
+      else if (item.status === 'skipped') summary.skipped += 1;
+      else if (item.status === 'failed') summary.failed += 1;
+      else if (item.status === 'stopped') summary.stopped += 1;
+      else if (item.status === 'pending') summary.pending += 1;
+      else if (item.status === 'downloading') summary.downloading += 1;
+      return summary;
+    },
+    { completed: 0, skipped: 0, failed: 0, stopped: 0, pending: 0, downloading: 0 },
+  );
+  const processedCount = itemSummary.completed + itemSummary.skipped + itemSummary.failed + itemSummary.stopped;
+
+  return (
   <div className="inline-download-panel">
     <div className="inline-panel-header">
       <div className="inline-panel-title">
         <IconMagic />
         <h3>Mass Download</h3>
       </div>
-      <button className="icon-btn" onClick={() => setIsDownloadModalOpen(false)}>✕</button>
+      <button className="icon-btn" onClick={() => setIsDownloadModalOpen(false)} aria-label="Fechar download em massa"><IconX size={18} stroke={2} /></button>
     </div>
     <div className="inline-panel-body">
       <div className="mass-download-main-row">
@@ -146,7 +165,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
                     <span className="modern-loader small" aria-hidden="true" />
                   ) : selectedTopicId === 'all' ? 'Todos os tópicos' : forumTopics.find(topic => String(topic.id) === selectedTopicId)?.title || 'Todos os tópicos'}
                 </span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                <IconChevronDown size={14} stroke={2} aria-hidden="true" />
               </button>
               {isTopicDropdownOpen && (
                 <div className="custom-select-options">
@@ -226,21 +245,21 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
       </div>
     </div>
     {progress && (
-      <div
-        className={`inline-progress-container ${showDetailedProgress ? 'expanded' : ''}`}
-        onClick={() => setShowDetailedProgress(!showDetailedProgress)}
-        style={{ cursor: 'pointer', userSelect: 'none' }}
-      >
+      <div className={`inline-progress-container ${showDetailedProgress ? 'expanded' : ''}`}>
         <div className="progress-header">
           <span className="progress-status">
             {progress.topicTitle ? `${progress.topicTitle} · ${progress.currentFile}` : progress.currentFile}
           </span>
-          <span className="progress-count" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            {progress.isScanning ? 'Escaneando...' : `${Math.floor(progress.downloaded)} / ${progress.total}`}
-            <span style={{ fontSize: '10px', transition: 'transform 0.2s', transform: showDetailedProgress ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-              ▼
-            </span>
-          </span>
+          <button
+            type="button"
+            className="progress-details-toggle"
+            onClick={() => setShowDetailedProgress(value => !value)}
+            aria-expanded={showDetailedProgress}
+            aria-controls="mass-download-details"
+          >
+            {progress.isScanning ? 'Escaneando...' : `${processedCount} de ${progress.total}`}
+            <span aria-hidden="true">{showDetailedProgress ? '▲' : '▼'}</span>
+          </button>
         </div>
         <div className="progress-bar">
           <div
@@ -248,8 +267,17 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
             style={{ width: (progress.total > 0 && !progress.isScanning) ? `${Math.min(100, (progress.downloaded / progress.total) * 100)}%` : '100%' }}
           />
         </div>
+        {!progress.isScanning && progress.total > 0 && (
+          <div className="progress-summary" aria-label="Resumo do download">
+            <span className="progress-summary-item completed">Baixados: {itemSummary.completed}</span>
+            <span className="progress-summary-item skipped">Já existem: {itemSummary.skipped}</span>
+            {itemSummary.failed > 0 && <span className="progress-summary-item failed">Falharam: {itemSummary.failed}</span>}
+            {itemSummary.stopped > 0 && <span className="progress-summary-item stopped">Interrompidos: {itemSummary.stopped}</span>}
+            {(itemSummary.pending + itemSummary.downloading) > 0 && <span className="progress-summary-item pending">Na fila: {itemSummary.pending + itemSummary.downloading}</span>}
+          </div>
+        )}
         {showDetailedProgress && progress.items && progress.items.length > 0 && (
-          <div ref={progressDetailsListRef} className="progress-details-list" onClick={event => event.stopPropagation()}>
+          <div id="mass-download-details" ref={progressDetailsListRef} className="progress-details-list">
             <Virtuoso
               style={{ height: '100%' }}
               data={progress.items}
@@ -261,6 +289,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
       </div>
     )}
   </div>
-);
+  );
+};
 
 export const DashboardMassDownloadPanel = React.memo(DashboardMassDownloadPanelComponent);

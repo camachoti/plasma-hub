@@ -1,6 +1,7 @@
 import React from 'react';
+import { IconX } from "../../design-system/icons";
 import type { Chat, ChatFullInfo, Message } from './TelegramDashboardTypes';
-import { IconAttach, IconEmoji, IconSend } from './DashboardIcons';
+import { IconAttach, IconDownload, IconEmoji, IconSend } from './DashboardIcons';
 
 interface SelectedFile {
   filePath: string;
@@ -114,11 +115,7 @@ const SelectionActionBarComponent: React.FC<SelectionActionBarProps> = ({
             disabled={selectedCount === 0 || bulkDownloadActive}
             onClick={handleDownloadSelected}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" x2="12" y1="15" y2="3" />
-            </svg>
+            <IconDownload />
             <span>{bulkDownloadActive ? 'Baixando...' : `Baixar ${selectedCount || ''}`.trim()}</span>
           </button>
         </div>
@@ -163,14 +160,14 @@ const MessageComposerComponent: React.FC<MessageComposerProps> = ({
           <div className="reply-bar" />
           <span className="reply-from">Respondendo</span>
           <span className="reply-text">{replyTo.text ? replyTo.text.slice(0, 80) : 'Mídia'}</span>
-          <button type="button" className="close icon-btn" onClick={() => setReplyTo(null)}>✕</button>
+          <button type="button" className="close icon-btn" onClick={() => setReplyTo(null)} aria-label="Cancelar resposta"><IconX size={18} stroke={2} /></button>
         </div>
       )}
       {selectedFile && (
         <div className="composer-file-chip">
           <span className="chip">
             <IconAttach /> {selectedFile.fileName}
-            <button type="button" className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => setSelectedFile(null)}>✕</button>
+            <button type="button" className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => setSelectedFile(null)} aria-label="Remover arquivo anexado"><IconX size={16} stroke={2} /></button>
           </span>
         </div>
       )}
@@ -180,7 +177,7 @@ const MessageComposerComponent: React.FC<MessageComposerProps> = ({
         </div>
       )}
       <div className="composer-main">
-        <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending || !canSendMedia} title={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'}>
+        <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending || !canSendMedia} title={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'} aria-label={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'}>
           <IconAttach />
         </button>
         <textarea
@@ -204,7 +201,7 @@ const MessageComposerComponent: React.FC<MessageComposerProps> = ({
           disabled={isSending || !canSendMessages}
         />
         <div className="composer-right-actions">
-          <button type="button" className="icon-btn" title="Emoji">
+          <button type="button" className="icon-btn" title="Emoji" aria-label="Adicionar emoji">
             <IconEmoji />
           </button>
           <button

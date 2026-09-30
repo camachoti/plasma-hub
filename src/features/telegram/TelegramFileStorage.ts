@@ -1,6 +1,7 @@
 import { getDownloadDir, joinPath as joinSystemPath } from '../../shared/platform/files';
 import { platformFetch as tauriFetch } from '../../shared/platform/http';
-import { invokeCommand as invoke } from '../../shared/platform/tauri';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { invokeCommand as invoke, listenEvent } from '../../shared/platform/tauri';
 import { mediaCache } from './MediaCacheService';
 import { nextFrame, sanitizeForFilename, toUint8Array } from './TelegramMessageUtils';
 
@@ -11,6 +12,8 @@ type ProgressPayload = {
 };
 
 type ProgressCallback = (progress: ProgressPayload) => void;
+
+type NativeDownloadProgress = ProgressPayload & { id: string };
 
 class TelegramFileStorage {
   async saveBytesToFile(filePath: string, data: any) {
@@ -48,7 +51,19 @@ class TelegramFileStorage {
     }
   }
 
-  async downloadUrlToFile(url: string, filePath: string, onProgress?: ProgressCallback) {
+  async downloadUrlToFile(url: string, filePath: string, downloadId: string, onProgress?: ProgressCallback) {
+    if (runtimeCapabilities.isTauri) {
+      const unlisten = await listenEvent<NativeDownloadProgress>('native-file-download-progress', event => {
+        if (event.payload.id === downloadId) onProgress?.(event.payload);
+      });
+      try {
+        await invoke('download_url_to_file', { id: downloadId, url, filePath });
+        return;
+      } finally {
+        unlisten();
+      }
+    }
+
     const response = await tauriFetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const totalBytes = Number(response.headers.get('content-length')) || undefined;

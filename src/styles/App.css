@@ -10,6 +10,52 @@
   font-family: var(--font-sans);
 }
 
+.fatal-error-screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: var(--font-sans);
+}
+
+.fatal-error-card {
+  width: min(480px, 100%);
+  padding: 28px;
+  text-align: center;
+}
+
+.fatal-error-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--danger) 16%, var(--bg-2));
+  color: var(--danger);
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.fatal-error-card h1 { margin: 0 0 10px; font-size: 22px; }
+.fatal-error-card > p { margin: 0 auto 20px; color: var(--text-2); line-height: 1.5; }
+.fatal-error-reload {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-contrast, #061116);
+  font-weight: 750;
+  cursor: pointer;
+}
+.fatal-error-details { margin-top: 20px; color: var(--text-3); font-size: 12px; text-align: left; }
+.fatal-error-details summary { cursor: pointer; text-align: center; }
+.fatal-error-details pre { max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
 .app-container {
   display: flex;
   height: 100vh;
@@ -29,6 +75,27 @@
   --android-statusbar-offset: max(env(safe-area-inset-top, 0px), 24px);
   padding-top: var(--android-statusbar-offset);
 }
+
+.app-loading {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.auth-checking-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.auth-checking-state .loader-surface { margin: 0 0 8px; }
+.auth-checking-state strong { color: var(--text-1); font-size: 15px; }
+.auth-checking-state > span { font-size: 12px; }
 
 .runtime-notice {
   position: absolute;
@@ -125,6 +192,23 @@
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.main-content,
+.app-tab-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (min-width: 641px) {
+  .app-tab-panel > .downloads-container,
+  .app-tab-panel > .twitter-library {
+    width: auto;
+    height: calc(100% - 20px);
+    margin: 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-lg);
+  }
 }
 
 .app-tab-panel.inactive {

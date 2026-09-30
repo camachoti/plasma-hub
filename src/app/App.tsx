@@ -237,8 +237,12 @@ function App() {
     return (
       <div className="app-container" data-palette={palette} data-density={density}>
         <div className="app-loading">
-          <div className="loader-surface" role="status" aria-label="Verificando autenticação do Telegram">
-            <span className="modern-loader" />
+          <div className="auth-checking-state" role="status" aria-live="polite">
+            <div className="loader-surface" aria-hidden="true">
+              <span className="modern-loader" />
+            </div>
+            <strong>Verificando sua sessão do Telegram</strong>
+            <span>Isso deve levar apenas alguns segundos.</span>
           </div>
         </div>
       </div>

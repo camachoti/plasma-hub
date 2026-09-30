@@ -1,7 +1,10 @@
 import { appStorage } from '../../shared/storage/appStorage';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
+import { invokeCommand, listenEvent } from '../../shared/platform/tauri';
 
 const DOWNLOAD_HISTORY_KEY = 'plasma_download_history_v1';
 const MAX_DOWNLOAD_HISTORY = 300;
+const DOWNLOAD_HISTORY_WRITE_DELAY_MS = 350;
 export const DOWNLOAD_STATUS_EVENT = 'plasma-download-status';
 
 export interface DownloadItem {
@@ -14,6 +17,7 @@ export interface DownloadItem {
   error?: string;
   filePath?: string;
   fileSize?: number;
+  sourceUrl?: string;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
   sourceLabel?: string;
@@ -40,33 +44,95 @@ export interface DownloadActionHandlers {
   retry?: () => unknown | Promise<unknown>;
 }
 
+type NativeDownloadProgress = {
+  id: string;
+  percent: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+};
+
 class DownloadService {
   public activeDownloads: Map<string, DownloadItem> = new Map();
   private downloadsChangeCallbacks = new Set<(items: DownloadItem[]) => void>();
   private actionHandlers = new Map<string, DownloadActionHandlers>();
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private nativePersistQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    this.restore();
+    this.restoreFromStorage(appStorage.get(DOWNLOAD_HISTORY_KEY));
+    if (runtimeCapabilities.isTauri) void this.restoreFromNativeStorage();
+    window.addEventListener('pagehide', () => this.flushPersist());
   }
 
-  private restore() {
+  private restoreFromStorage(stored: string | null) {
     try {
-      const stored = appStorage.get(DOWNLOAD_HISTORY_KEY);
       if (!stored) return;
       const items = JSON.parse(stored) as DownloadItem[];
       for (const item of items.slice(-MAX_DOWNLOAD_HISTORY)) {
+        const wasInterrupted = item.status === 'downloading';
         const restored = {
           ...item,
-          canCancel: false,
-          canRetry: false,
-          ...(item.status === 'downloading'
+          ...(wasInterrupted
             ? { status: 'failed' as const, error: 'Download interrompido ao fechar o aplicativo.' }
             : {}),
         };
-        this.activeDownloads.set(restored.id, restored);
+        if (runtimeCapabilities.isTauri && restored.sourceUrl && restored.filePath) {
+          this.actionHandlers.set(restored.id, {
+            cancel: () => invokeCommand<boolean>('cancel_native_download', { id: restored.id }),
+            retry: () => this.retryPersistedNativeDownload(restored.id),
+          });
+        }
+        const actions = this.actionHandlers.get(restored.id);
+        restored.canCancel = Boolean(actions?.cancel) && restored.status === 'downloading';
+        restored.canRetry = Boolean(actions?.retry) && restored.status !== 'downloading';
+        const current = this.activeDownloads.get(restored.id);
+        if (!current || (restored.createdAt || 0) >= (current.createdAt || 0)) {
+          this.activeDownloads.set(restored.id, restored);
+        }
       }
     } catch {
       appStorage.remove(DOWNLOAD_HISTORY_KEY);
+    }
+  }
+
+  private async retryPersistedNativeDownload(id: string) {
+    const item = this.activeDownloads.get(id);
+    if (!item?.sourceUrl || !item.filePath || !runtimeCapabilities.isTauri) return false;
+
+    const unlisten = await listenEvent<NativeDownloadProgress>('native-file-download-progress', event => {
+      if (event.payload.id !== id) return;
+      this.updateDownload(id, {
+        progress: event.payload.percent,
+        fileSize: event.payload.totalBytes,
+      });
+    });
+    this.updateDownload(id, { status: 'downloading', error: undefined });
+    try {
+      await invokeCommand('download_url_to_file', {
+        id,
+        url: item.sourceUrl,
+        filePath: item.filePath,
+      });
+      this.updateDownload(id, { status: 'completed', progress: 100 });
+      return true;
+    } catch (error) {
+      this.updateDownload(id, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      unlisten();
+    }
+  }
+
+  private async restoreFromNativeStorage() {
+    try {
+      const history = await invokeCommand<string | null>('download_history_get');
+      this.restoreFromStorage(history);
+      this.downloadsChangeCallbacks.forEach(callback => callback(Array.from(this.activeDownloads.values())));
+    } catch {
+      // The local copy remains available if the native store is not ready yet.
     }
   }
 
@@ -79,7 +145,30 @@ class DownloadService {
         canRetry: undefined,
         thumbnailUrl: item.thumbnailUrl?.startsWith('blob:') ? undefined : item.thumbnailUrl,
       }));
-    appStorage.set(DOWNLOAD_HISTORY_KEY, JSON.stringify(items));
+    const serialized = JSON.stringify(items);
+    appStorage.set(DOWNLOAD_HISTORY_KEY, serialized);
+    if (runtimeCapabilities.isTauri) {
+      this.nativePersistQueue = this.nativePersistQueue
+        .catch(() => {})
+        .then(async () => { await invokeCommand('download_history_save', { historyJson: serialized }); })
+        .catch(() => {});
+    }
+  }
+
+  private schedulePersist() {
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persist();
+    }, DOWNLOAD_HISTORY_WRITE_DELAY_MS);
+  }
+
+  private flushPersist() {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.persist();
   }
 
   onDownloadsChange(cb: (items: DownloadItem[]) => void) {
@@ -87,8 +176,9 @@ class DownloadService {
     return () => { this.downloadsChangeCallbacks.delete(cb); };
   }
 
-  public emitDownloadsChange() {
-    this.persist();
+  public emitDownloadsChange(persistImmediately = false) {
+    if (persistImmediately) this.flushPersist();
+    else this.schedulePersist();
     const list = Array.from(this.activeDownloads.values());
     this.downloadsChangeCallbacks.forEach(cb => cb(list));
   }
@@ -116,8 +206,11 @@ class DownloadService {
       item.canCancel = Boolean(actionHandlers?.cancel) && item.status === 'downloading';
       item.canRetry = Boolean(actionHandlers?.retry) && item.status !== 'downloading';
       this.activeDownloads.set(id, item);
-      this.emitDownloadsChange();
-      if (updates.status && updates.status !== previousStatus && updates.status !== 'downloading') {
+      const reachedTerminalState = Boolean(
+        updates.status && updates.status !== previousStatus && updates.status !== 'downloading',
+      );
+      this.emitDownloadsChange(reachedTerminalState);
+      if (reachedTerminalState) {
         window.dispatchEvent(new CustomEvent(DOWNLOAD_STATUS_EVENT, { detail: { ...item } }));
       }
     }
@@ -130,7 +223,7 @@ class DownloadService {
   removeDownload(id: string) {
     if (!this.activeDownloads.delete(id)) return;
     this.actionHandlers.delete(id);
-    this.emitDownloadsChange();
+    this.emitDownloadsChange(true);
   }
 
   clearFinished() {
@@ -140,7 +233,7 @@ class DownloadService {
         this.actionHandlers.delete(id);
       }
     }
-    this.emitDownloadsChange();
+    this.emitDownloadsChange(true);
   }
 
   setActions(id: string, handlers: DownloadActionHandlers) {

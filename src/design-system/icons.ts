@@ -1,0 +1,47 @@
+// Import individual Tabler modules instead of the package barrel. In Vite dev
+// the barrel pre-bundles the entire icon catalogue (several megabytes), which
+// delays first paint in the desktop WebKit webview.
+export { default as IconAlertCircle } from "@tabler/icons-react/dist/esm/icons/IconAlertCircle.mjs";
+export { default as IconArrowDown } from "@tabler/icons-react/dist/esm/icons/IconArrowDown.mjs";
+export { default as IconArrowsMaximize } from "@tabler/icons-react/dist/esm/icons/IconArrowsMaximize.mjs";
+export { default as IconArrowsMinimize } from "@tabler/icons-react/dist/esm/icons/IconArrowsMinimize.mjs";
+export { default as IconAt } from "@tabler/icons-react/dist/esm/icons/IconAt.mjs";
+export { default as IconBell } from "@tabler/icons-react/dist/esm/icons/IconBell.mjs";
+export { default as IconBrandInstagram } from "@tabler/icons-react/dist/esm/icons/IconBrandInstagram.mjs";
+export { default as IconBrandReddit } from "@tabler/icons-react/dist/esm/icons/IconBrandReddit.mjs";
+export { default as IconBrandTelegram } from "@tabler/icons-react/dist/esm/icons/IconBrandTelegram.mjs";
+export { default as IconBrandX } from "@tabler/icons-react/dist/esm/icons/IconBrandX.mjs";
+export { default as IconBrandYoutube } from "@tabler/icons-react/dist/esm/icons/IconBrandYoutube.mjs";
+export { default as IconCheck } from "@tabler/icons-react/dist/esm/icons/IconCheck.mjs";
+export { default as IconChevronDown } from "@tabler/icons-react/dist/esm/icons/IconChevronDown.mjs";
+export { default as IconChevronLeft } from "@tabler/icons-react/dist/esm/icons/IconChevronLeft.mjs";
+export { default as IconCircleCheck } from "@tabler/icons-react/dist/esm/icons/IconCircleCheck.mjs";
+export { default as IconCircleX } from "@tabler/icons-react/dist/esm/icons/IconCircleX.mjs";
+export { default as IconCloudDownload } from "@tabler/icons-react/dist/esm/icons/IconCloudDownload.mjs";
+export { default as IconCopy } from "@tabler/icons-react/dist/esm/icons/IconCopy.mjs";
+export { default as IconCornerUpLeft } from "@tabler/icons-react/dist/esm/icons/IconCornerUpLeft.mjs";
+export { default as IconDatabase } from "@tabler/icons-react/dist/esm/icons/IconDatabase.mjs";
+export { default as IconDots } from "@tabler/icons-react/dist/esm/icons/IconDots.mjs";
+export { default as IconDownload } from "@tabler/icons-react/dist/esm/icons/IconDownload.mjs";
+export { default as IconFileDownload } from "@tabler/icons-react/dist/esm/icons/IconFileDownload.mjs";
+export { default as IconFolderOpen } from "@tabler/icons-react/dist/esm/icons/IconFolderOpen.mjs";
+export { default as IconLayoutSidebarRight } from "@tabler/icons-react/dist/esm/icons/IconLayoutSidebarRight.mjs";
+export { default as IconLink } from "@tabler/icons-react/dist/esm/icons/IconLink.mjs";
+export { default as IconLoader2 } from "@tabler/icons-react/dist/esm/icons/IconLoader2.mjs";
+export { default as IconLogout } from "@tabler/icons-react/dist/esm/icons/IconLogout.mjs";
+export { default as IconMessageCircle } from "@tabler/icons-react/dist/esm/icons/IconMessageCircle.mjs";
+export { default as IconMoodSmile } from "@tabler/icons-react/dist/esm/icons/IconMoodSmile.mjs";
+export { default as IconPaperclip } from "@tabler/icons-react/dist/esm/icons/IconPaperclip.mjs";
+export { default as IconPlayerPlay } from "@tabler/icons-react/dist/esm/icons/IconPlayerPlay.mjs";
+export { default as IconPlus } from "@tabler/icons-react/dist/esm/icons/IconPlus.mjs";
+export { default as IconRefresh } from "@tabler/icons-react/dist/esm/icons/IconRefresh.mjs";
+export { default as IconSearch } from "@tabler/icons-react/dist/esm/icons/IconSearch.mjs";
+export { default as IconSend } from "@tabler/icons-react/dist/esm/icons/IconSend.mjs";
+export { default as IconSettings } from "@tabler/icons-react/dist/esm/icons/IconSettings.mjs";
+export { default as IconShare3 } from "@tabler/icons-react/dist/esm/icons/IconShare3.mjs";
+export { default as IconSparkles } from "@tabler/icons-react/dist/esm/icons/IconSparkles.mjs";
+export { default as IconStack2 } from "@tabler/icons-react/dist/esm/icons/IconStack2.mjs";
+export { default as IconTrash } from "@tabler/icons-react/dist/esm/icons/IconTrash.mjs";
+export { default as IconVolume } from "@tabler/icons-react/dist/esm/icons/IconVolume.mjs";
+export { default as IconVolumeOff } from "@tabler/icons-react/dist/esm/icons/IconVolumeOff.mjs";
+export { default as IconX } from "@tabler/icons-react/dist/esm/icons/IconX.mjs";

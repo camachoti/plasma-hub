@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { At, ChatCircle, DownloadSimple, Gear as SettingsIcon } from "@phosphor-icons/react";
+import { IconAt, IconDownload, IconMessageCircle, IconSettings } from "../design-system/icons";
 import { runtimeCapabilities } from "../shared/platform/runtime";
 import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
 import { Dialog, IconButton } from "../design-system";
@@ -150,7 +150,7 @@ export function AppShell({
           title="Telegram"
           aria-label="Abrir Telegram"
         >
-          <ChatCircle size={22} />
+          <IconMessageCircle size={22} stroke={2} />
         </IconButton>
         <IconButton
           className={`sidebar-item ${activeTab === "downloads" ? "active" : ""}`}
@@ -160,7 +160,7 @@ export function AppShell({
           title="Downloads"
           aria-label="Abrir downloads"
         >
-          <DownloadSimple size={22} />
+          <IconDownload size={22} stroke={2} />
         </IconButton>
         <IconButton
           className={`sidebar-item ${activeTab === "twitter" ? "active" : ""}`}
@@ -170,7 +170,7 @@ export function AppShell({
           title="Twitter / X"
           aria-label="Abrir Twitter / X"
         >
-          <At size={22} />
+          <IconAt size={22} stroke={2} />
         </IconButton>
         <div style={{ flex: 1 }} />
         <IconButton
@@ -182,7 +182,7 @@ export function AppShell({
           title="Configurações"
           aria-label="Abrir configurações"
         >
-          <SettingsIcon size={22} />
+          <IconSettings size={22} stroke={2} />
         </IconButton>
       </div>
 

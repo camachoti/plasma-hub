@@ -2502,10 +2502,15 @@ pub async fn tdlib_get_chats(
         }
     };
 
-    let limit = limit.unwrap_or(250).clamp(50, 5000);
-    let _ = functions::load_chats(Some(ChatList::Main), 100, client_id).await;
-    let _ = functions::load_chats(Some(ChatList::Archive), 100, client_id).await;
-    let main_chat_ids = match functions::get_chats(Some(ChatList::Main), limit, client_id).await {
+    let limit = limit.unwrap_or(80).clamp(50, 5000);
+    // Keep initial rendering responsive: request a bounded, balanced window from
+    // both lists instead of resolving up to `limit` chats from each list.
+    let main_limit = ((limit * 4) / 5).max(1);
+    let archive_limit = (limit - main_limit).max(1);
+    let load_limit = limit.min(100);
+    let _ = functions::load_chats(Some(ChatList::Main), load_limit, client_id).await;
+    let _ = functions::load_chats(Some(ChatList::Archive), load_limit, client_id).await;
+    let main_chat_ids = match functions::get_chats(Some(ChatList::Main), main_limit, client_id).await {
         Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
         Err(error) => {
             return Ok(TdlibChatsResult {
@@ -2518,14 +2523,14 @@ pub async fn tdlib_get_chats(
     };
 
     let archive_chat_ids = if let Ok(tdlib_rs::enums::Chats::Chats(chats)) =
-        functions::get_chats(Some(ChatList::Archive), limit, client_id).await
+        functions::get_chats(Some(ChatList::Archive), archive_limit, client_id).await
     {
         chats.chat_ids
     } else {
         Vec::new()
     };
-    let has_more =
-        main_chat_ids.len() >= limit as usize || archive_chat_ids.len() >= limit as usize;
+    let has_more = main_chat_ids.len() >= main_limit as usize
+        || archive_chat_ids.len() >= archive_limit as usize;
     let mut chat_ids = main_chat_ids;
     chat_ids.extend(archive_chat_ids);
 
@@ -2543,26 +2548,31 @@ pub async fn tdlib_get_chats(
         }
     }
 
-    if let Ok(tdlib_rs::enums::Users::Users(users)) = functions::get_contacts(client_id).await {
-        let mut contact_dialogs = Vec::new();
-        for user_id in users.user_ids {
-            let chat_id_key = user_id.to_string();
-            if seen_chat_ids.contains_key(&chat_id_key) {
-                continue;
-            }
-            if let Ok(tdlib_rs::enums::User::User(user)) =
-                functions::get_user(user_id, client_id).await
-            {
-                if !user.have_access {
+    let remaining_contact_slots = (limit as usize).saturating_sub(dialogs.len());
+    if remaining_contact_slots > 0 {
+        if let Ok(tdlib_rs::enums::Users::Users(users)) = functions::get_contacts(client_id).await {
+            let mut contact_dialogs = Vec::new();
+            // Contacts are a fallback for sparse dialog lists. Resolving every contact
+            // one by one was the dominant cold-start cost for larger address books.
+            for user_id in users.user_ids.into_iter().take(remaining_contact_slots) {
+                let chat_id_key = user_id.to_string();
+                if seen_chat_ids.contains_key(&chat_id_key) {
                     continue;
                 }
-                seen_chat_ids.insert(chat_id_key, true);
-                contact_dialogs.push(tdlib_user_to_contact_chat(user));
+                if let Ok(tdlib_rs::enums::User::User(user)) =
+                    functions::get_user(user_id, client_id).await
+                {
+                    if !user.have_access {
+                        continue;
+                    }
+                    seen_chat_ids.insert(chat_id_key, true);
+                    contact_dialogs.push(tdlib_user_to_contact_chat(user));
+                }
             }
+            contact_dialogs
+                .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+            dialogs.extend(contact_dialogs);
         }
-        contact_dialogs
-            .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
-        dialogs.extend(contact_dialogs);
     }
 
     Ok(TdlibChatsResult {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { DownloadSimple } from "@phosphor-icons/react";
+import { IconDownload } from "../design-system/icons";
 import { ContextMenu } from './ContextMenu';
 import { MessageMediaLightbox } from './MessageMediaLightbox';
 import { MessageMediaPreview } from './MessageMediaPreview';
@@ -35,7 +35,7 @@ interface ContextMenuState {
   y: number;
 }
 
-const IconDownload = () => <DownloadSimple size={18} weight="bold" />;
+const DownloadActionIcon = () => <IconDownload size={18} stroke={2} />;
 
 const getVideoDebugState = (video: HTMLVideoElement | null) => {
   if (!video) return null;
@@ -111,7 +111,7 @@ const areMessageMediaPropsEqual = (prev: Props, next: Props) => (
 
 const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, mediaSize, thumbnailUrl, palette, density, onClickOverride, selectionMode = false, albumMedias, downloadMeta, mediaPriority = 'visible' }) => {
   const [previewSrc, setPreviewSrc] = useState<string | null>(thumbnailUrl || null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !thumbnailUrl);
   const [isOpen, setIsOpen] = useState(false);
   const [savingMedia, setSavingMedia] = useState(false);
   const [cancelingMedia, setCancelingMedia] = useState(false);
@@ -459,12 +459,12 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
         e.preventDefault();
         const currentIndex = albumMedias.findIndex(item => item.id === activeMessageId);
         const nextIndex = (currentIndex + 1) % albumMedias.length;
-        setActiveMessageId(albumMedias[nextIndex].id);
+        selectActiveAlbumMedia(albumMedias[nextIndex].id);
       } else if (e.key === 'ArrowLeft' && albumMedias && albumMedias.length > 1) {
         e.preventDefault();
         const currentIndex = albumMedias.findIndex(item => item.id === activeMessageId);
         const nextIndex = (currentIndex - 1 + albumMedias.length) % albumMedias.length;
-        setActiveMessageId(albumMedias[nextIndex].id);
+        selectActiveAlbumMedia(albumMedias[nextIndex].id);
       }
     };
 
@@ -494,6 +494,19 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
     setIsOpen(false);
     onClickOverride?.(event);
     return true;
+  };
+
+  const selectActiveAlbumMedia = (nextMessageId: number) => {
+    if (nextMessageId === activeMessageId) return;
+    // Troca o conteúdo e o estado visual juntos para não mostrar um erro antigo
+    // entre dois itens do álbum enquanto a nova mídia está sendo preparada.
+    setActiveLoading(true);
+    setActiveError(null);
+    setActiveFullSrc(null);
+    setLightboxBuffering(true);
+    setPlayerProgress(0);
+    setMediaBytes({});
+    setActiveMessageId(nextMessageId);
   };
 
   const handleOpen = (event?: React.MouseEvent) => {
@@ -640,13 +653,13 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
   const contextMenuItems = [
     {
       label: 'Salvar como...',
-      icon: <IconDownload />,
+      icon: <DownloadActionIcon />,
       onClick: () => handleSaveMedia(true),
       disabled: savingMedia,
     },
     ...(albumMedias && albumMedias.length > 1 ? [{
       label: 'Salvar álbum como...',
-      icon: <IconDownload />,
+      icon: <DownloadActionIcon />,
       onClick: async () => {
         const folderResult = await telegramService.selectFolder();
         if (!folderResult.success || !folderResult.folderPath) return;
@@ -778,7 +791,7 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
             onToggleFullscreen={togglePlayerFullscreen}
             onContextMenu={handleContextMenu}
             onCancelControl={renderCancelMediaControl}
-            onSelectAlbumMedia={setActiveMessageId}
+            onSelectAlbumMedia={selectActiveAlbumMedia}
             onSetLightboxBuffering={setLightboxBuffering}
             onSetActiveError={setActiveError}
             onSetActiveFullSrc={setActiveFullSrc}

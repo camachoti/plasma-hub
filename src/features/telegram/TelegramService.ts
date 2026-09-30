@@ -70,11 +70,14 @@ class TelegramService {
   private serviceWorkerMessageHandler: (event: MessageEvent) => void;
   private tdlibBridge = new TelegramTdlibBridge(() => telegramApiCredentials);
   private tdlibInitRequest: Promise<any> | null = null;
+  private tdlibInitResult: any | null = null;
   private twitterFakeBridge = new TelegramTwitterFakeBridge(data => this.emitMediaProgress(data));
   private fileStorage = telegramFileStorage;
   private mediaFileRequests = new Map<string, Promise<any>>();
   private mediaThumbRequests = new Map<string, Promise<any>>();
   private avatarRequests = new Map<string, Promise<any>>();
+  private confirmedNativePaths = new Set<string>();
+  private nativePathChecks = new Map<string, Promise<boolean>>();
   private messageCacheMergeQueues = new Map<string, Promise<void>>();
   private cacheClearCallbacks = new Set<() => void>();
   private activeNativeMediaDownloads = new Map<string, { chatId: string; messageId: number; priority: 'user' | 'background' }>();
@@ -698,14 +701,23 @@ class TelegramService {
   }
 
   async tdlibInit(timeoutMs = 12000) {
+    // `tdlib_init` configures directories and TDLib parameters. Repeating that
+    // command for every visible avatar serializes startup work behind the native
+    // initialization lock; the client stays initialized for this app session.
+    if (this.tdlibInitResult) return this.tdlibInitResult;
     if (!this.tdlibInitRequest) {
       this.tdlibInitRequest = this.withTimeout(
         this.tdlibBridge.init(),
         timeoutMs,
         'TDLib demorou para inicializar.',
-      ).finally(() => {
-        this.tdlibInitRequest = null;
-      });
+      )
+        .then(result => {
+          if (result?.success) this.tdlibInitResult = result;
+          return result;
+        })
+        .finally(() => {
+          this.tdlibInitRequest = null;
+        });
     }
     return this.tdlibInitRequest;
   }
@@ -991,11 +1003,13 @@ class TelegramService {
     const pendingRequest = this.avatarRequests.get(cacheKey);
     if (pendingRequest) return pendingRequest;
 
-    const cachedInfo = await mediaCache.getCacheItemInfo(cacheKey);
-    const settings = await mediaCache.getCacheSettings();
+    const [cachedInfo, settings, cachedUrl] = await Promise.all([
+      mediaCache.getCacheItemInfo(cacheKey),
+      mediaCache.getCacheSettings(),
+      mediaCache.getMedia(cacheKey, 'image/jpeg'),
+    ]);
     const refreshMs = Math.max(1, settings.avatarRefreshHours || 24) * 60 * 60 * 1000;
     const isFresh = cachedInfo?.addedAt && Date.now() - cachedInfo.addedAt < refreshMs;
-    const cachedUrl = await mediaCache.getMedia(cacheKey, 'image/jpeg');
     if (cachedUrl && isFresh) return { success: true, dataUrl: cachedUrl };
     const cachedNativeUrl = await this.getCachedNativeFileUrl(cacheKey);
     if (cachedNativeUrl && isFresh) return { success: true, dataUrl: cachedNativeUrl };
@@ -1097,6 +1111,25 @@ class TelegramService {
     return invoke<boolean>('path_exists', { path });
   }
 
+  private async isNativePathAvailable(path: string) {
+    if (this.confirmedNativePaths.has(path)) return true;
+
+    const pending = this.nativePathChecks.get(path);
+    if (pending) return pending;
+
+    const check = this.pathExists(path)
+      .then(exists => {
+        if (exists) this.confirmedNativePaths.add(path);
+        return exists;
+      })
+      // Preserve the previous optimistic behavior when a platform cannot check
+      // paths, without marking the path as verified for the whole session.
+      .catch(() => true)
+      .finally(() => this.nativePathChecks.delete(path));
+    this.nativePathChecks.set(path, check);
+    return check;
+  }
+
   private async ensureDir(path: string) {
     await invoke('ensure_dir', { path });
   }
@@ -1106,12 +1139,7 @@ class TelegramService {
     const nativeFilePath = info?.nativeFilePath;
     if (!nativeFilePath) return null;
 
-    try {
-      const exists = await this.pathExists(nativeFilePath);
-      if (!exists) return null;
-    } catch {
-      // If path checks are unavailable, let the webview try the converted URL.
-    }
+    if (!await this.isNativePathAvailable(nativeFilePath)) return null;
 
     const url = convertFileSrc(nativeFilePath);
     mediaCache.cacheUrlInMemory(cacheKey, url);
@@ -1239,7 +1267,8 @@ class TelegramService {
     if (!Number.isFinite(numericChatId) || numericChatId === 0) return null;
 
     try {
-      const initStatus: any = await this.tdlibInit();
+      await this.tdlibInit();
+      const initStatus: any = await this.tdlibStatus();
       if (!initStatus?.ready) return null;
 
       const runId = Date.now();
@@ -1421,6 +1450,7 @@ class TelegramService {
         messageId: message.id,
         fileName: safeName,
         filePath,
+        sourceUrl: message.url,
         fileSize: message.mediaSize || undefined,
         progress: 0,
         status: 'downloading',
@@ -1433,10 +1463,16 @@ class TelegramService {
         batchTitle,
         batchKind: 'mass',
         ...batchMeta(),
+      }, {
+        cancel: async () => {
+          this.activeDownloadAborted = true;
+          await invoke<boolean>('cancel_native_download', { id: downloadId });
+          downloadService.updateDownload(downloadId, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
+        },
       });
       batchDownloadIds.add(downloadId);
       try {
-        await this.fileStorage.downloadUrlToFile(message.url!, filePath, (payload) => {
+        await this.fileStorage.downloadUrlToFile(message.url!, filePath, downloadId, (payload) => {
           const percent = payload.percent;
           item.progress = percent;
           const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
@@ -1449,9 +1485,14 @@ class TelegramService {
         downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, ...batchMeta() });
       } catch (err) {
         debugWarn(`Failed to download ${safeName}:`, err);
+        if (String(err).includes('Download cancelado pelo usuário.')) {
+          item.status = 'canceled';
+          item.progress = 0;
+        } else {
         failedCount++;
         item.status = 'failed';
         downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err), ...batchMeta() });
+        }
       }
 
       this.emitDownloadProgress({ chatId, total, downloaded: downloadedCount + skippedCount, currentFile: safeName, items: processedItems });
@@ -1958,11 +1999,17 @@ class TelegramService {
           messageId,
           fileName: filename,
           filePath,
+          sourceUrl: message.url,
           progress: 0,
           status: 'downloading',
           platform: 'telegram',
+        }, {
+          cancel: async () => {
+            await invoke<boolean>('cancel_native_download', { id: downloadId });
+            downloadService.updateDownload(downloadId, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
+          },
         });
-        await this.fileStorage.downloadUrlToFile(message.url, filePath, (payload) => {
+        await this.fileStorage.downloadUrlToFile(message.url, filePath, downloadId, (payload) => {
           const percent = payload.percent;
           downloadService.updateDownload(downloadId, { progress: percent });
           this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount + (percent / 100), currentFile: `${filename} (${percent}%)`, status: 'progress' });
@@ -1971,6 +2018,9 @@ class TelegramService {
         downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
       } catch (err) {
         debugWarn(`Error downloading fake media for message ${messageId}:`, err);
+        if (String(err).includes('Download cancelado pelo usuário.')) {
+          continue;
+        }
         failedCount++;
         downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
@@ -2068,10 +2118,14 @@ class TelegramService {
       progress: 0,
       status: 'downloading',
       platform: 'telegram',
+      sourceUrl: fakeMessage?.url,
       thumbnailUrl: thumbnailUrl || undefined,
       ...downloadMeta,
     }, {
-      cancel: () => this.cancelMessageMediaDownload({ chatId, messageId }),
+      cancel: async () => {
+        await this.cancelMessageMediaDownload({ chatId, messageId });
+        await invoke<boolean>('cancel_native_download', { id }).catch(() => false);
+      },
       retry: () => this.saveMessageMediaFile({ chatId, messageId, downloadMeta, saveAs }),
     });
 
@@ -2144,7 +2198,7 @@ class TelegramService {
           await this.fileStorage.saveCachedMediaToPath(cacheKey, cachedOrPending.filePath, saveAsPath);
         } else if (fakeMessage) {
           if (!fakeMessage.url) throw new Error('Mídia sem URL.');
-          await this.fileStorage.downloadUrlToFile(fakeMessage.url, saveAsPath, (payload) => {
+          await this.fileStorage.downloadUrlToFile(fakeMessage.url, saveAsPath, id, (payload) => {
             const progress = payload.percent;
             downloadService.updateDownload(id, { progress });
             this.emitMediaProgress({ chatId, messageId, progress, downloadedBytes: payload.downloadedBytes, totalBytes: payload.totalBytes, stage: 'downloading' });
@@ -2316,6 +2370,8 @@ class TelegramService {
 
   async clearCache() {
     await mediaCache.clearCache();
+    this.confirmedNativePaths.clear();
+    this.nativePathChecks.clear();
     this.cacheClearCallbacks.forEach(cb => cb());
     if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib) {
       try {

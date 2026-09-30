@@ -16,10 +16,12 @@ const avatarMemoryCache = new Map<string, AvatarMemoryCacheEntry>();
 const avatarPendingRequests = new Map<string, Promise<string | null>>();
 
 const loadAvatar = async (chatId: string) => {
-  const refreshMs = await telegramService.getAvatarRefreshMs();
   const cached = avatarMemoryCache.get(chatId);
-  if (cached && Date.now() - cached.cachedAt < refreshMs) return cached.dataUrl;
-  if (cached) avatarMemoryCache.delete(chatId);
+  if (cached) {
+    const refreshMs = await telegramService.getAvatarRefreshMs();
+    if (Date.now() - cached.cachedAt < refreshMs) return cached.dataUrl;
+    avatarMemoryCache.delete(chatId);
+  }
 
   const pending = avatarPendingRequests.get(chatId);
   if (pending) return pending;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { WarningCircle, DownloadSimple, Link, Spinner, ChatCircle, MagnifyingGlass, TwitterLogo } from '@phosphor-icons/react';
+import { IconAlertCircle, IconBrandX, IconDownload, IconLink, IconLoader2, IconMessageCircle, IconSearch } from "../../design-system/icons";
 import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -222,7 +222,7 @@ export function TwitterLibrary() {
         <header className="twitter-topbar">
           <div className="twitter-title-block">
             <span className="twitter-topbar-icon">
-              <TwitterLogo size={18} weight="fill" />
+              <IconBrandX size={18} stroke={2} />
             </span>
             <h1>Twitter / X</h1>
             <span>{downloads.length} downloads</span>
@@ -239,7 +239,7 @@ export function TwitterLibrary() {
             </div>
             <div className="twitter-url-row">
               <div className="twitter-input-row">
-                <Link size={18} />
+                <IconLink size={18} stroke={2} />
                 <input
                   id="twitter-url"
                   value={url}
@@ -249,13 +249,13 @@ export function TwitterLibrary() {
                 />
               </div>
               <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()}>
-                {analyzing ? <Spinner className="spin" size={18} /> : <MagnifyingGlass size={18} />}
+                {analyzing ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconSearch size={18} stroke={2} />}
                 <span>{analyzing ? 'Analisando' : 'Analisar'}</span>
               </button>
             </div>
             {error && (
               <div className="twitter-error">
-                <WarningCircle size={17} />
+                <IconAlertCircle size={17} stroke={2} />
                 <span>{error}</span>
               </div>
             )}
@@ -272,7 +272,7 @@ export function TwitterLibrary() {
                 <div className="twitter-format-row">
                   <Select value={selectedFormat} onChange={setSelectedFormat} ariaLabel="Formato do vídeo" options={media.formats.video.map(format => ({ value: format.id, label: `${format.label} ${format.size !== '—' ? `(${format.size})` : ''}`, disabled: !format.url }))} />
                   <button className="twitter-primary-btn" onClick={handleDownload} disabled={!canDownload || downloading}>
-                    {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
+                    {downloading ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconDownload size={18} stroke={2} />}
                     <span>{downloading ? 'Baixando' : 'Baixar'}</span>
                   </button>
                 </div>
@@ -298,11 +298,11 @@ export function TwitterLibrary() {
                 </div>
                 <div className="twitter-format-row">
                   <button className="twitter-primary-btn" onClick={handleProfileDownload} disabled={!canDownloadProfile || downloading}>
-                    {downloading ? <Spinner className="spin" size={18} /> : <DownloadSimple size={18} />}
+                    {downloading ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconDownload size={18} stroke={2} />}
                     <span>{downloading ? 'Baixando' : 'Baixar mídias'}</span>
                   </button>
                   <button className="twitter-secondary-btn" onClick={handleCreateProfileChat} disabled={!canDownloadProfile || creatingChat}>
-                    {creatingChat ? <Spinner className="spin" size={18} /> : <ChatCircle size={18} />}
+                    {creatingChat ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconMessageCircle size={18} stroke={2} />}
                     <span>{creatingChat ? 'Criando' : 'Criar chat'}</span>
                   </button>
                 </div>

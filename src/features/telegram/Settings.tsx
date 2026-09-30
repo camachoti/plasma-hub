@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { telegramService } from './TelegramService';
-import { CheckCircle, TelegramLogo, Trash, TwitterLogo, WarningCircle } from '@phosphor-icons/react';
+import { IconAlertCircle, IconBrandTelegram, IconBrandX, IconCircleCheck, IconTrash, IconX } from "../../design-system/icons";
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
 import { getStoredTwitterCookies, loadStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
@@ -189,7 +189,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     <Dialog className="settings-panel" label="Configurações Gerais" onClose={onClose}>
         <div className="settings-header">
           <h2 id="settings-title">Configurações Gerais</h2>
-          <button className="icon-btn" onClick={onClose} aria-label="Fechar configurações">✕</button>
+          <button className="icon-btn" onClick={onClose} aria-label="Fechar configurações"><IconX size={18} stroke={2} /></button>
         </div>
         <div className="settings-tabs" role="tablist" aria-label="Seções de configurações">
           <button
@@ -231,7 +231,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
               <div className="settings-general-grid">
                 <div className="settings-section settings-card">
                   <div className="settings-integration-header">
-                    <div className="settings-integration-icon twitter"><TwitterLogo size={21} weight="fill" /></div>
+                    <div className="settings-integration-icon twitter"><IconBrandX size={21} stroke={2} /></div>
                     <div>
                       <h3>Twitter / X</h3>
                       <p>Credenciais opcionais para conteúdo que exige uma sessão ativa.</p>
@@ -255,13 +255,13 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
 
                 <div className="settings-section settings-card">
                   <div className="settings-integration-header">
-                    <div className="settings-integration-icon telegram"><TelegramLogo size={21} weight="fill" /></div>
+                    <div className="settings-integration-icon telegram"><IconBrandTelegram size={21} stroke={2} /></div>
                     <div>
                       <h3>Telegram nativo</h3>
                       <p>Gerencie a autenticação e teste a conexão local com o TDLib.</p>
                     </div>
                     <span className={`settings-status-badge ${tdlibReady ? 'ready' : 'inactive'}`}>
-                      {tdlibReady ? <CheckCircle size={15} weight="fill" /> : <WarningCircle size={15} weight="fill" />}
+                      {tdlibReady ? <IconCircleCheck size={15} stroke={2} /> : <IconAlertCircle size={15} stroke={2} />}
                       {tdlibStatusLabel}
                     </span>
                   </div>
@@ -439,7 +439,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                     onClick={handleClearCache}
                     disabled={clearing}
                   >
-                    {clearing ? 'Limpando...' : clearConfirm ? '⚠️ Confirmar limpeza' : <><Trash size={16} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />Limpar cache</>}
+                    {clearing ? 'Limpando...' : clearConfirm ? '⚠️ Confirmar limpeza' : <><IconTrash size={16} stroke={2} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />Limpar cache</>}
                   </button>
                 </div>
               )}

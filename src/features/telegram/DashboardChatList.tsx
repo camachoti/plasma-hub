@@ -17,6 +17,7 @@ interface DashboardChatListProps {
   loading: boolean;
   loadingMore: boolean;
   hasMoreChats: boolean;
+  isRefreshing: boolean;
   selectedChat: Chat | null;
   skipLogin: boolean;
   unreadChatsCount: number;
@@ -124,6 +125,7 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   loading,
   loadingMore,
   hasMoreChats,
+  isRefreshing,
   selectedChat,
   skipLogin,
   unreadChatsCount,
@@ -144,7 +146,10 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
     <div className="list-header">
       <div className="list-title">
         <div className="list-title-copy">
-          <span>Telegram</span>
+          <span className="list-overline">
+            Telegram
+            {isRefreshing && <em aria-live="polite">Atualizando</em>}
+          </span>
           <h1>Conversas</h1>
         </div>
         <div className="list-title-actions">
@@ -169,6 +174,7 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
             value={chatSearch}
             onChange={event => setChatSearch(event.target.value)}
             placeholder="Pesquisar..."
+            aria-label="Pesquisar na lista de chats e grupos"
           />
         </div>
       )}
@@ -217,25 +223,27 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
       computeItemKey={(_, chat) => chat.id}
       components={{
         Header: () => skipLogin ? (
-          <div
-            className="chat-row telegram-login-row"
-            role="button"
-            tabIndex={0}
-            onClick={() => {
-              setError('');
-              onTelegramLoginRequest?.();
-            }}
-            onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
-          >
-            <div className="chat-avatar telegram-login-avatar">
-              <IconLogOut />
-            </div>
-            <div className="telegram-login-copy">
-              <div className="chat-name">
-                <span className="name-text">Logar no Telegram</span>
+          <div className="chat-list-item">
+            <div
+              className="chat-row telegram-login-row"
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                setError('');
+                onTelegramLoginRequest?.();
+              }}
+              onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
+            >
+              <div className="chat-avatar telegram-login-avatar">
+                <IconLogOut />
               </div>
-              <div className="chat-preview">
-                Conectar sua conta para carregar chats reais
+              <div className="telegram-login-copy">
+                <div className="chat-name">
+                  <span className="name-text">Logar no Telegram</span>
+                </div>
+                <div className="chat-preview">
+                  Conectar sua conta para carregar chats reais
+                </div>
               </div>
             </div>
           </div>
@@ -263,17 +271,19 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
         ) : null,
       }}
       itemContent={(_, chat) => (
-        <ChatRow
-          chat={chat}
-          isActive={selectedChat?.id === chat.id}
-          formatMessageTime={formatMessageTime}
-          getChatKind={getChatKind}
-          readChatHistory={readChatHistory}
-          setChatContextMenu={setChatContextMenu}
-          setChats={setChats}
-          setError={setError}
-          setSelectedChat={setSelectedChat}
-        />
+        <div className="chat-list-item">
+          <ChatRow
+            chat={chat}
+            isActive={selectedChat?.id === chat.id}
+            formatMessageTime={formatMessageTime}
+            getChatKind={getChatKind}
+            readChatHistory={readChatHistory}
+            setChatContextMenu={setChatContextMenu}
+            setChats={setChats}
+            setError={setError}
+            setSelectedChat={setSelectedChat}
+          />
+        </div>
       )}
     />
 

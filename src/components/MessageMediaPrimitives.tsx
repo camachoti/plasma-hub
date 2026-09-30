@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X } from '@phosphor-icons/react';
+import { IconX } from "../design-system/icons";
 import { telegramService } from '../features/telegram/TelegramService';
 
 export const IMAGE_MEDIA_MIME_TYPE = 'image/jpeg';
@@ -104,7 +104,7 @@ export const MediaCancelControl: React.FC<{
       }
     }}
   >
-    <X size={15} weight="bold" />
+    <IconX size={15} stroke={2} />
   </span>
 );
 

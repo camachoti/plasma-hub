@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { IconArrowDown, IconCheck as TablerCheck, IconChevronDown, IconMessageCircle, IconX } from "../../design-system/icons";
 import { convertFileSrc, invokeCommand as invoke, listenNativeDragDrop } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
@@ -39,7 +40,7 @@ import {
 
 interface DownloadItem {
   name: string;
-  status: 'downloading' | 'completed' | 'skipped' | 'failed';
+  status: 'pending' | 'downloading' | 'completed' | 'skipped' | 'failed' | 'stopped';
   progress: number;
   size: number;
 }
@@ -74,7 +75,7 @@ const ChatSearchSelect: React.FC<ChatSearchSelectProps> = React.memo(({ value, o
     <div className={`custom-select chat-search-custom-select ${className || ''} ${open ? 'open' : ''}`}>
       <button type="button" className="custom-select-trigger" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={event => { event.stopPropagation(); setOpen(current => !current); }}>
         <span>{selected?.label || ''}</span>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+        <IconChevronDown size={14} stroke={2} aria-hidden="true" />
       </button>
       {open && (
         <div className="custom-select-options" role="listbox" aria-label={ariaLabel} onClick={event => event.stopPropagation()}>
@@ -106,7 +107,54 @@ interface DashboardProps {
 const LAST_CHAT_KEY = 'plasma_last_chat_id';
 const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
 const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
+const TIMELINE_ANCHOR_PREFIX = 'plasma_timeline_anchor_';
 const INFO_PANEL_KEY = 'plasma_info_panel_open';
+const CHAT_ORDER_KEY = 'plasma_chat_order_v1';
+const CHAT_LIST_CACHE_KEY = 'plasma_chat_list_cache_v1';
+const CHAT_LIST_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const readCachedChats = (): Chat[] => {
+  try {
+    const cached = JSON.parse(appStorage.get(CHAT_LIST_CACHE_KEY) || 'null') as { savedAt?: number; chats?: unknown } | null;
+    if (!cached || !Array.isArray(cached.chats) || typeof cached.savedAt !== 'number' || Date.now() - cached.savedAt > CHAT_LIST_CACHE_MAX_AGE_MS) {
+      return [];
+    }
+    return cached.chats.filter((chat): chat is Chat => (
+      Boolean(chat)
+      && typeof chat === 'object'
+      && typeof (chat as Chat).id === 'string'
+      && typeof (chat as Chat).title === 'string'
+    ));
+  } catch {
+    return [];
+  }
+};
+
+const saveCachedChats = (chats: Chat[]) => {
+  try {
+    appStorage.set(CHAT_LIST_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), chats }));
+  } catch {
+    // A full or unavailable localStorage must not block chat rendering.
+  }
+};
+
+const applySavedChatOrder = (items: Chat[]) => {
+  try {
+    const order = JSON.parse(appStorage.get(CHAT_ORDER_KEY) || '[]') as string[];
+    const positions = new Map(order.map((id, index) => [id, index]));
+    return [...items].sort((left, right) => (positions.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+  } catch {
+    return items;
+  }
+};
+
+const saveChatOrder = (items: Chat[]) => {
+  appStorage.set(CHAT_ORDER_KEY, JSON.stringify(items.map(chat => chat.id)));
+};
+
+const timelineAnchorKey = (chatId: string, topicId?: number | null) => (
+  `${TIMELINE_ANCHOR_PREFIX}${chatId}_${topicId && topicId !== 0 ? topicId : 'all'}`
+);
 
 const revokeDroppedPreview = (previewUrl: string) => {
   if (previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
@@ -212,12 +260,21 @@ const DroppedVideoPreview: React.FC<{ filePath: string; src: string; fileName: s
 
 export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTelegramLoginRequest }) => {
   const PAGE_SIZE = 50;
-  const [chats, setChats] = useState<Chat[]>([]);
-  const [loading, setLoading] = useState(true);
+  const INITIAL_CHAT_LOAD_LIMIT = 80;
+  const initialCachedChatsRef = useRef<Chat[] | null>(null);
+  if (initialCachedChatsRef.current === null) initialCachedChatsRef.current = readCachedChats();
+  const [chats, setChats] = useState<Chat[]>(() => initialCachedChatsRef.current || []);
+  const [loading, setLoading] = useState(() => (initialCachedChatsRef.current?.length || 0) === 0);
+  const [isRefreshingChats, setIsRefreshingChats] = useState(() => (initialCachedChatsRef.current?.length || 0) > 0);
   const [loadingMoreChats, setLoadingMoreChats] = useState(false);
   const [hasMoreChats, setHasMoreChats] = useState(false);
-  const [chatLoadLimit, setChatLoadLimit] = useState(250);
-  const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
+  const [chatLoadLimit, setChatLoadLimit] = useState(INITIAL_CHAT_LOAD_LIMIT);
+  const [selectedChat, setSelectedChat] = useState<Chat | null>(() => {
+    const lastChatId = appStorage.get(LAST_CHAT_KEY);
+    return lastChatId
+      ? initialCachedChatsRef.current?.find(chat => chat.id === lastChatId) || null
+      : null;
+  });
   const selectedChatRef = useRef<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const sentMediaThumbnailUrlsRef = useRef(new Map<string, string>());
@@ -225,6 +282,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const visibleMediaIdsRef = useRef<Set<number>>(new Set());
   const visibleRangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
   const visibleRangeRafRef = useRef<number | null>(null);
+  const visibleRangeSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previousVisibleRangeRef = useRef<{ startIndex: number; endIndex: number; changedAt: number } | null>(null);
   const [isNearLatest, setIsNearLatest] = useState(true);
   const isNearLatestRef = useRef(true);
   const [pendingIncomingMessages, setPendingIncomingMessages] = useState(0);
@@ -239,6 +298,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const shouldScrollToBottomRef = useRef(false);
   const preserveScrollPositionRef = useRef<number | null>(null);
   const topicListScrollRef = useRef<number>(0);
+  const pendingTimelineAnchorRef = useRef<number | null>(null);
+  const timelineAnchorSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timelineRestoreUntilRef = useRef(0);
   const pendingJumpToMsgIdRef = useRef<number | null>(null);
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
   const messagesLoadSeqRef = useRef(0);
@@ -361,6 +423,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     onConfirm: () => void;
   } | null>(null);
 
+  const moveChatToTop = useCallback((chatId: string) => {
+    setChats(current => {
+      const next = [...current].sort((left, right) => {
+        if (left.id === chatId) return -1;
+        if (right.id === chatId) return 1;
+        return 0;
+      });
+      saveChatOrder(next);
+      return next;
+    });
+  }, []);
+
+  const resetChatOrder = useCallback(() => {
+    appStorage.remove(CHAT_ORDER_KEY);
+    setChats(current => [...current].sort((left, right) => (right.lastMessageDate ?? 0) - (left.lastMessageDate ?? 0)));
+  }, []);
+
   const unreadChatsCount = useMemo(
     () => chats.reduce((count, chat) => count + ((chat.unreadCount ?? 0) > 0 ? 1 : 0), 0),
     [chats]
@@ -436,10 +515,68 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     () => Math.max(0, 100000 - timelineItems.length),
     [timelineItems.length]
   );
+  const prepareTimelineRestore = useCallback((chatId: string, topicId?: number | null) => {
+    const stored = appStorage.get(timelineAnchorKey(chatId, topicId));
+    const messageId = stored ? Number(stored) : NaN;
+    pendingTimelineAnchorRef.current = Number.isFinite(messageId) ? messageId : null;
+    shouldScrollToBottomRef.current = !Number.isFinite(messageId);
+    timelineRestoreUntilRef.current = Number.isFinite(messageId) ? Date.now() + 800 : 0;
+  }, []);
+  const applyVisibleMediaRange = useCallback((latestRange: { startIndex: number; endIndex: number }) => {
+    const rawStart = Number(latestRange.startIndex || 0);
+    const rawEnd = Number(latestRange.endIndex || rawStart);
+    const visibleStart = Math.max(0, rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart);
+    const visibleEnd = Math.min(timelineItems.length - 1, rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd);
+    const nextIsNearLatest = visibleEnd >= timelineItems.length - 2;
+    if (isNearLatestRef.current !== nextIsNearLatest) {
+      isNearLatestRef.current = nextIsNearLatest;
+      setIsNearLatest(nextIsNearLatest);
+    }
+    if (nextIsNearLatest) setPendingIncomingMessages(0);
+
+    const firstVisibleItem = timelineItems[visibleStart];
+    if (selectedChat && firstVisibleItem && Date.now() >= timelineRestoreUntilRef.current) {
+      if (timelineAnchorSaveTimerRef.current) window.clearTimeout(timelineAnchorSaveTimerRef.current);
+      const chatId = selectedChat.id;
+      const topicId = viewingTopic?.id;
+      const messageId = firstVisibleItem.id;
+      timelineAnchorSaveTimerRef.current = window.setTimeout(() => {
+        appStorage.set(timelineAnchorKey(chatId, topicId), String(messageId));
+        timelineAnchorSaveTimerRef.current = null;
+      }, 300);
+    }
+
+    const visibleIds = new Set<number>();
+    const retainedIds = new Set<number>();
+    const preloadStart = Math.max(0, visibleStart - 3);
+    const preloadEnd = Math.min(timelineItems.length - 1, visibleEnd + 3);
+    for (let index = preloadStart; index <= preloadEnd; index++) {
+      const item = timelineItems[index];
+      if (!item) continue;
+      const target = index >= visibleStart && index <= visibleEnd ? visibleIds : retainedIds;
+      if (item.type === 'album') {
+        item.messages?.forEach(message => {
+          if (message.hasMedia) target.add(Number(message.id));
+        });
+      } else if (item.message.hasMedia) {
+        target.add(Number(item.message.id));
+      }
+    }
+
+    const keptIds = new Set([...visibleIds, ...retainedIds]);
+    telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id, keepMessageIds: keptIds });
+    telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, keptIds);
+
+    const previousIds = visibleMediaIdsRef.current;
+    const isSameSet = previousIds.size === visibleIds.size && Array.from(visibleIds).every(id => previousIds.has(id));
+    if (isSameSet) return;
+    visibleMediaIdsRef.current = visibleIds;
+    setVisibleMediaIds(visibleIds);
+  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems, viewingTopic?.id]);
+
   const updateVisibleMediaIds = useCallback((range: { startIndex: number; endIndex: number }) => {
     visibleRangeRef.current = range;
     if (visibleRangeRafRef.current !== null) return;
-
     visibleRangeRafRef.current = window.requestAnimationFrame(() => {
       visibleRangeRafRef.current = null;
       const latestRange = visibleRangeRef.current;
@@ -447,42 +584,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
       const rawStart = Number(latestRange.startIndex || 0);
       const rawEnd = Number(latestRange.endIndex || rawStart);
-      const visibleEnd = rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd;
-      const nextIsNearLatest = visibleEnd >= timelineItems.length - 2;
-      if (isNearLatestRef.current !== nextIsNearLatest) {
-        isNearLatestRef.current = nextIsNearLatest;
-        setIsNearLatest(nextIsNearLatest);
+      const now = Date.now();
+      const previous = previousVisibleRangeRef.current;
+      const movedItems = previous ? Math.max(Math.abs(rawStart - previous.startIndex), Math.abs(rawEnd - previous.endIndex)) : 0;
+      const isRapidScroll = Boolean(previous && now - previous.changedAt < 180 && movedItems > 3);
+      previousVisibleRangeRef.current = { startIndex: rawStart, endIndex: rawEnd, changedAt: now };
+
+      if (visibleRangeSettleTimerRef.current) window.clearTimeout(visibleRangeSettleTimerRef.current);
+      if (isRapidScroll) {
+        visibleRangeSettleTimerRef.current = window.setTimeout(() => {
+          visibleRangeSettleTimerRef.current = null;
+          if (visibleRangeRef.current) applyVisibleMediaRange(visibleRangeRef.current);
+        }, 220);
+        return;
       }
-      if (nextIsNearLatest) setPendingIncomingMessages(0);
-      const start = Math.max(0, (rawStart >= timelineFirstItemIndex ? rawStart - timelineFirstItemIndex : rawStart) - 3);
-      const end = Math.min(timelineItems.length - 1, (rawEnd >= timelineFirstItemIndex ? rawEnd - timelineFirstItemIndex : rawEnd) + 3);
-      const ids = new Set<number>();
-
-      for (let index = start; index <= end; index++) {
-        const item = timelineItems[index];
-        if (!item) continue;
-        if (item.type === 'album') {
-          item.messages?.forEach(message => {
-            if (message.hasMedia) ids.add(Number(message.id));
-          });
-        } else if (item.message.hasMedia) {
-          ids.add(Number(item.message.id));
-        }
-      }
-
-      const previousIds = visibleMediaIdsRef.current;
-      const isSameSet = previousIds.size === ids.size && Array.from(ids).every(id => previousIds.has(id));
-      if (isSameSet) return;
-
-      visibleMediaIdsRef.current = ids;
-      telegramService.cancelQueuedThumbnails({
-        activeChatId: selectedChat?.id,
-        keepMessageIds: ids,
-      });
-      telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null, ids);
-      setVisibleMediaIds(ids);
+      applyVisibleMediaRange(latestRange);
     });
-  }, [selectedChat?.id, timelineFirstItemIndex, timelineItems]);
+  }, [applyVisibleMediaRange]);
 
   const scrollToLatestMessages = useCallback(() => {
     const latestIndex = timelineFirstItemIndex + timelineItems.length - 1;
@@ -565,6 +683,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setProgress({ total: data.total, downloaded: data.downloaded, currentFile: data.currentFile, topicTitle: data.topicTitle, isScanning: data.isScanning, items: data.items });
       const currentFile = String(data.currentFile || '');
       if (currentFile.startsWith('Concluído') || currentFile.startsWith('Concluido') || currentFile.startsWith('Parado') || currentFile === 'Concluído!') {
+        if (Array.isArray(data.items) && data.items.length > 0) setShowDetailedProgress(true);
         setTimeout(() => {
           setDownloading(false);
           setStopping(false);
@@ -671,8 +790,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null);
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
+    if (visibleRangeSettleTimerRef.current) {
+      window.clearTimeout(visibleRangeSettleTimerRef.current);
+      visibleRangeSettleTimerRef.current = null;
+    }
     visibleMediaIdsRef.current = new Set();
     visibleRangeRef.current = null;
+    previousVisibleRangeRef.current = null;
     isNearLatestRef.current = true;
     setIsNearLatest(true);
     setPendingIncomingMessages(0);
@@ -683,7 +807,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
     if (selectedChat) {
       appStorage.set(LAST_CHAT_KEY, selectedChat.id);
-      shouldScrollToBottomRef.current = true;
+      shouldScrollToBottomRef.current = false;
+      pendingTimelineAnchorRef.current = null;
       setIsDownloadModalOpen(false);
       setForumTopics([]);
       setSelectedTopicId('all');
@@ -723,6 +848,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         } else {
           topicsLoadSeqRef.current += 1;
           setLoadingTopics(false);
+          prepareTimelineRestore(selectedChat.id);
           loadMessages(selectedChat.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat.lastMessageDate });
           if (selectedChat.isGroup) {
             void fetchForumTopics(selectedChat, { detectOnly: true });
@@ -751,9 +877,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setChatSearchMediaFilter('all');
       setChatSearchSenderFilter('all');
     }
-  }, [selectedChat?.id]);
+  }, [selectedChat?.id, prepareTimelineRestore]);
 
   useEffect(() => {
+    const pendingAnchor = pendingTimelineAnchorRef.current;
+    if (pendingAnchor !== null && virtuosoRef.current && timelineItems.length > 0) {
+      const anchorIndex = timelineItems.findIndex(item => (
+        Number(item.id) === pendingAnchor || item.messages?.some(message => Number(message.id) === pendingAnchor)
+      ));
+      pendingTimelineAnchorRef.current = null;
+      if (anchorIndex >= 0) {
+        virtuosoRef.current.scrollToIndex({ index: timelineFirstItemIndex + anchorIndex, align: 'start' });
+        shouldScrollToBottomRef.current = false;
+        return;
+      }
+      shouldScrollToBottomRef.current = true;
+    }
     if (shouldScrollToBottomRef.current && virtuosoRef.current && messages.length > 0) {
       const lastIndex = timelineFirstItemIndex + timelineItems.length - 1;
       virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end' });
@@ -766,6 +905,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       return () => clearTimeout(timer);
     }
   }, [messages, timelineItems, timelineFirstItemIndex]);
+
+  useEffect(() => () => {
+    if (timelineAnchorSaveTimerRef.current) window.clearTimeout(timelineAnchorSaveTimerRef.current);
+    if (visibleRangeSettleTimerRef.current) window.clearTimeout(visibleRangeSettleTimerRef.current);
+  }, []);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -982,12 +1126,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
   }, [isMenuOpen]);
 
-  const fetchDialogs = async (limit = 250, loadingMore = false) => {
+  const fetchDialogs = async (limit = INITIAL_CHAT_LOAD_LIMIT, loadingMore = false) => {
     if (loadingMore) setLoadingMoreChats(true);
+    else setIsRefreshingChats(true);
     try {
       const res = await telegramService.getDialogs(limit);
       if (res.success && res.dialogs) {
-        setChats(res.dialogs);
+        const orderedDialogs = applySavedChatOrder(res.dialogs);
+        setChats(orderedDialogs);
+        saveCachedChats(orderedDialogs);
         setHasMoreChats(Boolean(res.hasMore));
         setChatLoadLimit(limit);
         const pendingFakeChatId = appStorage.get('plasma_twitter_pending_fake_chat');
@@ -1004,38 +1151,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           const restoredChat = lastChatId ? res.dialogs.find((chat: Chat) => chat.id === lastChatId) : null;
           if (restoredChat) setSelectedChat(restoredChat);
         }
-        // Preload only the first visible-ish window in the background.
-        preloadAvatars(res.dialogs);
+        // ChatAvatar is rendered by a virtual list and requests only visible rows.
+        // Avoid an eager background batch competing with the first visible avatars.
       }
       else setError(res.error || 'Failed to fetch chats');
     } catch (e: any) {
       setError(e.message || 'Unknown error');
     } finally {
       if (loadingMore) setLoadingMoreChats(false);
-      else setLoading(false);
+      else {
+        setLoading(false);
+        setIsRefreshingChats(false);
+      }
     }
   };
 
   const loadMoreChats = useCallback(() => {
     if (loadingMoreChats || !hasMoreChats) return;
-    void fetchDialogs(Math.min(chatLoadLimit + 250, 5000), true);
+    void fetchDialogs(Math.min(chatLoadLimit + 100, 5000), true);
   }, [chatLoadLimit, hasMoreChats, loadingMoreChats]);
-
-  const preloadAvatars = async (dialogs: Chat[]) => {
-    const BATCH_SIZE = 3;
-    const MAX_PRELOAD = 12;
-    const targets = dialogs.slice(0, MAX_PRELOAD).filter(d => d.id && typeof d.id === 'string' && !d.id.startsWith('invite_'));
-    telegramService.cancelQueuedAvatarsExcept(targets.map(chat => chat.id));
-    for (let i = 0; i < targets.length; i += BATCH_SIZE) {
-      const batch = targets.slice(i, i + BATCH_SIZE);
-      await Promise.all(
-        batch.map(d => telegramService.getAvatar(d.id, { priority: 'background' }).catch(() => null))
-      );
-      if (i + BATCH_SIZE < targets.length) {
-        await new Promise(r => setTimeout(r, 80));
-      }
-    }
-  };
 
   const fetchSharedMedia = async (chatId: string) => {
     const loadSeq = ++sharedMediaLoadSeqRef.current;
@@ -1106,7 +1240,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         if (savedTopic) {
           setViewingTopic(savedTopic);
           setSelectedTopicId(String(savedTopic.id));
-          shouldScrollToBottomRef.current = true;
+          prepareTimelineRestore(chat.id, savedTopic.id);
           loadMessages(chat.id, 0, savedTopic.id, { refresh: true, topicKind: savedTopic.kind });
         }
       } else if (res.success && !res.isForum) {
@@ -1152,7 +1286,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic(topic);
     setSelectedTopicId(String(topic.id));
-    shouldScrollToBottomRef.current = true;
+    prepareTimelineRestore(selectedChat!.id, topic.id);
     appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat!.id}`, String(topic.id));
     loadMessages(selectedChat!.id, 0, topic.id, { refresh: true, topicKind: topic.kind });
 
@@ -1177,7 +1311,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (topicListRef.current) topicListScrollRef.current = topicListRef.current.scrollTop;
     setViewingTopic({ id: 0, title: 'Todos os tópicos', topMessageId: 0, unreadCount: 0, closed: false, pinned: false });
     setSelectedTopicId('all');
-    shouldScrollToBottomRef.current = true;
+    prepareTimelineRestore(selectedChat!.id);
     if (selectedChat) appStorage.set(`${LAST_TOPIC_PREFIX}${selectedChat.id}`, 'all');
     loadMessages(selectedChat!.id, 0, undefined, { refresh: true, latestKnownMessageDate: selectedChat?.lastMessageDate });
   };
@@ -1284,7 +1418,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const handleStartDownload = async () => {
     if (!selectedChat || !folderPath) return;
     const selectedTopic = forumTopics.find(topic => String(topic.id) === selectedTopicId) || null;
-    setDownloading(true); setStopping(false); setProgress({
+    setDownloading(true); setStopping(false); setShowDetailedProgress(false); setProgress({
       total: 0,
       downloaded: 0,
       currentFile: 'Iniciando download...',
@@ -2252,6 +2386,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           loading={loading}
           loadingMore={loadingMoreChats}
           hasMoreChats={hasMoreChats}
+          isRefreshing={isRefreshingChats}
           selectedChat={selectedChat}
           skipLogin={skipLogin}
           unreadChatsCount={unreadChatsCount}
@@ -2302,11 +2437,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       setSelectedMessageIds([]);
                     }}
                     title="Voltar para chats"
+                    aria-label="Voltar para a lista de chats"
                   >
                     <IconBack />
                   </button>
                   {hasTopicView && viewingTopic && (
-                    <button className="icon-btn" onClick={handleBackToTopics} title="Voltar para tópicos">
+                    <button className="icon-btn" onClick={handleBackToTopics} title="Voltar para tópicos" aria-label="Voltar para tópicos">
                       <IconBack />
                     </button>
                   )}
@@ -2355,6 +2491,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       className={`icon-btn ${isCreatingTopic ? 'active' : ''}`}
                       onClick={() => { setIsCreatingTopic(v => !v); setNewTopicTitle(''); }}
                       title="Criar tópico"
+                      aria-label={isCreatingTopic ? 'Fechar criação de tópico' : 'Criar tópico'}
+                      aria-pressed={isCreatingTopic}
                     >
                       <IconPlus />
                     </button>
@@ -2368,19 +2506,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         setChatSearchResultIndex(0);
                       }
                     }}
-                    title={isChatSearchOpen ? 'Fechar busca no chat' : 'Buscar no chat'}
+                      title={isChatSearchOpen ? 'Fechar busca no chat' : 'Buscar no chat'}
+                      aria-label={isChatSearchOpen ? 'Fechar busca no chat' : 'Buscar no chat'}
+                      aria-pressed={isChatSearchOpen}
                   >
                     <IconSearch />
                   </button>
                   <button
                     className={`icon-btn ${infoOpen ? 'active' : ''}`}
                     onClick={() => setInfoOpen(v => !v)}
-                    title="Painel de informações"
+                      title="Painel de informações"
+                      aria-label="Alternar painel de informações"
+                      aria-pressed={infoOpen}
                   >
                     <IconPanel />
                   </button>
                   <div style={{ position: 'relative' }}>
-                    <button className="icon-btn" onClick={e => { e.stopPropagation(); setIsMenuOpen(v => !v); }} title="Mais opções">
+                    <button className="icon-btn" onClick={e => { e.stopPropagation(); setIsMenuOpen(v => !v); }} title="Mais opções" aria-label="Mais opções do chat" aria-expanded={isMenuOpen}>
                       <IconMore />
                     </button>
                     {isMenuOpen && (
@@ -2400,10 +2542,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                           <span>Mass Download</span>
                         </div>
                         <div className="dropdown-item" onClick={() => { setIsSelectionMode(true); setIsMenuOpen(false); setSelectedMessageIds([]); }}>
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                            <polyline points="22 4 12 14.01 9 11.01" />
-                          </svg>
+                          <TablerCheck size={18} stroke={2} />
                           <span>Selecionar mídias</span>
                         </div>
                       </div>
@@ -2529,7 +2668,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   <div className="new-topic-form">
                     <div className="new-topic-header">
                       <span className="new-topic-label">Novo Tópico</span>
-                      <button type="button" className="icon-btn" onClick={() => { setIsCreatingTopic(false); setNewTopicTitle(''); }}>✕</button>
+                      <button type="button" className="icon-btn" onClick={() => { setIsCreatingTopic(false); setNewTopicTitle(''); }} aria-label="Fechar criação de tópico"><IconX size={18} stroke={2} /></button>
                     </div>
                     <div className="new-topic-body">
                       <input
@@ -2547,7 +2686,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       />
                       <div className="topic-color-picker">
                         {TOPIC_ICON_COLORS.map(color => (
-                          <button key={color.value} type="button" className={`topic-color-dot ${newTopicColor === color.value ? 'selected' : ''}`} style={{ background: color.css }} onClick={() => setNewTopicColor(color.value)} title={color.label} />
+                          <button key={color.value} type="button" className={`topic-color-dot ${newTopicColor === color.value ? 'selected' : ''}`} style={{ background: color.css }} onClick={() => setNewTopicColor(color.value)} title={color.label} aria-label={`Selecionar cor ${color.label}`} aria-pressed={newTopicColor === color.value} />
                         ))}
                       </div>
                       <button type="button" className="new-topic-create" onClick={handleCreateTopic} disabled={!newTopicTitle.trim()}>
@@ -2577,9 +2716,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       </div>
                       <div className="topic-item" onClick={handleViewAllTopics}>
                         <div className="topic-item-avatar topic-item-avatar-all">
-                          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                          </svg>
+                          <IconMessageCircle size={20} stroke={2} />
                         </div>
                         <div className="topic-item-content">
                           <div className="topic-item-name">Todos os tópicos</div>
@@ -2686,7 +2823,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     />
                     {!isNearLatest && (
                       <button type="button" className="timeline-latest-button" onClick={scrollToLatestMessages}>
-                        <span aria-hidden="true">↓</span>
+                        <IconArrowDown size={18} stroke={2} aria-hidden="true" />
                         {pendingIncomingMessages > 0
                           ? `${pendingIncomingMessages} ${pendingIncomingMessages === 1 ? 'nova mensagem' : 'novas mensagens'}`
                           : 'Ir para recentes'}
@@ -2742,8 +2879,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           ) : (
             <div className="convo-empty fade-in">
               <div className="convo-empty-icon">✈</div>
-              <h3>Nenhum chat selecionado</h3>
-              <p>Escolha uma conversa na lista para ver o histórico e baixar mídias.</p>
+              <h3>{skipLogin ? 'Conecte seu Telegram para começar' : 'Nenhum chat selecionado'}</h3>
+              <p>
+                {skipLogin
+                  ? 'Carregue suas conversas e mídias ou use a área de Downloads na barra lateral para importar um link.'
+                  : 'Escolha uma conversa na lista para ver o histórico e baixar mídias.'}
+              </p>
+              {skipLogin && onTelegramLoginRequest && (
+                <button type="button" className="convo-empty-action" onClick={onTelegramLoginRequest}>
+                  Conectar Telegram
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -2781,7 +2927,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 <h3 id="drop-media-modal-title">Enviar mídias</h3>
                 <span>{pendingDroppedMedia.length} {pendingDroppedMedia.length === 1 ? 'arquivo selecionado' : 'arquivos selecionados'}</span>
               </div>
-              <button type="button" className="icon-btn close-btn" onClick={discardDroppedMedia} disabled={isSending} aria-label="Fechar pré-visualização">✕</button>
+              <button type="button" className="icon-btn close-btn" onClick={discardDroppedMedia} disabled={isSending} aria-label="Fechar pré-visualização"><IconX size={18} stroke={2} /></button>
             </div>
             <div className="drop-media-grid">
               {pendingDroppedMedia.map((file, index) => (
@@ -2874,6 +3020,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 setChatContextMenu(null);
               },
             },
+            {
+              label: 'Mover para o topo',
+              icon: <IconPanel />,
+              onClick: () => {
+                moveChatToTop(chatContextMenu.chat.id);
+                setChatContextMenu(null);
+              },
+            },
+            {
+              label: 'Restaurar ordem por atividade',
+              icon: <IconPanel />,
+              onClick: () => {
+                resetChatOrder();
+                setChatContextMenu(null);
+              },
+            },
             { separator: true },
             {
               label: 'Sair do grupo',
@@ -2948,7 +3110,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           <div className="original-msg-modal" onClick={e => e.stopPropagation()}>
             <div className="original-msg-modal-header">
               <h3>Mensagem original</h3>
-              <button className="icon-btn" onClick={() => setOriginalMsgModal(null)}>✕</button>
+              <button className="icon-btn" onClick={() => setOriginalMsgModal(null)} aria-label="Fechar mensagem original"><IconX size={18} stroke={2} /></button>
             </div>
             <div className="original-msg-modal-body">
               <div className="original-msg-label">Versão original</div>
@@ -3105,7 +3267,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     <span>{isSearchMediaSelectionMode ? 'Sair da seleção' : 'Selecionar'}</span>
                   </button>
                 )}
-                <button className="icon-btn close-btn" onClick={closeSearchMediaModal} aria-label="Fechar mídias enviadas" title="Fechar">✕</button>
+                <button className="icon-btn close-btn" onClick={closeSearchMediaModal} aria-label="Fechar mídias enviadas" title="Fechar"><IconX size={18} stroke={2} /></button>
               </div>
             </div>
             <div className={`search-media-modal-body ${isSearchMediaSelectionMode ? 'is-selection-mode' : ''}`}>

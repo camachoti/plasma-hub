@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowClockwise, CloudArrowDown, CheckCircle, WarningCircle, FileArrowDown, HardDrive, Link, Spinner, FolderOpen, YoutubeLogo, RedditLogo, TwitterLogo, InstagramLogo, StackSimple, CaretDown, X, XCircle, Trash } from '@phosphor-icons/react';
+import { IconAlertCircle, IconBrandInstagram, IconBrandReddit, IconBrandX, IconBrandYoutube, IconChevronDown, IconCircleCheck, IconCircleX, IconCloudDownload, IconDatabase, IconFileDownload, IconFolderOpen, IconLink, IconLoader2, IconRefresh, IconStack2, IconTrash, IconX } from "../../design-system/icons";
 import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -278,18 +278,18 @@ export const Downloads: React.FC = () => {
           <div className="download-thumbnail-container">
             <img src={item.thumbnailUrl} alt="Thumbnail" className="download-thumbnail-img" />
             <div className={`download-status-overlay ${item.status}`}>
-              {item.status === 'downloading' && <FileArrowDown size={14} />}
-              {item.status === 'completed' && <CheckCircle size={14} />}
-              {item.status === 'failed' && <WarningCircle size={14} />}
-              {item.status === 'canceled' && <XCircle size={14} />}
+              {item.status === 'downloading' && <IconFileDownload size={14} stroke={2} />}
+              {item.status === 'completed' && <IconCircleCheck size={14} stroke={2} />}
+              {item.status === 'failed' && <IconAlertCircle size={14} stroke={2} />}
+              {item.status === 'canceled' && <IconCircleX size={14} stroke={2} />}
             </div>
           </div>
         ) : (
           <div className={`download-icon ${item.status}`}>
-            {item.status === 'downloading' && <FileArrowDown size={20} />}
-            {item.status === 'completed' && <CheckCircle size={20} />}
-            {item.status === 'failed' && <WarningCircle size={20} />}
-            {item.status === 'canceled' && <XCircle size={20} />}
+            {item.status === 'downloading' && <IconFileDownload size={20} stroke={2} />}
+            {item.status === 'completed' && <IconCircleCheck size={20} stroke={2} />}
+            {item.status === 'failed' && <IconAlertCircle size={20} stroke={2} />}
+            {item.status === 'canceled' && <IconCircleX size={20} stroke={2} />}
           </div>
         )}
       </div>
@@ -332,7 +332,7 @@ export const Downloads: React.FC = () => {
               void handleCancelDownload(item);
             }}
           >
-            <X size={16} />
+            <IconX size={16} stroke={2} />
           </button>
         )}
         {(item.status === 'failed' || item.status === 'canceled') && item.canRetry && (
@@ -346,7 +346,7 @@ export const Downloads: React.FC = () => {
               void handleRetryDownload(item);
             }}
           >
-            <ArrowClockwise size={16} />
+            <IconRefresh size={16} stroke={2} />
           </button>
         )}
         {item.status !== 'downloading' && (
@@ -360,7 +360,7 @@ export const Downloads: React.FC = () => {
               downloadService.removeDownload(item.id);
             }}
           >
-            <Trash size={16} />
+            <IconTrash size={16} stroke={2} />
           </button>
         )}
       </div>
@@ -377,7 +377,7 @@ export const Downloads: React.FC = () => {
         <div className="downloads-topbar-actions">
           {finishedCount > 0 && (
             <button className="text-action-btn" onClick={() => downloadService.clearFinished()}>
-              <Trash size={15} /> Limpar finalizados
+              <IconTrash size={15} stroke={2} /> Limpar finalizados
             </button>
           )}
           {actionableRunningCount > 0 && (
@@ -389,11 +389,11 @@ export const Downloads: React.FC = () => {
                   .map(item => downloadService.cancelDownload(item.id)));
               }}
             >
-              <X size={15} /> Cancelar ativos
+              <IconX size={15} stroke={2} /> Cancelar ativos
             </button>
           )}
           <button className="folder-action-btn" onClick={() => handleOpenFolder()} title="Abrir pasta de downloads">
-            <FolderOpen size={16} /> Pasta
+            <IconFolderOpen size={16} stroke={2} /> Pasta
           </button>
         </div>
       </header>
@@ -402,22 +402,23 @@ export const Downloads: React.FC = () => {
         <section className="quick-import-card">
           <div className="quick-import-header">
             <div className="quick-import-title">
-              <Link size={16} /> Quick Import
+              <IconLink size={16} stroke={2} /> Importar link
             </div>
 
             <div className="supported-tags">
-              <span className="supported-label">SUPPORTED:</span>
-              <span className="supported-icon" title="YouTube" aria-label="YouTube"><YoutubeLogo size={18} weight="fill" /></span>
-              <span className="supported-icon" title="Reddit" aria-label="Reddit"><RedditLogo size={18} weight="fill" /></span>
-              <span className="supported-icon" title="Twitter/X" aria-label="Twitter/X"><TwitterLogo size={18} weight="fill" /></span>
-              <span className="supported-icon" title="Instagram" aria-label="Instagram"><InstagramLogo size={18} weight="fill" /></span>
+              <span className="supported-label">COMPATÍVEL COM:</span>
+              <span className="supported-icon" title="YouTube" aria-label="YouTube"><IconBrandYoutube size={18} stroke={2} /></span>
+              <span className="supported-icon" title="Reddit" aria-label="Reddit"><IconBrandReddit size={18} stroke={2} /></span>
+              <span className="supported-icon" title="Twitter/X" aria-label="Twitter/X"><IconBrandX size={18} stroke={2} /></span>
+              <span className="supported-icon" title="Instagram" aria-label="Instagram"><IconBrandInstagram size={18} stroke={2} /></span>
             </div>
           </div>
 
           <div className="downloader-input-group">
             <input
               type="text"
-              placeholder="Paste YouTube, Reddit, or Twitter URL here..."
+              placeholder="Cole aqui um link do YouTube, Reddit, X/Twitter ou Instagram..."
+              aria-label="Link da mídia para analisar"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
@@ -426,14 +427,15 @@ export const Downloads: React.FC = () => {
               className="analyze-btn"
               onClick={handleAnalyze}
               disabled={analyzing || !url.trim()}
+              aria-busy={analyzing}
             >
-              {analyzing ? <Spinner className="spin" size={18} /> : (
-                <>Download <CloudArrowDown size={18} /></>
+                {analyzing ? <><IconLoader2 className="spin" size={18} stroke={2} /> Analisando…</> : (
+                <>Analisar <IconCloudDownload size={18} stroke={2} /></>
               )}
             </button>
           </div>
 
-        {error && <div className="error-message">{error}</div>}
+        {error && <div className="error-message" role="alert">{error}</div>}
 
         {media && (
           <div className="media-preview-card">
@@ -450,7 +452,7 @@ export const Downloads: React.FC = () => {
                   ...media.formats.audio.map(f => ({ value: f.id, label: `Áudio · ${f.label} ${f.size !== '—' ? `(${f.size})` : ''}`, disabled: !canDownloadFormat(media, f) })),
                 ]} />
                 <button className="download-btn" onClick={handleDownload} disabled={!selectedDownloadable}>
-                  <CloudArrowDown size={18} /> Confirmar
+                  <IconCloudDownload size={18} stroke={2} /> Confirmar
                 </button>
               </div>
             </div>
@@ -462,7 +464,7 @@ export const Downloads: React.FC = () => {
           <h2 className="downloads-section-title">
             Atividade
             {runningCount > 0 && (
-              <span className="running-badge">{runningCount} RUNNING</span>
+              <span className="running-badge">{runningCount} EM ANDAMENTO</span>
             )}
           </h2>
           <div className="download-filter-tabs" role="tablist" aria-label="Filtrar downloads">
@@ -488,8 +490,9 @@ export const Downloads: React.FC = () => {
 
         {filteredDownloads.length === 0 ? (
           <div className="empty-state">
-            <HardDrive size={52} />
+            <IconDatabase size={52} stroke={2} />
             <p>{downloads.length ? 'Nenhum item neste filtro.' : 'Nenhum download registrado.'}</p>
+            {!downloads.length && <span>Cole um link acima para analisar e iniciar seu primeiro download.</span>}
           </div>
         ) : (
           <div className="downloads-list">
@@ -512,15 +515,15 @@ export const Downloads: React.FC = () => {
                           <div className="download-thumbnail-container">
                             <img src={summary.thumbnail} alt="Thumbnail" className="download-thumbnail-img" />
                             <div className={`download-status-overlay ${summary.status}`}>
-                              {summary.status === 'downloading' && <FileArrowDown size={14} />}
-                              {summary.status === 'completed' && <CheckCircle size={14} />}
-                              {summary.status === 'failed' && <WarningCircle size={14} />}
-                              {summary.status === 'canceled' && <XCircle size={14} />}
+                              {summary.status === 'downloading' && <IconFileDownload size={14} stroke={2} />}
+                              {summary.status === 'completed' && <IconCircleCheck size={14} stroke={2} />}
+                              {summary.status === 'failed' && <IconAlertCircle size={14} stroke={2} />}
+                              {summary.status === 'canceled' && <IconCircleX size={14} stroke={2} />}
                             </div>
                           </div>
                         ) : (
                           <div className={`download-icon ${summary.status}`}>
-                            <StackSimple size={20} />
+                            <IconStack2 size={20} stroke={2} />
                           </div>
                         )}
                       </div>
@@ -528,7 +531,7 @@ export const Downloads: React.FC = () => {
                       <div className="download-details">
                         <div className="download-name-row">
                           <h3 className="download-name" title={first.batchTitle || first.fileName}>
-                            {first.batchTitle || 'Mass Download'}
+                            {first.batchTitle || 'Download em lote'}
                           </h3>
                           <span className={`download-percentage status-${summary.status}`}>
                             {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
@@ -550,7 +553,7 @@ export const Downloads: React.FC = () => {
                         </div>
                       </div>
 
-                      <CaretDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} />
+                      <IconChevronDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} stroke={2} />
                     </button>
                     {(groupCanCancel || groupCanRetry) && (
                       <div className="download-group-actions">
@@ -562,7 +565,7 @@ export const Downloads: React.FC = () => {
                             aria-label="Cancelar itens ativos"
                             onClick={() => void handleCancelGroup(entry.items)}
                           >
-                            <X size={16} />
+                            <IconX size={16} stroke={2} />
                           </button>
                         )}
                         {groupCanRetry && (
@@ -573,7 +576,7 @@ export const Downloads: React.FC = () => {
                             aria-label="Tentar novamente itens com falha"
                             onClick={() => void handleRetryGroup(entry.items)}
                           >
-                            <ArrowClockwise size={16} />
+                            <IconRefresh size={16} stroke={2} />
                           </button>
                         )}
                       </div>

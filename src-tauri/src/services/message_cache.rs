@@ -4,6 +4,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+const MAX_DOWNLOAD_HISTORY_ITEMS: usize = 300;
+const MAX_DOWNLOAD_HISTORY_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageCacheMeta {
@@ -84,9 +87,56 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
 
             CREATE INDEX IF NOT EXISTS idx_telegram_messages_cache_media
                 ON telegram_messages(cache_key, has_media, is_video, date);
+
+            CREATE TABLE IF NOT EXISTS download_history (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                raw_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn download_history_get(app: AppHandle) -> Result<Option<String>, String> {
+    let connection = connect(&app)?;
+    match connection.query_row(
+        "SELECT raw_json FROM download_history WHERE singleton = 1",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(history) => Ok(Some(history)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn download_history_save(app: AppHandle, history_json: String) -> Result<(), String> {
+    if history_json.len() > MAX_DOWNLOAD_HISTORY_BYTES {
+        return Err("Histórico de downloads excede o limite permitido.".to_string());
+    }
+    let items = serde_json::from_str::<Vec<Value>>(&history_json)
+        .map_err(|_| "Histórico de downloads inválido.".to_string())?;
+    if items.len() > MAX_DOWNLOAD_HISTORY_ITEMS {
+        return Err("Histórico de downloads excede o limite de itens.".to_string());
+    }
+
+    let connection = connect(&app)?;
+    connection
+        .execute(
+            r#"
+            INSERT INTO download_history (singleton, raw_json, updated_at)
+            VALUES (1, ?1, ?2)
+            ON CONFLICT(singleton) DO UPDATE SET
+                raw_json = excluded.raw_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![history_json, now_millis()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn now_millis() -> i64 {
@@ -325,4 +375,47 @@ pub fn telegram_message_cache_shared_media(
         media,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_persists_one_download_history_snapshot() {
+        let connection = Connection::open_in_memory().unwrap();
+        ensure_schema(&connection).unwrap();
+        let first = r#"[{"id":"first"}]"#;
+        let second = r#"[{"id":"second"}]"#;
+
+        connection
+            .execute(
+                r#"
+                INSERT INTO download_history (singleton, raw_json, updated_at)
+                VALUES (1, ?1, 1)
+                ON CONFLICT(singleton) DO UPDATE SET raw_json = excluded.raw_json
+                "#,
+                params![first],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO download_history (singleton, raw_json, updated_at)
+                VALUES (1, ?1, 2)
+                ON CONFLICT(singleton) DO UPDATE SET raw_json = excluded.raw_json
+                "#,
+                params![second],
+            )
+            .unwrap();
+
+        let stored: String = connection
+            .query_row(
+                "SELECT raw_json FROM download_history WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, second);
+    }
 }

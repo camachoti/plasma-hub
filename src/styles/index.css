@@ -5,7 +5,7 @@
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* Palette: Phosphor (default) */
+  /* Paleta padrão */
   --bg-0: #1f2310; /* deepgreen */
   --bg-1: #343330; /* stone */
   --bg-2: #3e3d3a; /* slate */
@@ -63,8 +63,8 @@
   --line-soft: rgba(59, 73, 76, 0.35);
   --text-0: #d7e4ef;
   --text-1: #bac9cc;
-  --text-2: #849396;
-  --text-3: #525a62;
+  --text-2: #a1b0b5;
+  --text-3: #8b9ba3;
   --accent: #00daf3;
   --accent-soft: rgba(0, 218, 243, 0.18);
   --accent-text: #001f24;
@@ -72,39 +72,40 @@
 }
 
 [data-palette="ion"] {
-  --bg-0: oklch(0.18 0.018 250); --bg-1: oklch(0.21 0.020 250); --bg-2: oklch(0.24 0.022 250); --bg-3: oklch(0.28 0.024 250);
-  --bg-hover: oklch(0.31 0.025 250 / 0.55); --bg-active: oklch(0.34 0.030 250 / 0.65);
-  --line: oklch(0.32 0.022 250 / 0.6); --line-soft: oklch(0.30 0.020 250 / 0.35);
-  --text-0: oklch(0.97 0.005 250); --text-1: oklch(0.82 0.012 250); --text-2: oklch(0.62 0.018 250); --text-3: oklch(0.48 0.018 250);
-  --accent: oklch(0.80 0.16 220); --accent-soft: oklch(0.80 0.16 220 / 0.18); --accent-text: oklch(0.18 0.018 250); --accent-glow: oklch(0.80 0.16 220 / 0.45);
+  /* Fallbacks for WebKitGTK releases that do not parse oklch(). */
+  --bg-0: #18232c; --bg-1: #1e2a34; --bg-2: #26333e; --bg-3: #33414c;
+  --bg-hover: rgba(55, 71, 84, .55); --bg-active: rgba(68, 86, 101, .65);
+  --line: rgba(72, 89, 103, .6); --line-soft: rgba(62, 79, 93, .35);
+  --text-0: #f2f5f6; --text-1: #bdc8ce; --text-2: #85949d; --text-3: #5f7079;
+  --accent: #44d0e8; --accent-soft: rgba(68, 208, 232, .18); --accent-text: #18232c; --accent-glow: rgba(68, 208, 232, .45);
 }
 [data-palette="ember"] {
-  --bg-0: oklch(0.17 0.012 40); --bg-1: oklch(0.20 0.014 40); --bg-2: oklch(0.23 0.016 40); --bg-3: oklch(0.27 0.018 40);
-  --bg-hover: oklch(0.30 0.020 40 / 0.55); --bg-active: oklch(0.34 0.025 40 / 0.65);
-  --line: oklch(0.32 0.020 40 / 0.6); --line-soft: oklch(0.30 0.018 40 / 0.35);
-  --text-0: oklch(0.97 0.006 40); --text-1: oklch(0.82 0.014 40); --text-2: oklch(0.62 0.018 40); --text-3: oklch(0.48 0.018 40);
-  --accent: oklch(0.78 0.17 55); --accent-soft: oklch(0.78 0.17 55 / 0.20); --accent-text: oklch(0.17 0.012 40); --accent-glow: oklch(0.78 0.17 55 / 0.5);
+  --bg-0: #281e1a; --bg-1: #30251f; --bg-2: #3a2d26; --bg-3: #48372f;
+  --bg-hover: rgba(78, 60, 50, .55); --bg-active: rgba(93, 70, 57, .65);
+  --line: rgba(85, 67, 56, .6); --line-soft: rgba(78, 60, 50, .35);
+  --text-0: #f7f2ef; --text-1: #d0c4bd; --text-2: #9b8980; --text-3: #79645b;
+  --accent: #eea451; --accent-soft: rgba(238, 164, 81, .20); --accent-text: #281e1a; --accent-glow: rgba(238, 164, 81, .5);
 }
 [data-palette="bloom"] {
-  --bg-0: oklch(0.17 0.020 320); --bg-1: oklch(0.20 0.022 320); --bg-2: oklch(0.23 0.024 320); --bg-3: oklch(0.27 0.026 320);
-  --bg-hover: oklch(0.30 0.028 320 / 0.55); --bg-active: oklch(0.34 0.032 320 / 0.65);
-  --line: oklch(0.32 0.024 320 / 0.6); --line-soft: oklch(0.30 0.022 320 / 0.35);
-  --text-0: oklch(0.97 0.006 320); --text-1: oklch(0.82 0.014 320); --text-2: oklch(0.62 0.020 320); --text-3: oklch(0.48 0.020 320);
-  --accent: oklch(0.74 0.20 330); --accent-soft: oklch(0.74 0.20 330 / 0.20); --accent-text: oklch(0.17 0.020 320); --accent-glow: oklch(0.74 0.20 330 / 0.5);
+  --bg-0: #2a1d2a; --bg-1: #332334; --bg-2: #3c2940; --bg-3: #4b3150;
+  --bg-hover: rgba(83, 54, 88, .55); --bg-active: rgba(99, 62, 104, .65);
+  --line: rgba(90, 58, 95, .6); --line-soft: rgba(83, 54, 88, .35);
+  --text-0: #f7f0f7; --text-1: #d0c0d1; --text-2: #9d879f; --text-3: #7a647b;
+  --accent: #ef76c2; --accent-soft: rgba(239, 118, 194, .20); --accent-text: #2a1d2a; --accent-glow: rgba(239, 118, 194, .5);
 }
 [data-palette="forest"] {
-  --bg-0: oklch(0.17 0.015 165); --bg-1: oklch(0.20 0.017 165); --bg-2: oklch(0.23 0.019 165); --bg-3: oklch(0.27 0.021 165);
-  --bg-hover: oklch(0.30 0.022 165 / 0.55); --bg-active: oklch(0.34 0.026 165 / 0.65);
-  --line: oklch(0.32 0.020 165 / 0.6); --line-soft: oklch(0.30 0.018 165 / 0.35);
-  --text-0: oklch(0.97 0.006 165); --text-1: oklch(0.82 0.014 165); --text-2: oklch(0.62 0.020 165); --text-3: oklch(0.48 0.020 165);
-  --accent: oklch(0.78 0.14 155); --accent-soft: oklch(0.78 0.14 155 / 0.20); --accent-text: oklch(0.17 0.015 165); --accent-glow: oklch(0.78 0.14 155 / 0.5);
+  --bg-0: #192824; --bg-1: #1e312b; --bg-2: #263a33; --bg-3: #30483e;
+  --bg-hover: rgba(51, 76, 66, .55); --bg-active: rgba(61, 91, 78, .65);
+  --line: rgba(58, 86, 74, .6); --line-soft: rgba(51, 76, 66, .35);
+  --text-0: #eff6f1; --text-1: #bfd0c4; --text-2: #889e91; --text-3: #647b6d;
+  --accent: #73d99d; --accent-soft: rgba(115, 217, 157, .20); --accent-text: #192824; --accent-glow: rgba(115, 217, 157, .5);
 }
 [data-palette="light"] {
-  --bg-0: oklch(0.97 0.004 250); --bg-1: oklch(0.95 0.005 250); --bg-2: oklch(0.92 0.006 250); --bg-3: oklch(0.88 0.008 250);
-  --bg-hover: oklch(0.85 0.010 250 / 0.55); --bg-active: oklch(0.82 0.012 250 / 0.65);
-  --line: oklch(0.80 0.010 250 / 0.6); --line-soft: oklch(0.78 0.008 250 / 0.35);
-  --text-0: oklch(0.18 0.018 250); --text-1: oklch(0.35 0.020 250); --text-2: oklch(0.50 0.022 250); --text-3: oklch(0.58 0.020 250);
-  --accent: oklch(0.55 0.16 220); --accent-soft: oklch(0.55 0.16 220 / 0.18); --accent-text: oklch(0.97 0.004 250); --accent-glow: oklch(0.55 0.16 220 / 0.45);
+  --bg-0: #f4f6f8; --bg-1: #edf0f3; --bg-2: #e5e9ed; --bg-3: #d8dee4;
+  --bg-hover: rgba(202, 211, 220, .55); --bg-active: rgba(190, 201, 211, .65);
+  --line: rgba(174, 185, 196, .6); --line-soft: rgba(165, 176, 187, .35);
+  --text-0: #1e2933; --text-1: #455563; --text-2: #6d7d8b; --text-3: #83919d;
+  --accent: #148bb5; --accent-soft: rgba(20, 139, 181, .18); --accent-text: #f4f6f8; --accent-glow: rgba(20, 139, 181, .45);
 }
 
 [data-density="compact"] { --row-h: 52px; --msg-gap: 8px; --msg-pad-y: 5px; }
@@ -168,7 +169,7 @@ select optgroup {
 /* App shell */
 .app {
   display: grid;
-  grid-template-columns: var(--list-w) minmax(360px, 1fr) auto;
+  grid-template-columns: var(--list-w) minmax(0, 1fr) auto;
   grid-template-rows: 100%;
   height: 100%;
   width: 100%;
@@ -297,6 +298,31 @@ select optgroup {
   line-height: 1;
   text-transform: uppercase;
 }
+.list-overline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.list-overline em {
+  color: var(--text-3);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 650;
+}
+.list-overline em::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: .45; transform: scale(.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
 .list-title h1 {
   margin: 0;
   font-size: 20px;
@@ -322,8 +348,12 @@ select optgroup {
   border: 1px solid transparent;
   transition: border-color .15s;
 }
-.search:focus-within { border-color: var(--accent-soft); }
+.search:focus-within {
+  border-color: color-mix(in oklch, var(--accent) 46%, var(--line-soft));
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 12%, transparent);
+}
 .search input { flex: 1; height: 100%; }
+.search input:focus-visible { box-shadow: none; }
 .search input::placeholder { color: var(--text-3); }
 .folders {
   display: flex; gap: 6px;
@@ -377,9 +407,16 @@ select optgroup {
 .chats {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-x: hidden !important;
   overflow-y: auto;
-  padding: 6px 6px 24px;
+  padding: 0;
+}
+
+/* Virtuoso positions its viewport at width: 100%; put gutters inside items. */
+.chat-list-item {
+  min-width: 0;
+  padding: 3px 6px;
 }
 
 .chat-list-loading-more {
@@ -447,7 +484,7 @@ select optgroup {
   grid-template-columns: 44px minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   gap: 0 12px;
-  margin: 2px 0;
+  margin: 0;
   padding: 8px 10px;
   border-radius: 10px;
   cursor: pointer;
@@ -463,7 +500,7 @@ select optgroup {
   transition: background .16s ease, border-color .16s ease, transform .16s ease;
 }
 [data-density="compact"] .chat-row { padding: 6px 10px; }
-.chat-row:hover { background: color-mix(in oklch, var(--bg-hover) 85%, transparent); transform: translateX(1px); }
+.chat-row:hover { background: color-mix(in oklch, var(--bg-hover) 85%, transparent); }
 .chat-row.active {
   border-color: color-mix(in oklch, var(--accent) 28%, var(--line-soft));
   background: linear-gradient(90deg, var(--accent-soft), color-mix(in oklch, var(--accent-soft) 42%, transparent));
@@ -553,7 +590,8 @@ select optgroup {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 6px;
+  height: auto;
+  min-height: var(--row-h);
   border: 1px solid color-mix(in oklch, var(--accent) 35%, var(--line-soft));
   background: color-mix(in oklch, var(--accent) 8%, transparent);
 }
@@ -563,7 +601,11 @@ select optgroup {
   gap: 4px;
 }
 .telegram-login-row .chat-name { color: var(--accent); font-weight: 600; }
-.telegram-login-row .chat-preview { color: var(--text-2); }
+.telegram-login-row .chat-preview {
+  color: var(--text-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .telegram-login-avatar {
   flex: 0 0 40px;
   color: var(--accent);
@@ -1243,7 +1285,7 @@ select optgroup {
 .pip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
 
 /* Responsive */
-.app { grid-template-columns: var(--list-w) minmax(360px, 1fr) auto; }
+.app { grid-template-columns: var(--list-w) minmax(0, 1fr) auto; }
 @media (max-width: 1180px) {
   :root { --info-w: 280px; --list-w: 280px; }
   .info { display: none; }

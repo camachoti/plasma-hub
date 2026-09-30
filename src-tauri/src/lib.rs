@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(target_os = "linux")]
+mod fontconfig_guard;
 mod services;
 
 use tauri::Manager;
@@ -9,6 +11,9 @@ use services::telegram as telegram_service;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let _fontconfig_guard = fontconfig_guard::install_if_needed();
+
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol(
             "plasma-media",
@@ -31,6 +36,7 @@ pub fn run() {
             filesystem::append_download_file_chunk,
             filesystem::finish_download_file,
             filesystem::abort_download_file,
+            filesystem::download_url_to_file,
             filesystem::generate_video_thumbnail,
             filesystem::load_twitter_cookies,
             filesystem::save_twitter_cookies,
@@ -38,6 +44,8 @@ pub fn run() {
             services::message_cache::telegram_message_cache_meta,
             services::message_cache::telegram_message_cache_save,
             services::message_cache::telegram_message_cache_shared_media,
+            services::message_cache::download_history_get,
+            services::message_cache::download_history_save,
             telegram_service::tdlib_init,
             telegram_service::tdlib_status,
             telegram_service::tdlib_set_phone,

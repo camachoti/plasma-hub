@@ -54,6 +54,8 @@ export class MediaCacheService {
   private memoryCache = new Map<string, string>();
   private registry = new Map<string, CacheItemInfo>();
   private registryLoaded = false;
+  private registryLoadRequest: Promise<void> | null = null;
+  private registrySaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   private async saveRegistry(): Promise<void> {
     try {
@@ -64,22 +66,43 @@ export class MediaCacheService {
     }
   }
 
+  private scheduleRegistrySave(): void {
+    if (this.registrySaveTimer) clearTimeout(this.registrySaveTimer);
+    this.registrySaveTimer = setTimeout(() => {
+      this.registrySaveTimer = null;
+      void this.saveRegistry();
+    }, 1000);
+  }
+
+  private replaceMemoryUrl(key: string, url: string): void {
+    const previousUrl = this.memoryCache.get(key);
+    if (previousUrl && previousUrl !== url && previousUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(previousUrl);
+    }
+    this.memoryCache.set(key, url);
+  }
+
   private async ensureRegistryLoaded(): Promise<void> {
     if (this.registryLoaded) return;
-    
-    try {
-      const regObj = await get<Record<string, any>>('cache_registry');
-      if (regObj) {
-        this.registry = new Map(Object.entries(regObj));
-      } else {
-        this.registry = new Map();
-        await this.saveRegistry();
-      }
-    } catch (e) {
-      debugWarn("Failed to load cache registry, starting empty", e);
-      this.registry = new Map();
+    if (!this.registryLoadRequest) {
+      this.registryLoadRequest = (async () => {
+        try {
+          const regObj = await get<Record<string, any>>('cache_registry');
+          if (regObj) {
+            this.registry = new Map(Object.entries(regObj));
+          } else {
+            this.registry = new Map();
+            await this.saveRegistry();
+          }
+        } catch (e) {
+          debugWarn("Failed to load cache registry, starting empty", e);
+          this.registry = new Map();
+        } finally {
+          this.registryLoaded = true;
+        }
+      })();
     }
-    this.registryLoaded = true;
+    await this.registryLoadRequest;
   }
 
   /**
@@ -98,7 +121,7 @@ export class MediaCacheService {
       } else {
         if (info) {
           info.lastAccessed = Date.now();
-          this.saveRegistry().catch(() => {});
+          this.scheduleRegistrySave();
         }
         return this.memoryCache.get(key)!;
       }
@@ -121,7 +144,7 @@ export class MediaCacheService {
         const url = URL.createObjectURL(blob);
         
         // Save to memory cache for subsequent instant access
-        this.memoryCache.set(key, url);
+        this.replaceMemoryUrl(key, url);
 
         // Update registry metadata
         if (info) {
@@ -142,7 +165,7 @@ export class MediaCacheService {
             lastAccessed: Date.now()
           });
         }
-        this.saveRegistry().catch(() => {});
+        this.scheduleRegistrySave();
 
         return url;
       }
@@ -180,7 +203,7 @@ export class MediaCacheService {
     const resolvedMime = mimeType || 'application/octet-stream';
     const blob = new Blob([normalizedBuffer], { type: resolvedMime });
     const url = URL.createObjectURL(blob);
-    this.memoryCache.set(key, url);
+    this.replaceMemoryUrl(key, url);
 
     // Update registry
     const size = normalizedBuffer.byteLength;
@@ -624,13 +647,16 @@ export class MediaCacheService {
    * Explicitly cache an existing Blob URL in memory.
    */
   cacheUrlInMemory(key: string, url: string) {
-    this.memoryCache.set(key, url);
+    this.replaceMemoryUrl(key, url);
   }
 
   /**
    * Clears the memory cache.
    */
   clearMemoryCache() {
+    for (const url of this.memoryCache.values()) {
+      if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+    }
     this.memoryCache.clear();
   }
 
@@ -707,7 +733,7 @@ export class MediaCacheService {
     await clear();
     
     // Reset local memory structures
-    this.memoryCache.clear();
+    this.clearMemoryCache();
     this.registry.clear();
     
     // Re-save settings and registry
@@ -747,6 +773,8 @@ export class MediaCacheService {
       await del(item.key);
       await del(`${item.key}_mime`);
       
+      const memoryUrl = this.memoryCache.get(item.key);
+      if (memoryUrl?.startsWith('blob:')) URL.revokeObjectURL(memoryUrl);
       this.memoryCache.delete(item.key);
       this.registry.delete(item.key);
       

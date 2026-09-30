@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { IconCornerUpLeft, IconCopy, IconDownload, IconMoodSmile, IconShare3 } from "../../design-system/icons";
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
 import { writeClipboardText } from '../../shared/platform/clipboard';
@@ -301,7 +302,7 @@ export const TimelineMessageItem = React.memo(({
           {msg.reactions && msg.reactions.length > 0 && (
             <div className="reactions">
               {msg.reactions.map((reaction, index) => (
-                <button key={index} className={`reaction ${reaction.mine ? 'mine' : ''}`} onClick={() => onReact(msg, reaction.emoji)}>
+                <button key={index} type="button" className={`reaction ${reaction.mine ? 'mine' : ''}`} onClick={() => onReact(msg, reaction.emoji)} aria-label={`Reagir com ${reaction.emoji}, ${reaction.count} reações`} aria-pressed={reaction.mine}>
                   <span>{reaction.emoji}</span>
                   <span>{reaction.count}</span>
                 </button>
@@ -309,6 +310,7 @@ export const TimelineMessageItem = React.memo(({
               <button
                 className="reaction-add"
                 title="Reagir"
+                aria-label="Adicionar reação"
                 onClick={(e) => { e.stopPropagation(); showEmojiPicker(msg.id, e.currentTarget); }}
               >+</button>
             </div>
@@ -316,20 +318,20 @@ export const TimelineMessageItem = React.memo(({
         </div>
         <div className="msg-actions">
           <button
-            type="button" className="icon-btn" title="Reagir"
+            type="button" className="icon-btn" title="Reagir" aria-label="Reagir à mensagem"
             onClick={(e) => { e.stopPropagation(); showEmojiPicker(msg.id, e.currentTarget); }}
-          >😊</button>
+          ><IconMoodSmile size={18} stroke={2} /></button>
           <button
-            type="button" className="icon-btn" title="Responder"
+            type="button" className="icon-btn" title="Responder" aria-label="Responder à mensagem"
             onClick={(e) => { e.stopPropagation(); onReplyTo(msg); }}
-          >↩</button>
+          ><IconCornerUpLeft size={18} stroke={2} /></button>
           <button
-            type="button" className="icon-btn" title="Encaminhar"
+            type="button" className="icon-btn" title="Encaminhar" aria-label="Encaminhar mensagem"
             onClick={(e) => { e.stopPropagation(); onForwardMessage(msg); }}
-          >→</button>
+          ><IconShare3 size={18} stroke={2} /></button>
           {item.type === 'album' ? (
             <button
-              type="button" className="icon-btn" title="Salvar todas as mídias"
+              type="button" className="icon-btn" title="Salvar todas as mídias" aria-label="Salvar todas as mídias do álbum"
               onClick={async (e) => {
                 e.stopPropagation();
                 if (item.messages) {
@@ -346,10 +348,10 @@ export const TimelineMessageItem = React.memo(({
                   }
                 }
               }}
-            >⤓</button>
+            ><IconDownload size={18} stroke={2} /></button>
           ) : msg.hasMedia ? (
             <button
-              type="button" className="icon-btn" title="Salvar"
+              type="button" className="icon-btn" title="Salvar" aria-label="Salvar mídia"
               onClick={(e) => {
                 e.stopPropagation();
                 telegramService.saveMessageMediaFile({
@@ -358,12 +360,12 @@ export const TimelineMessageItem = React.memo(({
                   downloadMeta: buildDownloadMeta(msg, displayName),
                 });
               }}
-            >⤓</button>
+            ><IconDownload size={18} stroke={2} /></button>
           ) : msg.text ? (
             <button
-              type="button" className="icon-btn" title="Copiar texto"
+              type="button" className="icon-btn" title="Copiar texto" aria-label="Copiar texto da mensagem"
               onClick={(e) => { e.stopPropagation(); writeClipboardText(msg.text); }}
-            >⎘</button>
+            ><IconCopy size={18} stroke={2} /></button>
           ) : null}
         </div>
       </div>

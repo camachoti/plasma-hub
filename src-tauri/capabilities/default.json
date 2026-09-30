@@ -9,12 +9,36 @@
     "core:default",
     "dialog:allow-open",
     "dialog:allow-save",
-    "opener:default",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "https://*/*" },
-        { "url": "http://*/*" }
+        { "url": "https://youtube.com/*" },
+        { "url": "https://www.youtube.com/*" },
+        { "url": "https://*.googlevideo.com/*" },
+        { "url": "https://x.com/*" },
+        { "url": "https://*.x.com/*" },
+        { "url": "https://twitter.com/*" },
+        { "url": "https://*.twitter.com/*" },
+        { "url": "https://api.twitter.com/*" },
+        { "url": "https://*.twimg.com/*" },
+        { "url": "https://cdn.syndication.twimg.com/*" },
+        { "url": "https://instagram.com/*" },
+        { "url": "https://www.instagram.com/*" },
+        { "url": "https://*.cdninstagram.com/*" },
+        { "url": "https://*.fbcdn.net/*" },
+        { "url": "https://tiktok.com/*" },
+        { "url": "https://www.tiktok.com/*" },
+        { "url": "https://*.tiktok.com/*" },
+        { "url": "https://*.tiktokv.com/*" },
+        { "url": "https://*.tiktokcdn.com/*" },
+        { "url": "https://www.tikwm.com/*" },
+        { "url": "https://reddit.com/*" },
+        { "url": "https://www.reddit.com/*" },
+        { "url": "https://*.reddit.com/*" },
+        { "url": "https://v.redd.it/*" },
+        { "url": "https://*.redd.it/*" }
       ]
     }
   ]

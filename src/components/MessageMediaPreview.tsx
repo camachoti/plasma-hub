@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react';
+import { IconPlayerPlay, IconVolume, IconVolumeOff } from "../design-system/icons";
 import {
   formatDuration,
   MediaProgressBadge,
@@ -127,13 +127,16 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           onTimeUpdate={onTimeUpdate}
         />
         <button
+          type="button"
           className="inline-mute-btn"
+          aria-label={isMuted ? 'Ativar som do vídeo' : 'Silenciar vídeo'}
+          aria-pressed={!isMuted}
           onClick={(event) => {
             event.stopPropagation();
             onSetMuted(!isMuted);
           }}
         >
-          {isMuted ? <SpeakerSlash size={16} weight="fill" color="white" /> : <SpeakerHigh size={16} weight="fill" color="white" />}
+          {isMuted ? <IconVolumeOff size={16} stroke={2} color="white" /> : <IconVolume size={16} stroke={2} color="white" />}
         </button>
         {!inlineBuffering && !shouldShowProgress && (
           <div className="inline-progress-bar">
@@ -154,6 +157,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
       <button
         type="button"
         className="media-preview-button"
+        aria-label={isVideo ? 'Reproduzir vídeo' : 'Abrir imagem'}
         onClick={(event) => {
           if (onSelectionClick(event)) return;
           if (isVideo) {
@@ -174,7 +178,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           />
         ) : isVideo ? (
           <div className="video-preview-unavailable" onContextMenu={onContextMenu}>
-            <span className="video-preview-unavailable-icon"><Play size={20} weight="fill" /></span>
+            <span className="video-preview-unavailable-icon"><IconPlayerPlay size={20} stroke={2} /></span>
             <span>Prévia indisponível</span>
           </div>
         ) : (
@@ -229,7 +233,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
 
         {previewSrc && isVideo && !shouldShowProgress && !inlineLoading && (
           <div className="video-play-icon">
-            <Play size={24} weight="fill" color="white" />
+            <IconPlayerPlay size={24} stroke={2} color="white" />
           </div>
         )}
 
