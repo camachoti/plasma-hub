@@ -22,6 +22,109 @@
   }
 }
 
+/* Form controls stay unlayered so they can override the legacy global input reset. */
+.ds-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-0);
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.ds-input:focus {
+  outline: none;
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
+  caret-color: var(--accent);
+}
+
+.ds-input::placeholder,
+.ds-textarea::placeholder {
+  color: var(--text-3);
+}
+
+.ds-input:disabled,
+.ds-textarea:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.ds-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 88px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font: inherit;
+  resize: vertical;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.ds-textarea:focus {
+  outline: none;
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
+  caret-color: var(--accent);
+}
+
+.ds-input-inline,
+.ds-textarea-inline {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-0);
+  font: inherit;
+}
+
+.ds-textarea-inline {
+  padding: 8px 4px;
+  resize: none;
+}
+
+.ds-input-inline:focus,
+.ds-input-inline:focus-visible,
+.ds-textarea-inline:focus,
+.ds-textarea-inline:focus-visible {
+  outline: none;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ds-select .custom-select-trigger {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-0);
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.ds-select .custom-select-trigger:hover:not(:disabled) {
+  border-color: var(--line);
+}
+
+.ds-select.open .custom-select-trigger,
+.ds-select .custom-select-trigger:focus-visible {
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
+}
+
 @layer base {
   button,
   input,
@@ -48,14 +151,46 @@
 }
 
 @layer components {
-  @keyframes loader-orbit {
+  @keyframes loading-orbit {
     to { transform: rotate(360deg); }
   }
 
-  @keyframes loader-breathe {
-    0%, 100% { transform: scale(0.72); opacity: 0.48; }
-    50% { transform: scale(1); opacity: 0.9; }
+  .loading-indicator {
+    --loading-size: 24px;
+    --loading-stroke: 1.75px;
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: var(--loading-size);
+    height: var(--loading-size);
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+    color: var(--accent);
   }
+
+  .loading-indicator__orbit {
+    position: absolute;
+    display: block;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .loading-indicator__orbit {
+    inset: 0;
+    border: var(--loading-stroke) solid color-mix(in oklch, var(--text-2) 24%, transparent);
+    border-top-color: currentColor;
+    border-right-color: color-mix(in oklch, currentColor 62%, transparent);
+    animation: loading-orbit 1s linear infinite;
+  }
+
+  .loading-indicator--xs { --loading-size: 12px; --loading-stroke: 1.25px; }
+  .loading-indicator--sm { --loading-size: 18px; --loading-stroke: 1.5px; }
+  .loading-indicator--md { --loading-size: 24px; --loading-stroke: 1.75px; }
+  .loading-indicator--lg { --loading-size: 36px; --loading-stroke: 2px; }
+  .loading-indicator--xl { --loading-size: 52px; --loading-stroke: 2.5px; }
+
+  .loading-indicator--light { color: #fff; }
 
   .loader-content {
     display: flex;
@@ -64,45 +199,6 @@
     gap: var(--space-4);
     color: var(--text-2);
   }
-
-  .modern-loader {
-    --loader-size: 42px;
-    position: relative;
-    width: var(--loader-size);
-    height: var(--loader-size);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--accent);
-    filter: drop-shadow(0 0 16px var(--accent-glow));
-  }
-
-  .modern-loader::before,
-  .modern-loader::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-  }
-
-  .modern-loader::before {
-    border: 2px solid color-mix(in oklch, var(--accent) 18%, transparent);
-    border-top-color: var(--accent);
-    border-right-color: color-mix(in oklch, var(--accent-text) 72%, var(--accent));
-    animation: loader-orbit 0.85s linear infinite;
-  }
-
-  .modern-loader::after {
-    inset: 9px;
-    background:
-      radial-gradient(circle, color-mix(in oklch, var(--accent) 72%, #fff 8%) 0 28%, transparent 30%),
-      radial-gradient(circle, var(--accent-glow), transparent 68%);
-    animation: loader-breathe 1.25s ease-in-out infinite;
-  }
-
-  .modern-loader.small { --loader-size: 24px; }
-  .modern-loader.small::before { border-width: 1.5px; }
-  .modern-loader.small::after { inset: 6px; }
 
   .loader-surface {
     width: fit-content;
@@ -152,7 +248,7 @@
 
   .ds-select .custom-select-trigger:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 42%, transparent);
+    box-shadow: var(--field-focus-ring);
   }
 
   .ds-select .custom-select-option:disabled {

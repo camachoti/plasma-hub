@@ -190,6 +190,7 @@ export interface TdlibDownloadProgress {
   isScanning: boolean;
   items: Array<{
     name: string;
+    messageId?: number;
     status: string;
     progress: number;
     size: number;
@@ -241,11 +242,20 @@ export class TelegramTdlibBridge {
     return invoke<TdlibChatsResult>('tdlib_get_chats', { limit });
   }
 
-  getMessages({ chatId, limit = 50, offsetId = 0, topicId = null, topicKind = null }: any) {
+  readChat(chatId: unknown) {
+    return invoke<void>('tdlib_read_chat', { chatId: toNumberValue(chatId) });
+  }
+
+  readAllChats() {
+    return invoke<void>('tdlib_read_all_chats');
+  }
+
+  getMessages({ chatId, limit = 50, offsetId = 0, offset = 0, topicId = null, topicKind = null }: any) {
     return invoke<TdlibMessagesResult>('tdlib_get_messages', {
       chatId: toNumberValue(chatId),
       limit,
       offsetId: offsetId ? toNumberValue(offsetId) : null,
+      offset,
       topicId: topicId == null ? null : toNumberValue(topicId),
       topicKind,
     });

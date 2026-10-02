@@ -1,5 +1,5 @@
 import React from 'react';
-import { IconX } from "../../design-system/icons";
+import { IconPhoto, IconX } from "../../design-system/icons";
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
 import { SharedMediaSkeleton } from '../../components/Skeletons';
@@ -118,7 +118,7 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
             </div>
           ) : (
             <div className="info-media-empty" role="status">
-              <span className="info-media-empty-icon" aria-hidden="true">⌁</span>
+              <span className="info-media-empty-icon" aria-hidden="true"><IconPhoto size={22} stroke={1.5} /></span>
               <strong>Nenhuma mídia encontrada</strong>
               <span>As fotos e vídeos compartilhados aparecerão aqui.</span>
             </div>

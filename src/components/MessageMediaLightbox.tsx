@@ -1,4 +1,5 @@
 import React from 'react';
+import { LoadingIndicator } from '../design-system';
 import { createPortal } from 'react-dom';
 import { IconArrowsMaximize, IconArrowsMinimize, IconDownload, IconX } from "../design-system/icons";
 import { ContextMenu } from './ContextMenu';
@@ -125,7 +126,7 @@ export const MessageMediaLightbox: React.FC<MessageMediaLightboxProps> = ({
       {activeLoading || (!activeFullSrc && !activeError) ? (
         <div className="media-lightbox-loading" onClick={event => event.stopPropagation()}>
           <div className="media-lightbox-preparing">
-            <span className="spinner"></span>
+            <LoadingIndicator size="md" />
             {progressDetailLabel && (
               <div className="media-lightbox-progress-track">
                 <div
@@ -202,7 +203,7 @@ export const MessageMediaLightbox: React.FC<MessageMediaLightboxProps> = ({
               className={`video-play-icon loading ${shouldShowProgress ? 'progress-loading' : ''}`}
               onClick={event => event.stopPropagation()}
             >
-              <span className="spinner"></span>
+              <LoadingIndicator size="md" />
               {shouldShowProgress && (
                 <span className="loading-text">{progressLabel} {progressBytesLabel || `${mediaProgress}%`}</span>
               )}

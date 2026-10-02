@@ -53,6 +53,8 @@ pub fn run() {
             telegram_service::tdlib_check_password,
             telegram_service::tdlib_get_me,
             telegram_service::tdlib_get_chats,
+            telegram_service::tdlib_read_chat,
+            telegram_service::tdlib_read_all_chats,
             telegram_service::tdlib_get_messages,
             telegram_service::tdlib_search_chat_messages,
             telegram_service::tdlib_get_chat_capabilities,

@@ -24,6 +24,8 @@
   --accent-soft: rgba(196, 228, 86, 0.18);
   --accent-text: #1f2310;
   --accent-glow: rgba(196, 228, 86, 0.45);
+  --field-focus-border: color-mix(in srgb, var(--accent) 72%, var(--line));
+  --field-focus-ring: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent), 0 0 16px color-mix(in srgb, var(--accent) 9%, transparent);
 
   --danger: oklch(0.70 0.18 20);
   --warn: oklch(0.78 0.16 75);
@@ -47,16 +49,17 @@
   --radius-lg: 14px;
   --radius-xl: 22px;
 
-  --rail-w: 72px;
-  --list-w: 304px;
+  --rail-w: 60px;
+  --list-w: 330px;
+  --conversation-width: 960px;
   --info-w: 320px;
 }
 
 [data-palette="abyssal"] {
-  --bg-0: #08151c;
-  --bg-1: #111d25;
-  --bg-2: #152129;
-  --bg-3: #1f2b34;
+  --bg-0: #0b141b;
+  --bg-1: #121f29;
+  --bg-2: #192935;
+  --bg-3: #22343f;
   --bg-hover: rgba(42, 54, 63, 0.55);
   --bg-active: rgba(66, 74, 85, 0.65);
   --line: #3b494c;
@@ -109,7 +112,7 @@
 }
 
 [data-density="compact"] { --row-h: 52px; --msg-gap: 8px; --msg-pad-y: 5px; }
-[data-density="cozy"]    { --row-h: 60px; --msg-gap: 14px; --msg-pad-y: 8px; }
+[data-density="cozy"]    { --row-h: 68px; --msg-gap: 14px; --msg-pad-y: 8px; }
 [data-density="roomy"]   { --row-h: 72px; --msg-gap: 22px; --msg-pad-y: 12px; }
 
 * { box-sizing: border-box; }
@@ -149,8 +152,10 @@ select {
   transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
 }
 select:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
+  border-color: var(--field-focus-border);
+  background-color: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
+  caret-color: var(--accent);
 }
 select:disabled {
   opacity: 0.7;
@@ -325,7 +330,7 @@ select optgroup {
 }
 .list-title h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 720;
   letter-spacing: -0.035em;
 }
@@ -349,10 +354,14 @@ select optgroup {
   transition: border-color .15s;
 }
 .search:focus-within {
-  border-color: color-mix(in oklch, var(--accent) 46%, var(--line-soft));
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 12%, transparent);
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
 }
 .search input { flex: 1; height: 100%; }
+.search input { min-width: 0; }
+.search > svg { flex-shrink: 0; color: var(--text-2); }
+.search .icon-btn { flex-shrink: 0; width: 24px; height: 24px; }
 .search input:focus-visible { box-shadow: none; }
 .search input::placeholder { color: var(--text-3); }
 .folders {
@@ -502,15 +511,15 @@ select optgroup {
 [data-density="compact"] .chat-row { padding: 6px 10px; }
 .chat-row:hover { background: color-mix(in oklch, var(--bg-hover) 85%, transparent); }
 .chat-row.active {
-  border-color: color-mix(in oklch, var(--accent) 28%, var(--line-soft));
-  background: linear-gradient(90deg, var(--accent-soft), color-mix(in oklch, var(--accent-soft) 42%, transparent));
-  box-shadow: inset 0 1px 0 color-mix(in oklch, var(--accent) 16%, transparent);
+  border-color: transparent;
+  background: var(--accent-soft);
+  box-shadow: none;
 }
 .chat-row.active::before {
   content: ""; position: absolute; left: -1px; top: 12px; bottom: 12px;
   width: 3px; border-radius: 0 3px 3px 0;
   background: var(--accent);
-  box-shadow: 0 0 10px var(--accent-glow);
+  box-shadow: none;
 }
 .chat-avatar {
   grid-row: 1 / 3;
@@ -558,7 +567,7 @@ select optgroup {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.chat-row.unread .chat-meta { color: var(--accent); }
+.chat-row.unread .chat-meta { color: var(--text-2); }
 .chat-preview {
   font-size: 13px; color: var(--text-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -585,7 +594,7 @@ select optgroup {
   display: grid; place-items: center;
   font-variant-numeric: tabular-nums;
 }
-.chat-row.unread .chat-badge { background: var(--accent); color: var(--accent-text); box-shadow: 0 0 14px var(--accent-glow); }
+.chat-row.unread .chat-badge { background: var(--accent-soft); color: var(--accent); box-shadow: none; }
 .telegram-login-row {
   display: flex;
   align-items: center;
@@ -658,6 +667,7 @@ select optgroup {
 .convo-header .who-sub { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .convo-header-actions { display: flex; gap: 2px; align-items: center; position: relative; }
 .chat-message-search-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -667,7 +677,7 @@ select optgroup {
   border-bottom: 1px solid var(--line-soft);
   background: color-mix(in oklch, var(--bg-0) 88%, transparent);
   backdrop-filter: blur(12px);
-  z-index: 1;
+  z-index: 20;
   flex-shrink: 0;
 }
 .chat-message-search-input {
@@ -684,8 +694,9 @@ select optgroup {
   color: var(--text-2);
 }
 .chat-message-search-input:focus-within {
-  border-color: color-mix(in oklch, var(--accent) 42%, var(--line-soft));
-  box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent);
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
 }
 .chat-message-search-input input {
   flex: 1;
@@ -864,6 +875,8 @@ select optgroup {
   cursor: default;
   max-width: 100%;
   z-index: 1;
+  width: min(100%, var(--conversation-width));
+  margin-inline: auto;
 }
 .msg-row:hover { background: color-mix(in oklch, var(--bg-1) 15%, transparent); }
 .msg-row.continued { padding-top: 2px; padding-bottom: 2px; }
@@ -945,15 +958,15 @@ select optgroup {
   word-break: break-word;
 }
 .msg-row.self .msg-bubble {
-  background: var(--bg-3);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
   border: 1px solid color-mix(in oklch, var(--accent) 25%, transparent);
   border-radius: var(--radius-lg);
   border-bottom-right-radius: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: none;
 }
 .msg-row.self .msg-bubble:hover {
   border-color: color-mix(in oklch, var(--accent) 45%, transparent);
-  box-shadow: 0 4px 14px color-mix(in oklch, var(--accent) 15%, transparent);
+  box-shadow: none;
 }
 .msg-bubble.media-only {
   padding: 4px !important;
@@ -1010,22 +1023,22 @@ select optgroup {
 .reaction-add:hover { background: var(--bg-2); border-color: var(--line); color: var(--text-1); }
 
 /* Composer */
-.composer-wrap { padding: 0 24px 18px; flex-shrink: 0; z-index: 2; }
+.composer-wrap { padding: 0 24px 18px; flex-shrink: 0; z-index: 2; width: min(100%, var(--conversation-width)); margin-inline: auto; }
+.day-divider { width: min(100%, var(--conversation-width)); margin-inline: auto; }
 .composer {
-  background: color-mix(in oklch, var(--bg-3) 90%, transparent);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: var(--bg-2);
   border: 1px solid var(--line);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: hidden;
 }
 .composer:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: var(--bg-1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .composer .reply-strip {
   display: flex; align-items: center; gap: 10px;
@@ -1049,6 +1062,8 @@ select optgroup {
 }
 .composer-main textarea {
   flex: 1;
+  min-width: 0;
+  caret-color: var(--accent);
   background: transparent !important;
   border: none !important;
   outline: none !important;
@@ -1061,9 +1076,10 @@ select optgroup {
   box-shadow: none !important;
 }
 .composer-main textarea::placeholder { color: var(--text-3); }
-.composer-right-actions { display: flex; align-items: center; gap: 6px; }
+.composer-right-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
 .composer-main .icon-btn {
+  flex-shrink: 0;
   width: 38px;
   height: 38px;
   border-radius: 50%;
@@ -1082,7 +1098,7 @@ select optgroup {
 .composer-send {
   width: 38px;
   height: 38px;
-  border-radius: 50%;
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-text);
   border: none;
@@ -1090,12 +1106,12 @@ select optgroup {
   place-items: center;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s, filter 0.15s;
-  box-shadow: 0 4px 12px var(--accent-glow);
+  box-shadow: none;
 }
 .composer-send:hover {
   filter: brightness(1.1);
   transform: scale(1.05);
-  box-shadow: 0 6px 16px var(--accent-glow);
+  box-shadow: 0 2px 8px var(--accent-soft);
 }
 .composer-send:active {
   transform: scale(0.95);
@@ -1188,23 +1204,21 @@ select optgroup {
 }
 .user-card-actions { display: flex; gap: 2px; }
 
-/* ── Elevated desktop workspace ─────────────────────────────── */
+/* ── Unified desktop workspace ──────────────────────────────── */
 @media (min-width: 641px) {
   .app {
-    gap: 10px;
-    padding: 10px;
-    background:
-      radial-gradient(circle at 72% -12%, color-mix(in oklch, var(--accent) 10%, transparent), transparent 34%),
-      var(--bg-0);
+    gap: 0;
+    padding: 0;
+    background: var(--bg-0);
   }
 
   .list,
   .convo,
   .info {
     min-height: 0;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 18px 40px color-mix(in oklch, var(--bg-0) 48%, transparent);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
     overflow: hidden;
   }
 
@@ -1214,9 +1228,7 @@ select optgroup {
   }
 
   .convo {
-    background:
-      linear-gradient(180deg, color-mix(in oklch, var(--bg-1) 28%, transparent), transparent 18%),
-      var(--bg-0);
+    background: var(--bg-0);
   }
 
   .info {
@@ -1228,7 +1240,7 @@ select optgroup {
     height: 64px;
     padding: 0 18px;
     border-bottom-color: var(--line-soft);
-    box-shadow: 0 8px 22px color-mix(in oklch, var(--bg-0) 24%, transparent);
+    box-shadow: none;
   }
 
   .convo-header .who-avatar {
@@ -1242,9 +1254,9 @@ select optgroup {
   .convo-header-actions {
     gap: 4px;
     padding: 3px;
-    border: 1px solid var(--line-soft);
+    border: 0;
     border-radius: var(--radius-control);
-    background: color-mix(in oklch, var(--bg-1) 78%, transparent);
+    background: transparent;
   }
 
   .convo-header-actions .icon-btn { border-radius: 7px; }
@@ -1281,6 +1293,98 @@ select optgroup {
 .dropdown-item.danger { color: var(--danger); }
 .dropdown-divider { height: 1px; background: var(--line-soft); margin: 4px 0; }
 
+.chat-media-size-menu {
+  padding: 8px;
+}
+
+.chat-media-size-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 6px 8px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.chat-media-size-label output {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-media-size-label svg {
+  color: var(--text-3);
+}
+
+.chat-media-size-slider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 6px 3px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.chat-media-size-slider .large {
+  font-size: 15px;
+}
+
+.chat-media-size-slider input[type="range"] {
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chat-media-size-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) 0 var(--slider-progress), var(--line) var(--slider-progress) 100%);
+}
+
+.chat-media-size-slider input[type="range"]::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  appearance: none;
+  border: 2px solid var(--bg-2);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.chat-media-size-slider input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.chat-media-size-slider input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.chat-media-size-slider input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bg-2);
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.chat-media-size-slider input[type="range"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 999px;
+}
+
 /* Badge / pip */
 .pip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
 
@@ -1291,7 +1395,7 @@ select optgroup {
   .info { display: none; }
 }
 @media (max-width: 1024px) {
-  :root { --list-w: 260px; --rail-w: 64px; }
+  :root { --list-w: 260px; --rail-w: 60px; }
   .convo-header { padding: 0 10px; gap: 8px; }
 }
 @media (max-width: 860px) {

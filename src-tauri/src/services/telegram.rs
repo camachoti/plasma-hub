@@ -334,6 +334,7 @@ pub struct TdlibMassDownloadResult {
 #[serde(rename_all = "camelCase")]
 struct TdlibDownloadItem {
     name: String,
+    message_id: i64,
     status: String,
     progress: u8,
     size: i64,
@@ -2584,11 +2585,50 @@ pub async fn tdlib_get_chats(
 }
 
 #[tauri::command]
+pub async fn tdlib_read_chat(state: State<'_, TdlibManager>, chat_id: i64) -> Result<(), String> {
+    let client_id = ready_client_id(&state)
+        .await
+        .map_err(|status| status.error.unwrap_or(status.state))?;
+    let tdlib_rs::enums::Chat::Chat(chat) = functions::get_chat(chat_id, client_id)
+        .await
+        .map_err(|error| error.message)?;
+
+    if chat.unread_count > 0 {
+        if let Some(message) = chat.last_message {
+            functions::view_messages(chat_id, vec![message.id], None, true, client_id)
+                .await
+                .map_err(|error| error.message)?;
+        }
+    }
+    if chat.is_marked_as_unread {
+        functions::toggle_chat_is_marked_as_unread(chat_id, false, client_id)
+            .await
+            .map_err(|error| error.message)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn tdlib_read_all_chats(state: State<'_, TdlibManager>) -> Result<(), String> {
+    let client_id = ready_client_id(&state)
+        .await
+        .map_err(|status| status.error.unwrap_or(status.state))?;
+    functions::read_chat_list(ChatList::Main, client_id)
+        .await
+        .map_err(|error| error.message)?;
+    functions::read_chat_list(ChatList::Archive, client_id)
+        .await
+        .map_err(|error| error.message)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn tdlib_get_messages(
     state: State<'_, TdlibManager>,
     chat_id: i64,
     limit: Option<i32>,
     offset_id: Option<i64>,
+    offset: Option<i32>,
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibMessagesResult, String> {
@@ -2605,7 +2645,8 @@ pub async fn tdlib_get_messages(
         }
     };
 
-    let requested_limit = limit.unwrap_or(50).clamp(1, 100);
+    let history_offset = offset.unwrap_or(0).clamp(-99, 0);
+    let requested_limit = limit.unwrap_or(50).clamp((-history_offset).max(1), 100);
     let from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
     let history_result = if let Some(topic_id) = topic_id {
         if topic_kind.as_deref() == Some("thread") {
@@ -2613,7 +2654,7 @@ pub async fn tdlib_get_messages(
                 chat_id,
                 tdlib_message_id_from_app_id(topic_id),
                 from_message_id,
-                0,
+                history_offset,
                 requested_limit,
                 client_id,
             )
@@ -2624,7 +2665,7 @@ pub async fn tdlib_get_messages(
                 chat_id,
                 forum_topic_id,
                 from_message_id,
-                0,
+                history_offset,
                 requested_limit,
                 client_id,
             )
@@ -2634,7 +2675,7 @@ pub async fn tdlib_get_messages(
         functions::get_chat_history(
             chat_id,
             from_message_id,
-            0,
+            history_offset,
             requested_limit,
             false,
             client_id,
@@ -4202,6 +4243,7 @@ pub async fn tdlib_start_mass_download(
         let item_index = items.len();
         items.push(TdlibDownloadItem {
             name: file_name.clone(),
+            message_id: message.id,
             status: "pending".to_string(),
             progress: 0,
             size: effective_file_size(&media_file),

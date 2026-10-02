@@ -38,6 +38,7 @@ This repository is `plasma-hub`, a Tauri 2 application with a React/Vite fronten
 - Scope native changes to `src-tauri/src/commands` and `src-tauri/src/services`.
 - Preserve desktop behavior while treating Android as an active compatibility target.
 - Prefer small wrappers around platform-specific behavior instead of branching feature logic across the app shell.
+- Use `TextField` and `TextArea` from `src/design-system` for editable text controls, and `Select` for choices. Raw native inputs are reserved for non-text controls such as checkboxes and file pickers.
 - Do not revert unrelated user changes already present in the worktree.
 
 ## Validation

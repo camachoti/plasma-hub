@@ -4,6 +4,7 @@ import { Virtuoso } from 'react-virtuoso';
 import type { ForumTopic } from './TelegramDashboardTypes';
 import { formatBytes } from './DashboardHelpers';
 import { IconMagic } from './DashboardIcons';
+import { LoadingIndicator, TextField } from '../../design-system';
 
 interface DownloadItem {
   name: string;
@@ -67,7 +68,7 @@ const ProgressItemRow = React.memo(({ item }: { item: DownloadItem }) => (
       )}
       {item.status === 'downloading' && (
         <span className="item-badge downloading">
-          <span className="spinner small-spinner inline-spinner" style={{ width: 10, height: 10, borderWidth: 1.5, display: 'inline-block', marginRight: 4 }} />
+          <LoadingIndicator size="xs" style={{ marginRight: 4 }} />
           {item.progress}%
         </span>
       )}
@@ -143,7 +144,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
       <div className="mass-download-main-row">
         <div className="inline-folder">
           <div className="folder-selection">
-            <input readOnly value={folderPath} placeholder="Selecionar pasta de destino..." />
+            <TextField appearance="inline" readOnly value={folderPath} placeholder="Selecionar pasta de destino..." />
             <button className="browse-btn" onClick={handleSelectFolder}>Procurar</button>
           </div>
         </div>
@@ -162,7 +163,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
               >
                 <span>
                   {loadingTopics ? (
-                    <span className="modern-loader small" aria-hidden="true" />
+                    <LoadingIndicator size="sm" />
                   ) : selectedTopicId === 'all' ? 'Todos os tópicos' : forumTopics.find(topic => String(topic.id) === selectedTopicId)?.title || 'Todos os tópicos'}
                 </span>
                 <IconChevronDown size={14} stroke={2} aria-hidden="true" />
@@ -170,7 +171,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
               {isTopicDropdownOpen && (
                 <div className="custom-select-options">
                   <div className="custom-select-search" onClick={event => event.stopPropagation()}>
-                    <input type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={event => setTopicSearch(event.target.value)} autoFocus />
+                    <TextField type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={event => setTopicSearch(event.target.value)} autoFocus />
                   </div>
                   <button type="button" className={`custom-select-option ${selectedTopicId === 'all' ? 'selected' : ''}`} onClick={event => { event.stopPropagation(); setSelectedTopicId('all'); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
                     Todos os tópicos

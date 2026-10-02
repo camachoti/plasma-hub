@@ -1,0 +1,50 @@
+.workspace-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 230px;
+  padding: 32px 20px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.workspace-empty-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 4px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.workspace-empty h3 {
+  max-width: 420px;
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.workspace-empty p {
+  max-width: 380px;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.workspace-empty-action { max-width: 100%; margin-top: 4px; }
+.workspace-empty-action button { max-width: 100%; white-space: normal; }
+
+@media (max-width: 640px) {
+  .workspace-empty { padding: 28px 16px; }
+  .workspace-empty h3 { font-size: 16px; }
+}

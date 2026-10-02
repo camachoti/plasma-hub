@@ -1,0 +1,63 @@
+.download-icon-wrapper {
+  flex: 0 0 auto;
+}
+
+.download-icon,
+.download-thumbnail-container {
+  width: 54px;
+  height: 54px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.download-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+}
+
+.download-icon.completed,
+.download-status-overlay.completed {
+  color: var(--good);
+}
+
+.download-icon.failed,
+.download-status-overlay.failed {
+  color: var(--danger);
+}
+
+.download-icon.canceled,
+.download-status-overlay.canceled {
+  color: var(--text-3);
+}
+
+.download-thumbnail-container {
+  position: relative;
+  overflow: hidden;
+}
+
+.download-thumbnail-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.download-status-overlay {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-1);
+}
+
+.download-status-overlay.downloading {
+  color: var(--text-2);
+}

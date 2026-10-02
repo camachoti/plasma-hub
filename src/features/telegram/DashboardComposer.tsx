@@ -1,4 +1,5 @@
 import React from 'react';
+import { LoadingIndicator, TextArea } from '../../design-system';
 import { IconX } from "../../design-system/icons";
 import type { Chat, ChatFullInfo, Message } from './TelegramDashboardTypes';
 import { IconAttach, IconDownload, IconEmoji, IconSend } from './DashboardIcons';
@@ -180,7 +181,8 @@ const MessageComposerComponent: React.FC<MessageComposerProps> = ({
         <button type="button" className="icon-btn" onClick={handleSelectFile} disabled={isSending || !canSendMedia} title={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'} aria-label={canSendMedia ? 'Anexar arquivo' : 'Envio de mídia indisponível'}>
           <IconAttach />
         </button>
-        <textarea
+        <TextArea
+          appearance="inline"
           value={inputText}
           onChange={event => {
             if (canSendMessages) setInputText(event.target.value);
@@ -210,7 +212,7 @@ const MessageComposerComponent: React.FC<MessageComposerProps> = ({
             onClick={handleSend}
             disabled={isSending || ((!canSendMessages || !inputText.trim()) && (!canSendMedia || !selectedFile))}
           >
-            {isSending ? <span className="spinner small-spinner" /> : <IconSend />}
+            {isSending ? <LoadingIndicator size="sm" /> : <IconSend />}
           </button>
         </div>
       </div>

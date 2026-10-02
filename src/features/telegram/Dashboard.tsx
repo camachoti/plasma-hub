@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { IconArrowDown, IconCheck as TablerCheck, IconChevronDown, IconMessageCircle, IconX } from "../../design-system/icons";
+import { IconArrowDown, IconBrandTelegram, IconCheck as TablerCheck, IconChevronDown, IconMessageCircle, IconPhoto, IconX } from "../../design-system/icons";
+import { EmptyState } from '../../design-system/EmptyState';
+import { LoadingIndicator, TextArea, TextField } from '../../design-system';
 import { convertFileSrc, invokeCommand as invoke, listenNativeDragDrop } from '../../shared/platform/tauri';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
@@ -99,6 +101,12 @@ interface DownloadProgress {
   items?: DownloadItem[];
 }
 
+interface HistoricalJumpSnapshot {
+  messages: Message[];
+  hasMoreMessages: boolean;
+  oldestMessageId: number | null;
+}
+
 interface DashboardProps {
   skipLogin?: boolean;
   onTelegramLoginRequest?: () => void;
@@ -109,9 +117,23 @@ const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
 const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
 const TIMELINE_ANCHOR_PREFIX = 'plasma_timeline_anchor_';
 const INFO_PANEL_KEY = 'plasma_info_panel_open';
+const CHAT_MEDIA_SIZE_KEY = 'plasma_chat_media_size';
 const CHAT_ORDER_KEY = 'plasma_chat_order_v1';
 const CHAT_LIST_CACHE_KEY = 'plasma_chat_list_cache_v1';
 const CHAT_LIST_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const CHAT_MEDIA_SIZE_MIN = 220;
+const CHAT_MEDIA_SIZE_MAX = 460;
+const CHAT_MEDIA_SIZE_DEFAULT = 320;
+
+const getStoredChatMediaSize = (): number => {
+  const stored = appStorage.get(CHAT_MEDIA_SIZE_KEY);
+  const legacySizes: Record<string, number> = { compact: 260, standard: 320, large: 420 };
+  const parsed = stored ? (legacySizes[stored] ?? Number(stored)) : CHAT_MEDIA_SIZE_DEFAULT;
+  return Number.isFinite(parsed)
+    ? Math.min(CHAT_MEDIA_SIZE_MAX, Math.max(CHAT_MEDIA_SIZE_MIN, parsed))
+    : CHAT_MEDIA_SIZE_DEFAULT;
+};
 
 const readCachedChats = (): Chat[] => {
   try {
@@ -287,6 +309,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [isNearLatest, setIsNearLatest] = useState(true);
   const isNearLatestRef = useRef(true);
   const [pendingIncomingMessages, setPendingIncomingMessages] = useState(0);
+  const [isHistoricalJump, setIsHistoricalJump] = useState(false);
+  const [loadingHistoricalJump, setLoadingHistoricalJump] = useState(false);
+  const historicalJumpSnapshotRef = useRef<HistoricalJumpSnapshot | null>(null);
+  const historicalJumpSeqRef = useRef(0);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -296,12 +322,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const timelineRef = useRef<HTMLDivElement>(null);
   const topicListRef = useRef<HTMLDivElement>(null);
   const shouldScrollToBottomRef = useRef(false);
+  const postSendScrollFrameRef = useRef<number | null>(null);
   const preserveScrollPositionRef = useRef<number | null>(null);
   const topicListScrollRef = useRef<number>(0);
   const pendingTimelineAnchorRef = useRef<number | null>(null);
   const timelineAnchorSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timelineRestoreUntilRef = useRef(0);
   const pendingJumpToMsgIdRef = useRef<number | null>(null);
+  const jumpRequestRef = useRef(0);
   const progressDetailsListRef = useRef<HTMLDivElement | null>(null);
   const messagesLoadSeqRef = useRef(0);
   const sharedMediaLoadSeqRef = useRef(0);
@@ -340,6 +368,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [chatSearch, setChatSearch] = useState('');
   const [topicSearch, setTopicSearch] = useState('');
   const [isTopicDropdownOpen, setIsTopicDropdownOpen] = useState(false);
+  const [chatMediaSize, setChatMediaSize] = useState<number>(getStoredChatMediaSize);
 
   const [inputText, setInputText] = useState('');
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -348,6 +377,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [isSending, setIsSending] = useState(false);
   const [msgContextMenu, setMsgContextMenu] = useState<{ x: number; y: number; message: Message } | null>(null);
   const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
+  const [allChatsContextMenu, setAllChatsContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [imgContextMenu, setImgContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null);
   const [userContextMenu, setUserContextMenu] = useState<{ x: number; y: number; senderId: string; senderName: string } | null>(null);
   const [searchMediaUser, setSearchMediaUser] = useState<{ senderId: string; senderName: string } | null>(null);
@@ -377,7 +407,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [isCreatingTopic, setIsCreatingTopic] = useState(false);
 
   const showDashboardToast = useCallback((toast: { tone: 'success' | 'error' | 'info'; title: string; message?: string }) => {
-    setDashboardToast(toast);
+    if (toast.tone !== 'error') return;
+    setDashboardToast({ tone: 'error', title: toast.title, message: toast.message });
   }, []);
 
   useEffect(() => {
@@ -511,10 +542,32 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     () => new Set(selectedSearchMediaIds),
     [selectedSearchMediaIds]
   );
-  const timelineFirstItemIndex = useMemo(
-    () => Math.max(0, 100000 - timelineItems.length),
-    [timelineItems.length]
-  );
+  const timelineIndexStateRef = useRef<{
+    scope: string;
+    firstItemId: number | null;
+    firstItemIndex: number;
+  } | null>(null);
+  const timelineScope = `${selectedChat?.id ?? ''}:${viewingTopic?.kind ?? ''}:${viewingTopic?.id ?? ''}`;
+  const previousTimelineIndex = timelineIndexStateRef.current;
+  let timelineFirstItemIndex = previousTimelineIndex?.firstItemIndex ?? 100000;
+  if (!timelineItems.length || previousTimelineIndex?.scope !== timelineScope) {
+    timelineFirstItemIndex = 100000;
+  } else if (previousTimelineIndex.firstItemId !== null) {
+    const previousFirstItemPosition = timelineItems.findIndex(item =>
+      Number(item.id) === previousTimelineIndex.firstItemId
+      || Boolean(item.messages?.some(message => Number(message.id) === previousTimelineIndex.firstItemId))
+    );
+    if (previousFirstItemPosition > 0) {
+      timelineFirstItemIndex = Math.max(0, timelineFirstItemIndex - previousFirstItemPosition);
+    } else if (previousFirstItemPosition < 0) {
+      timelineFirstItemIndex = 100000;
+    }
+  }
+  timelineIndexStateRef.current = {
+    scope: timelineScope,
+    firstItemId: timelineItems[0]?.id ?? null,
+    firstItemIndex: timelineFirstItemIndex,
+  };
   const prepareTimelineRestore = useCallback((chatId: string, topicId?: number | null) => {
     const stored = appStorage.get(timelineAnchorKey(chatId, topicId));
     const messageId = stored ? Number(stored) : NaN;
@@ -603,6 +656,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [applyVisibleMediaRange]);
 
   const scrollToLatestMessages = useCallback(() => {
+    const snapshot = historicalJumpSnapshotRef.current;
+    if (snapshot) {
+      historicalJumpSnapshotRef.current = null;
+      historicalJumpSeqRef.current += 1;
+      setLoadingHistoricalJump(false);
+      setIsHistoricalJump(false);
+      pendingJumpToMsgIdRef.current = null;
+      jumpRequestRef.current += 1;
+      setMessages(snapshot.messages);
+      setHasMoreMessages(snapshot.hasMoreMessages);
+      setOldestMessageId(snapshot.oldestMessageId);
+      shouldScrollToBottomRef.current = true;
+      isNearLatestRef.current = true;
+      setIsNearLatest(true);
+      setPendingIncomingMessages(0);
+      return;
+    }
     const latestIndex = timelineFirstItemIndex + timelineItems.length - 1;
     if (latestIndex < timelineFirstItemIndex) return;
     isNearLatestRef.current = true;
@@ -610,6 +680,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     setPendingIncomingMessages(0);
     virtuosoRef.current?.scrollToIndex({ index: latestIndex, align: 'end', behavior: 'smooth' });
   }, [timelineFirstItemIndex, timelineItems.length]);
+
+  const revealLatestMessageAfterSend = useCallback(() => {
+    isNearLatestRef.current = true;
+    setIsNearLatest(true);
+    setPendingIncomingMessages(0);
+    shouldScrollToBottomRef.current = false;
+
+    if (postSendScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(postSendScrollFrameRef.current);
+    }
+
+    postSendScrollFrameRef.current = window.requestAnimationFrame(() => {
+      postSendScrollFrameRef.current = null;
+      virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' });
+    });
+  }, []);
 
   const isTwitterChat = (chat: Chat | null) => Boolean(chat?.isFakeTwitter || (typeof chat?.id === 'string' && chat.id.startsWith('twitter_profile_')));
 
@@ -790,6 +876,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     telegramService.cancelQueuedFullMediaExceptChat(selectedChat?.id ?? null);
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
+    jumpRequestRef.current += 1;
+    pendingJumpToMsgIdRef.current = null;
     if (visibleRangeSettleTimerRef.current) {
       window.clearTimeout(visibleRangeSettleTimerRef.current);
       visibleRangeSettleTimerRef.current = null;
@@ -895,20 +983,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }
     if (shouldScrollToBottomRef.current && virtuosoRef.current && messages.length > 0) {
       const lastIndex = timelineFirstItemIndex + timelineItems.length - 1;
-      virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end' });
-      const timer = setTimeout(() => {
-        if (virtuosoRef.current) {
-          virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end', behavior: 'smooth' });
-        }
-      }, 100);
       shouldScrollToBottomRef.current = false;
-      return () => clearTimeout(timer);
+      const frame = window.requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({ index: lastIndex, align: 'end' });
+      });
+      return () => window.cancelAnimationFrame(frame);
     }
   }, [messages, timelineItems, timelineFirstItemIndex]);
 
   useEffect(() => () => {
     if (timelineAnchorSaveTimerRef.current) window.clearTimeout(timelineAnchorSaveTimerRef.current);
     if (visibleRangeSettleTimerRef.current) window.clearTimeout(visibleRangeSettleTimerRef.current);
+    if (postSendScrollFrameRef.current !== null) window.cancelAnimationFrame(postSendScrollFrameRef.current);
   }, []);
 
   useEffect(() => {
@@ -982,15 +1068,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     if (pendingJumpToMsgIdRef.current) {
       const targetId = pendingJumpToMsgIdRef.current;
-      const originalMsgIdx = messages.findIndex(m => Number(m.id) === Number(targetId));
-      if (originalMsgIdx >= 0) {
+      const timelineIndex = timelineItems.findIndex(item =>
+        Number(item.message.id) === Number(targetId)
+        || Boolean(item.messages?.some(message => Number(message.id) === Number(targetId)))
+      );
+      if (timelineIndex >= 0) {
         pendingJumpToMsgIdRef.current = null;
-        const firstItemIndex = Math.max(0, 100000 - messages.length);
-        const virtuosoIdx = firstItemIndex + originalMsgIdx;
-        triggerJumpScroll(targetId, virtuosoIdx);
+        triggerJumpScroll(targetId, timelineFirstItemIndex + timelineIndex);
       }
     }
-  }, [messages]);
+  }, [timelineItems, timelineFirstItemIndex]);
 
   useEffect(() => {
     setChatSearchResultIndex(0);
@@ -1339,6 +1426,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null; topicKind?: string } = {}) => {
     const loadSeq = ++messagesLoadSeqRef.current;
+    const preserveMountedTimeline = Boolean(options.silent && messagesRef.current.length > 0);
     if (!options.silent) setLoadingMessages(true);
     try {
       if (options.refresh && !offsetId) {
@@ -1346,10 +1434,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         if (loadSeq !== messagesLoadSeqRef.current) return;
         if (cached.success && cached.messages?.length) {
           const cachedMessages = cached.messages.map((message: Message) => withTransientSentThumbnail(chatId, message));
-          setMessages(cachedMessages);
+          if (!preserveMountedTimeline) setMessages(cachedMessages);
           preloadInitialThumbnails(chatId, cachedMessages);
-          setHasMoreMessages(Boolean(cached.hasMore));
-          setOldestMessageId(cached.oldestMessageId ?? null);
+          if (!preserveMountedTimeline) {
+            setHasMoreMessages(Boolean(cached.hasMore));
+            setOldestMessageId(cached.oldestMessageId ?? null);
+          }
           setLoadingMessages(false);
           const latestKnownMessageDate = Number(options.latestKnownMessageDate || 0);
           const cacheHasKnownLatest = !latestKnownMessageDate || Number(cached.newestMessageDate || 0) >= latestKnownMessageDate;
@@ -1360,11 +1450,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       const res = await telegramService.getMessages({ chatId, limit: PAGE_SIZE, offsetId, topicId, topicKind: options.topicKind, refresh: options.refresh });
       if (loadSeq !== messagesLoadSeqRef.current) return;
       if (res.success && res.messages) {
-        const loadedMessages = res.messages.map((message: Message) => withTransientSentThumbnail(chatId, message));
-        setMessages(loadedMessages);
+        const loadedMessages: Message[] = res.messages.map((message: Message) => withTransientSentThumbnail(chatId, message));
+        if (preserveMountedTimeline) {
+          setMessages(current => {
+            const byId = new Map<number, Message>();
+            current.forEach(message => byId.set(Number(message.id), message));
+            loadedMessages.forEach(message => byId.set(Number(message.id), message));
+            return Array.from(byId.values()).sort(compareTelegramMessages);
+          });
+        } else {
+          setMessages(loadedMessages);
+        }
         preloadInitialThumbnails(chatId, loadedMessages);
-        setHasMoreMessages(Boolean(res.hasMore));
-        setOldestMessageId(res.oldestMessageId ?? null);
+        if (!preserveMountedTimeline) {
+          setHasMoreMessages(Boolean(res.hasMore));
+          setOldestMessageId(res.oldestMessageId ?? null);
+        }
       }
     } catch (e) { debugWarn(e); }
     finally {
@@ -1394,13 +1495,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     Header: () => {
       if (!hasMoreMessages) return null;
       return (
-        <div className="messages-load-more" style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
+        <div className={`messages-load-more ${loadingMoreMessages ? 'is-loading' : ''}`}>
           {loadingMoreMessages ? (
-            <div className="loader-surface compact" role="status" aria-label="Carregando mensagens anteriores">
-              <span className="modern-loader small" />
+            <div className="timeline-history-loader" role="status" aria-live="polite">
+              <LoadingIndicator size="xs" />
+              <span>Carregando histórico</span>
             </div>
           ) : (
-            <div style={{ height: '24px' }} />
+            <span className="timeline-history-sentinel" aria-hidden="true" />
           )}
         </div>
       );
@@ -1438,8 +1540,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           kind: getChatKind(selectedChat),
         }
       });
-      if (!res.success) setError(res.error || 'Failed to start download');
-    } catch (e: any) { setError(e.message || 'Unknown error'); }
+      if (!res.success) showDashboardToast({ tone: 'error', title: 'Falha ao iniciar download', message: res.error || undefined });
+    } catch (e: any) { showDashboardToast({ tone: 'error', title: 'Falha ao iniciar download', message: e.message || String(e) }); }
     finally { setDownloading(false); setStopping(false); }
   };
 
@@ -1530,6 +1632,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       debugWarn('Error during bulk download:', err);
       setBulkDownloadActive(false);
       setBulkProgress(null);
+      showDashboardToast({ tone: 'error', title: 'Falha no download em lote', message: err instanceof Error ? err.message : String(err) });
       return false;
     }
   };
@@ -1550,7 +1653,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       });
       const res = updateTwitterProfileChat(profile);
       if (!res.success) {
-        setError(res.error || 'Não foi possível atualizar mensagens do Twitter/X.');
+        showDashboardToast({ tone: 'error', title: 'Falha ao atualizar Twitter/X', message: res.error || undefined });
         return;
       }
       const addedCount = res.addedCount ?? 0;
@@ -1567,7 +1670,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         onConfirm: () => setConfirmModal(null),
       });
     } catch (err: any) {
-      setError(err?.message || 'Falha ao atualizar mensagens do Twitter/X.');
+      showDashboardToast({ tone: 'error', title: 'Falha ao atualizar Twitter/X', message: err?.message || String(err) });
     } finally {
       setUpdatingTwitterMessages(false);
     }
@@ -1696,7 +1799,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     } catch (error: any) {
       setPendingDroppedMedia(filesToSend);
       setIsDropPreviewOpen(true);
-      setError(error?.message || 'Erro ao enviar as mídias.');
+      showDashboardToast({ tone: 'error', title: 'Falha ao enviar mídias', message: error?.message || String(error) });
     } finally {
       setIsSending(false);
       setSendProgress(null);
@@ -1814,6 +1917,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       }
 
       if (res.success) {
+        if (res.message) {
+          setMessages(current => {
+            const byId = new Map<number, Message>();
+            current.forEach(message => byId.set(Number(message.id), message));
+            byId.set(Number(res.message!.id), withTransientSentThumbnail(selectedChat.id, res.message!));
+            return Array.from(byId.values()).sort(compareTelegramMessages);
+          });
+        }
         if (fileToSend) {
           const { isVideo } = isSupportedDroppedMedia(fileToSend.fileName);
           await seedSentMediaThumbnail(selectedChat.id, res.message, fileToSend.filePath, isVideo);
@@ -1822,17 +1933,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           tone: 'success',
           title: fileToSend ? 'Mídia enviada' : 'Mensagem enviada',
         });
-        shouldScrollToBottomRef.current = true;
+        revealLatestMessageAfterSend();
         // Refresh messages silently in background
-        loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
+        void loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
       } else {
-        setError(res.error || 'Falha ao enviar');
+        showDashboardToast({ tone: 'error', title: fileToSend ? 'Falha ao enviar mídia' : 'Falha ao enviar mensagem', message: res.error || undefined });
         // Restore input text on error so user doesn't lose it
         setInputText(textToSend);
         if (fileToSend) setSelectedFile(fileToSend);
       }
     } catch (e: any) {
-      setError(e.message || 'Erro ao enviar');
+      showDashboardToast({ tone: 'error', title: fileToSend ? 'Falha ao enviar mídia' : 'Falha ao enviar mensagem', message: e.message || String(e) });
       setInputText(textToSend);
       if (fileToSend) setSelectedFile(fileToSend);
     } finally {
@@ -1846,8 +1957,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     try {
       const res = await telegramService.createTopic({ chatId: selectedChat.id, title: newTopicTitle.trim(), iconColor: newTopicColor });
       if (res.success) { setIsCreatingTopic(false); setNewTopicTitle(''); setNewTopicColor(7322096); fetchForumTopics(selectedChat); }
-      else setError(res.error || 'Falha ao criar tópico');
-    } catch (e: any) { setError(e.message || 'Erro ao criar tópico'); }
+      else showDashboardToast({ tone: 'error', title: 'Falha ao criar tópico', message: res.error || undefined });
+    } catch (e: any) { showDashboardToast({ tone: 'error', title: 'Falha ao criar tópico', message: e.message || String(e) }); }
   };
 
 
@@ -1879,10 +1990,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         shouldScrollToBottomRef.current = true;
         loadMessages(selectedChat.id, 0, topicId, { silent: true, refresh: true, forceRefresh: true, topicKind });
       } else {
-        setError(res.error || 'Falha ao encaminhar mensagem.');
+        showDashboardToast({ tone: 'error', title: 'Falha ao encaminhar mensagem', message: res.error || undefined });
       }
     } catch (e: any) {
-      setError(e.message || 'Erro ao encaminhar mensagem.');
+      showDashboardToast({ tone: 'error', title: 'Falha ao encaminhar mensagem', message: e.message || String(e) });
     } finally {
       setIsSending(false);
       setMsgContextMenu(null);
@@ -1957,21 +2068,31 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const triggerJumpScroll = (targetMsgId: number, virtuosoIdx: number) => {
     debugLog('[TelegramEnchanted] Triggering jump scroll to index:', virtuosoIdx, 'for msg ID:', targetMsgId);
+    const requestId = ++jumpRequestRef.current;
     if (virtuosoRef.current) {
       virtuosoRef.current.scrollToIndex({ index: virtuosoIdx, align: 'center' });
     }
 
     const targetId = `msg-${targetMsgId}`;
+    const timelineItem = timelineItems.find(item =>
+      Number(item.message.id) === Number(targetMsgId)
+      || Boolean(item.messages?.some(message => Number(message.id) === Number(targetMsgId)))
+    );
+    const visibleRowId = `msg-${timelineItem?.message.id ?? targetMsgId}`;
     let attemptsCount = 0;
     const pollAndAlign = () => {
-      const domEl = document.getElementById(targetId);
-      if (domEl) {
-        debugLog('[TelegramEnchanted] Found target in DOM. Scrolling into center view.');
-        domEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (requestId !== jumpRequestRef.current) return true;
+      const domEl = document.getElementById(targetId) || document.getElementById(visibleRowId);
+      const scroller = domEl?.closest<HTMLElement>('[data-virtuoso-scroller]');
+      if (domEl && scroller) {
+        const targetRect = domEl.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        scroller.scrollTop += targetRect.top + targetRect.height / 2 - scrollerRect.top - scrollerRect.height / 2;
         
-        // Highlight flash effect
-        setHighlightedMsgId(targetMsgId);
-        setTimeout(() => setHighlightedMsgId(null), 1500);
+        setHighlightedMsgId(timelineItem?.message.id ?? targetMsgId);
+        window.setTimeout(() => {
+          if (requestId === jumpRequestRef.current) setHighlightedMsgId(null);
+        }, 1500);
         return true;
       }
       return false;
@@ -1981,6 +2102,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (!pollAndAlign()) {
       const intervalId = setInterval(() => {
         attemptsCount++;
+        if (attemptsCount === 8 || attemptsCount === 24) {
+          virtuosoRef.current?.scrollToIndex({ index: virtuosoIdx, align: 'center' });
+        }
         const success = pollAndAlign();
         if (success || attemptsCount > 60) { // 60 * 50ms = 3000ms max polling
           clearInterval(intervalId);
@@ -2094,10 +2218,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     debugLog('[TelegramEnchanted] Message index in array:', originalMsgIdx);
 
     if (originalMsgIdx >= 0) {
-      // Message already in memory, scroll to it immediately
-      const firstItemIndex = Math.max(0, 100000 - currentMessages.length);
-      const virtuosoIdx = firstItemIndex + originalMsgIdx;
-      triggerJumpScroll(replyToMsgId, virtuosoIdx);
+      // The rendered timeline groups albums, so its index differs from the raw message index.
+      jumpToLoadedMessage(replyToMsgId);
     } else {
       // 1. If not found in memory, load older messages automatically (up to 15 attempts / 750 messages)
       if (hasMoreMessages && oldestMessageId) {
@@ -2126,7 +2248,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               originalMsgIdx = newMessages.findIndex(m => Number(m.id) === Number(replyToMsgId));
               if (originalMsgIdx >= 0) {
                 found = true;
-                setMessages(newMessages);
+                const byId = new Map<number, Message>();
+                newMessages.forEach(message => byId.set(Number(message.id), message));
+                setMessages(Array.from(byId.values()).sort(compareTelegramMessages));
                 setHasMoreMessages(Boolean(res.hasMore));
                 setOldestMessageId(res.oldestMessageId ?? null);
                 break;
@@ -2306,7 +2430,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setIsSelectionMode(false);
       setSelectedMessageIds([]);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      showDashboardToast({ tone: 'error', title: 'Falha ao encaminhar mensagens', message: caughtError instanceof Error ? caughtError.message : String(caughtError) });
     } finally {
       setIsSending(false);
     }
@@ -2394,6 +2518,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           getChatKind={getChatKind}
           onTelegramLoginRequest={onTelegramLoginRequest}
           onLoadMoreChats={loadMoreChats}
+          onAllChatsContextMenu={(x, y) => {
+            setChatContextMenu(null);
+            setAllChatsContextMenu({ x, y });
+          }}
           readChatHistory={readChatHistory}
           setActiveFolder={setActiveFolder}
           setChatContextMenu={setChatContextMenu}
@@ -2407,6 +2535,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         {/* ── Convo ────────────────────────────────────────────────── */}
         <div 
           className={`convo ${isDraggingOver ? 'dragging-over' : ''} ${isSelectionMode ? 'is-selection-mode' : ''}`}
+          style={{
+            '--chat-media-width': `${chatMediaSize}px`,
+            '--chat-album-width': `${Math.round(chatMediaSize * 1.94)}px`,
+          } as React.CSSProperties}
           onDragOver={(e) => {
             e.preventDefault();
             if (selectedChat?.canSendMedia === false) return;
@@ -2545,6 +2677,33 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                           <TablerCheck size={18} stroke={2} />
                           <span>Selecionar mídias</span>
                         </div>
+                        <div className="dropdown-divider" />
+                        <div className="chat-media-size-menu">
+                          <div className="chat-media-size-label">
+                            <IconPhoto size={17} stroke={1.8} aria-hidden="true" />
+                            <span>Tamanho das mídias</span>
+                            <output>{chatMediaSize}px</output>
+                          </div>
+                          <div className="chat-media-size-slider">
+                            <span aria-hidden="true">A</span>
+                            <input
+                              type="range"
+                              min={CHAT_MEDIA_SIZE_MIN}
+                              max={CHAT_MEDIA_SIZE_MAX}
+                              step={10}
+                              value={chatMediaSize}
+                              aria-label="Tamanho das mídias no chat"
+                              aria-valuetext={`${chatMediaSize} pixels`}
+                              style={{ '--slider-progress': `${((chatMediaSize - CHAT_MEDIA_SIZE_MIN) / (CHAT_MEDIA_SIZE_MAX - CHAT_MEDIA_SIZE_MIN)) * 100}%` } as React.CSSProperties}
+                              onChange={event => {
+                                const value = Number(event.currentTarget.value);
+                                setChatMediaSize(value);
+                                appStorage.set(CHAT_MEDIA_SIZE_KEY, String(value));
+                              }}
+                            />
+                            <span className="large" aria-hidden="true">A</span>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -2555,7 +2714,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 	                <div className="chat-message-search-bar">
 	                  <div className="chat-message-search-input">
 	                    <IconSearch />
-	                    <input
+	                    <TextField
+                        appearance="inline"
 	                      autoFocus
 	                      type="text"
 	                      value={chatMessageSearch}
@@ -2671,7 +2831,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       <button type="button" className="icon-btn" onClick={() => { setIsCreatingTopic(false); setNewTopicTitle(''); }} aria-label="Fechar criação de tópico"><IconX size={18} stroke={2} /></button>
                     </div>
                     <div className="new-topic-body">
-                      <input
+                      <TextField
                         type="text"
                         className="new-topic-input"
                         value={newTopicTitle}
@@ -2712,7 +2872,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                   ) : (
                     <>
                       <div className="topic-search-row">
-                        <input type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} />
+                        <TextField type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} />
                       </div>
                       <div className="topic-item" onClick={handleViewAllTopics}>
                         <div className="topic-item-avatar topic-item-avatar-all">
@@ -2877,20 +3037,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               )}
             </>
           ) : (
-            <div className="convo-empty fade-in">
-              <div className="convo-empty-icon">✈</div>
-              <h3>{skipLogin ? 'Conecte seu Telegram para começar' : 'Nenhum chat selecionado'}</h3>
-              <p>
-                {skipLogin
+            <EmptyState
+              className="convo-empty fade-in"
+              icon={skipLogin ? <IconBrandTelegram size={32} stroke={1.5} /> : <IconMessageCircle size={32} stroke={1.5} />}
+              title={skipLogin ? 'Conecte seu Telegram para começar' : 'Nenhum chat selecionado'}
+              description={skipLogin
                   ? 'Carregue suas conversas e mídias ou use a área de Downloads na barra lateral para importar um link.'
                   : 'Escolha uma conversa na lista para ver o histórico e baixar mídias.'}
-              </p>
-              {skipLogin && onTelegramLoginRequest && (
+              action={skipLogin && onTelegramLoginRequest && (
                 <button type="button" className="convo-empty-action" onClick={onTelegramLoginRequest}>
                   Conectar Telegram
                 </button>
               )}
-            </div>
+            />
           )}
         </div>
 
@@ -2951,7 +3110,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               ))}
             </div>
             <div className="drop-media-caption">
-              <textarea
+              <TextArea
                 value={dropCaption}
                 onChange={event => setDropCaption(event.target.value)}
                 placeholder="Adicionar uma legenda..."
@@ -2976,6 +3135,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       )}
 
       {/* Context menu portal */}
+      {allChatsContextMenu && (
+        <ContextMenu
+          x={allChatsContextMenu.x}
+          y={allChatsContextMenu.y}
+          palette={palette}
+          density={density}
+          items={[{
+            label: 'Marcar todos como lidos',
+            icon: <IconCheck />,
+            onClick: async () => {
+              try {
+                await telegramService.readAllChats();
+                setChats(prev => prev.map(chat => ({ ...chat, unreadCount: 0 })));
+              } catch (caughtError) {
+                setError(`Não foi possível marcar todos como lidos: ${caughtError instanceof Error ? caughtError.message : String(caughtError)}`);
+              }
+            },
+          }]}
+          onClose={() => setAllChatsContextMenu(null)}
+        />
+      )}
       {chatContextMenu && (
         <ContextMenu
           x={chatContextMenu.x}
@@ -2997,9 +3177,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               icon: <IconCheck />,
               onClick: async () => {
                 const chatId = chatContextMenu.chat.id;
-                await telegramService.readHistory(chatId);
-                setChats(prev => prev.map(c => c.id === chatId ? { ...c, unreadCount: 0 } : c));
-                setChatContextMenu(null);
+                try {
+                  await telegramService.readHistory(chatId);
+                  setChats(prev => prev.map(c => c.id === chatId ? { ...c, unreadCount: 0 } : c));
+                } catch (caughtError) {
+                  setError(`Não foi possível marcar a conversa como lida: ${caughtError instanceof Error ? caughtError.message : String(caughtError)}`);
+                }
               },
               disabled: (chatContextMenu.chat.unreadCount ?? 0) === 0
             },
@@ -3273,12 +3456,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             <div className={`search-media-modal-body ${isSearchMediaSelectionMode ? 'is-selection-mode' : ''}`}>
               {searchMediaLoading ? (
                 <div className="search-media-loading-state">
-                  <div className="premium-spinner"></div>
+                  <LoadingIndicator size="xl" />
                   <span>Procurando fotos e vídeos...</span>
                 </div>
               ) : searchMediaResults.length === 0 ? (
                 <div className="search-media-empty-state" role="status">
-                  <div className="search-media-empty-icon" aria-hidden="true">⌁</div>
+                  <div className="search-media-empty-icon" aria-hidden="true"><IconPhoto size={22} stroke={1.5} /></div>
                   <strong>Nenhuma mídia encontrada</strong>
                   <span>Não foram encontradas fotos ou vídeos enviados por este usuário.</span>
                 </div>
@@ -3419,7 +3602,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             <div className="save-multiple-progress-header">
               <div className="premium-spinner-container" style={{ position: 'relative', width: 64, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 10px' }}>
                 <img src={appIcon} width="36" height="36" alt="Telegram Icon" style={{ borderRadius: '8px', zIndex: 2 }} />
-                <div className="premium-spinner" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: '3px solid var(--bg-3)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 1.2s linear infinite', zIndex: 1, boxShadow: '0 0 16px var(--accent-glow)' }}></div>
+                <LoadingIndicator size="xl" style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
               </div>
               <h3>Baixando Mídias</h3>
               <p className="subtitle">Salvando arquivos no seu dispositivo...</p>

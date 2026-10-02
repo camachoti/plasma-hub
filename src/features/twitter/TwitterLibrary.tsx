@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { IconAlertCircle, IconBrandX, IconDownload, IconLink, IconLoader2, IconMessageCircle, IconSearch } from "../../design-system/icons";
+import { IconAlertCircle, IconBrandX, IconDownload, IconLink, IconMessageCircle, IconRefresh, IconSearch, IconX } from "../../design-system/icons";
+import { LoadingIndicator } from "../../design-system";
 import { invokeCommand as invoke, listenEvent as listen } from '../../shared/platform/tauri';
 import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -7,7 +8,9 @@ import { downloadService, type DownloadItem } from '../downloader/DownloadServic
 import type { MediaInfo } from '../downloader/types';
 import { createTwitterProfileChat } from '../telegram/TwitterFakeChatStore';
 import { getStoredTwitterCookies, loadStoredTwitterCookies, onTwitterSettingsChanged } from './TwitterSettingsStore';
-import { Select } from '../../design-system';
+import { Select, TextField } from '../../design-system';
+import { EmptyState } from '../../design-system/EmptyState';
+import { DownloadArtwork } from '../downloader/DownloadArtwork';
 import '../../styles/TwitterLibrary.css';
 
 interface TwitterProfileInfo {
@@ -49,6 +52,15 @@ function toTwitterProfileUrl(username: string): string {
   return `https://x.com/${username}`;
 }
 
+function getAnalysisErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error instanceof Error && error.message) return error.message;
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return fallback;
+}
+
 export function TwitterLibrary() {
   const [url, setUrl] = useState('');
   const [cookies, setCookies] = useState(getStoredTwitterCookies);
@@ -83,10 +95,10 @@ export function TwitterLibrary() {
     setMedia(null);
     setProfile(null);
     setSelectedFormat('');
+    const profileUsername = getTwitterProfileUsername(cleanUrl);
 
     try {
       const currentCookies = await loadStoredTwitterCookies();
-      const profileUsername = getTwitterProfileUsername(cleanUrl);
       if (profileUsername) {
         const info = await invoke<TwitterProfileInfo>('analyze_twitter_profile_native', {
           url: toTwitterProfileUrl(profileUsername),
@@ -105,7 +117,9 @@ export function TwitterLibrary() {
       const firstPlayable = info.formats.video.find(format => format.url);
       if (firstPlayable) setSelectedFormat(firstPlayable.id);
     } catch (err: any) {
-      setError(err?.message || 'Nao foi possivel analisar o tweet.');
+      setError(getAnalysisErrorMessage(err, profileUsername
+        ? 'Não foi possível analisar esse perfil do Twitter/X.'
+        : 'Não foi possível analisar esse tweet.'));
     } finally {
       setAnalyzing(false);
     }
@@ -133,7 +147,7 @@ export function TwitterLibrary() {
     }
 
     const downloadId = `twitter_profile_${profile.username}_${Date.now()}`;
-    const fileName = `plasma_twitter_${profile.username}`;
+    const fileName = `@${profile.username}`;
     setDownloading(true);
     setError(null);
     downloadService.addDownload({
@@ -240,7 +254,8 @@ export function TwitterLibrary() {
             <div className="twitter-url-row">
               <div className="twitter-input-row">
                 <IconLink size={18} stroke={2} />
-                <input
+                <TextField
+                  appearance="inline"
                   id="twitter-url"
                   value={url}
                   onChange={event => setUrl(event.target.value)}
@@ -248,8 +263,8 @@ export function TwitterLibrary() {
                   placeholder="https://x.com/usuario/status/123456789 ou @usuario"
                 />
               </div>
-              <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()}>
-                {analyzing ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconSearch size={18} stroke={2} />}
+              <button className="twitter-primary-btn" onClick={handleAnalyze} disabled={analyzing || !url.trim()} aria-busy={analyzing}>
+                {analyzing ? <LoadingIndicator size="sm" /> : <IconSearch size={18} stroke={2} />}
                 <span>{analyzing ? 'Analisando' : 'Analisar'}</span>
               </button>
             </div>
@@ -272,7 +287,7 @@ export function TwitterLibrary() {
                 <div className="twitter-format-row">
                   <Select value={selectedFormat} onChange={setSelectedFormat} ariaLabel="Formato do vídeo" options={media.formats.video.map(format => ({ value: format.id, label: `${format.label} ${format.size !== '—' ? `(${format.size})` : ''}`, disabled: !format.url }))} />
                   <button className="twitter-primary-btn" onClick={handleDownload} disabled={!canDownload || downloading}>
-                    {downloading ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconDownload size={18} stroke={2} />}
+                    {downloading ? <LoadingIndicator size="sm" /> : <IconDownload size={18} stroke={2} />}
                     <span>{downloading ? 'Baixando' : 'Baixar'}</span>
                   </button>
                 </div>
@@ -298,11 +313,11 @@ export function TwitterLibrary() {
                 </div>
                 <div className="twitter-format-row">
                   <button className="twitter-primary-btn" onClick={handleProfileDownload} disabled={!canDownloadProfile || downloading}>
-                    {downloading ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconDownload size={18} stroke={2} />}
+                    {downloading ? <LoadingIndicator size="sm" /> : <IconDownload size={18} stroke={2} />}
                     <span>{downloading ? 'Baixando' : 'Baixar mídias'}</span>
                   </button>
                   <button className="twitter-secondary-btn" onClick={handleCreateProfileChat} disabled={!canDownloadProfile || creatingChat}>
-                    {creatingChat ? <IconLoader2 className="spin" size={18} stroke={2} /> : <IconMessageCircle size={18} stroke={2} />}
+                    {creatingChat ? <LoadingIndicator size="sm" /> : <IconMessageCircle size={18} stroke={2} />}
                     <span>{creatingChat ? 'Criando' : 'Criar chat'}</span>
                   </button>
                 </div>
@@ -314,17 +329,47 @@ export function TwitterLibrary() {
             <div className="twitter-activity-header">
               <h3>
                 Downloads
-                {runningCount > 0 && <span className="twitter-running-badge">{runningCount} RUNNING</span>}
+                {runningCount > 0 && <span className="twitter-running-badge">{runningCount} em andamento</span>}
               </h3>
             </div>
             <div className="twitter-feed">
               {downloads.length === 0 ? (
-                <div className="twitter-feed-empty">Nenhum download do Twitter/X nesta sessão.</div>
+                <EmptyState
+                  className="twitter-feed-empty"
+                  icon={<IconBrandX size={30} stroke={1.5} />}
+                  title="Nenhum download nesta sessão"
+                  description="Analise um link ou perfil acima para baixar suas mídias do Twitter/X."
+                />
               ) : (
                 downloads.map(item => (
-                  <div className={`twitter-feed-item ${item.status === 'failed' ? 'error' : item.status === 'completed' ? 'success' : 'info'}`} key={item.id}>
-                    <span>{Math.round(item.progress)}%</span>
-                    <p>{item.fileName} · {item.status}{item.error ? ` · ${item.error}` : ''}</p>
+                  <div className={`twitter-feed-item ${item.status}`} key={item.id}>
+                    <DownloadArtwork item={item} />
+                    <div className="twitter-feed-details">
+                      <div className="twitter-feed-name-row">
+                        <h4 title={item.fileName}>{item.fileName}</h4>
+                        <span className={`twitter-feed-status ${item.status}`}>
+                          {item.status === 'downloading' ? `${Math.round(item.progress)}%` :
+                            item.status === 'completed' ? 'Concluído' :
+                              item.status === 'canceled' ? 'Cancelado' : 'Erro'}
+                        </span>
+                      </div>
+                      {item.status === 'downloading' && (
+                        <div className="twitter-feed-progress" role="progressbar" aria-label={`Progresso de ${item.fileName}`} aria-valuenow={Math.round(item.progress)} aria-valuemin={0} aria-valuemax={100}>
+                          <div style={{ width: `${Math.max(0, Math.min(100, item.progress))}%` }} />
+                        </div>
+                      )}
+                      <p className="twitter-feed-meta">Twitter / X{item.sourceLabel ? ` · ${item.sourceLabel}` : ''}{item.error ? ` · ${item.error}` : ''}</p>
+                    </div>
+                    {item.status === 'downloading' && item.canCancel && (
+                      <button type="button" className="twitter-feed-action" aria-label={`Cancelar ${item.fileName}`} title="Cancelar download" onClick={() => void downloadService.cancelDownload(item.id)}>
+                        <IconX size={17} stroke={2} />
+                      </button>
+                    )}
+                    {(item.status === 'failed' || item.status === 'canceled') && item.canRetry && (
+                      <button type="button" className="twitter-feed-action" aria-label={`Tentar novamente ${item.fileName}`} title="Tentar novamente" onClick={() => void downloadService.retryDownload(item.id)}>
+                        <IconRefresh size={17} stroke={2} />
+                      </button>
+                    )}
                   </div>
                 ))
               )}

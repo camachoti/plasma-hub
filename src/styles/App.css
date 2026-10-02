@@ -149,8 +149,9 @@
 
 .app-toast {
   position: absolute;
+  top: 18px;
   right: 18px;
-  bottom: 18px;
+  bottom: auto;
   z-index: 140;
   display: flex;
   flex-direction: column;
@@ -182,6 +183,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.app-toast small {
+  max-width: 100%;
+  color: var(--text-3);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .app-container[data-runtime="android"] .main-content {
   padding-top: 44px;
@@ -203,11 +212,11 @@
 @media (min-width: 641px) {
   .app-tab-panel > .downloads-container,
   .app-tab-panel > .twitter-library {
-    width: auto;
-    height: calc(100% - 20px);
-    margin: 10px;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-lg);
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
   }
 }
 
@@ -245,6 +254,11 @@
   background: color-mix(in oklch, var(--bg-1) 96%, transparent);
 }
 
+.command-palette:focus-within {
+  border-color: var(--field-focus-border);
+  box-shadow: var(--field-focus-ring);
+}
+
 .command-palette-search {
   display: flex;
   align-items: center;
@@ -264,6 +278,8 @@
   color: var(--text-0);
   font-size: 15px;
 }
+
+.command-palette-search input:focus-visible { box-shadow: none; }
 
 .command-palette kbd {
   padding: 2px 6px;
@@ -383,7 +399,7 @@
 }
 .login-phone-row .ds-select .custom-select-trigger {
   min-height: 42px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
 }
 
 .login-form input,
@@ -407,8 +423,10 @@
 .login-form select:focus,
 .login-input:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
+  border-color: var(--field-focus-border);
+  background: var(--bg-1);
+  box-shadow: var(--field-focus-ring);
+  caret-color: var(--accent);
 }
 
 .login-code-input {
@@ -610,23 +628,10 @@
 .slide-up { animation: slideUp 0.5s ease-out forwards; }
 .shake { animation: shake 0.4s ease-in-out; }
 
-/* Spinner */
-.spinner {
-  width: 20px;
-  height: 20px;
-  border: 3px solid rgba(255, 255, 255, 0.3);
-  border-radius: 50%;
-  border-top-color: #fff;
-  animation: spin 1s ease-in-out infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 /* Sidebar */
 .sidebar {
   width: var(--rail-w);
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -643,7 +648,7 @@
   padding: 0;
   border-radius: var(--radius);
   border: 1px solid transparent;
-  background: var(--bg-2);
+  background: transparent;
   color: var(--text-2);
   cursor: pointer;
   transition: background .16s ease, color .16s ease, border-radius .16s ease, box-shadow .16s ease;
@@ -662,10 +667,10 @@
 }
 
 .sidebar-item.active {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--accent-soft);
   color: var(--accent);
-  box-shadow: 0 0 12px color-mix(in oklch, var(--accent-glow) 55%, transparent);
+  box-shadow: none;
 }
 
 @media (max-width: 640px) {

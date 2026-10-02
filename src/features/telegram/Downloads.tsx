@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { IconAlertCircle, IconBrandInstagram, IconBrandReddit, IconBrandX, IconBrandYoutube, IconChevronDown, IconCircleCheck, IconCircleX, IconCloudDownload, IconDatabase, IconFileDownload, IconFolderOpen, IconLink, IconLoader2, IconRefresh, IconStack2, IconTrash, IconX } from "../../design-system/icons";
+import { IconAlertCircle, IconBrandInstagram, IconBrandReddit, IconBrandTelegram, IconBrandX, IconBrandYoutube, IconChevronDown, IconCircleCheck, IconCircleMinus, IconCloudDownload, IconDatabase, IconFileDownload, IconFolderOpen, IconLink, IconMessageCircle, IconRefresh, IconTrash, IconUsers, IconX } from "../../design-system/icons";
+import { LoadingIndicator } from "../../design-system";
 import '../../styles/Downloads.css';
 import { downloadService, DownloadItem } from '../downloader/DownloadService';
 import { analyzeUrl, downloadMedia } from '../downloader/downloader';
@@ -9,6 +10,9 @@ import { runtimeCapabilities } from '../../shared/platform/runtime';
 import { SHARED_DOWNLOAD_URL_EVENT, takePendingSharedDownloadUrl } from '../../shared/platform/sharedDownloadIntent';
 import { debugWarn } from '../../shared/debug/logger';
 import { Select } from '../../design-system';
+import { EmptyState } from '../../design-system/EmptyState';
+import { TextField } from '../../design-system';
+import { DownloadArtwork } from '../downloader/DownloadArtwork';
 
 function canDownloadFormat(media: MediaInfo, format?: MediaInfo['formats']['video'][number]) {
   if (!format || format.id === 'na' || format.id === 'web-limit') return false;
@@ -165,15 +169,6 @@ export const Downloads: React.FC = () => {
     return `${Number(value.toFixed(value >= 10 || exponent === 0 ? 0 : 1))} ${units[exponent]}`;
   };
 
-  const downloadMetaItems = (item: DownloadItem) => [
-    platformLabel(item.platform),
-    formatBytes(item.fileSize),
-    item.sourceLabel ? `Origem: ${item.sourceLabel}` : null,
-    item.chatTitle ? `${item.chatKind === 'grupo' ? 'Grupo' : item.chatKind === 'canal' ? 'Canal' : item.chatKind === 'twitter' ? 'Twitter' : 'Chat'}: ${item.chatTitle}` : null,
-    item.topicTitle ? `Tópico: ${item.topicTitle}` : null,
-    item.senderName ? `Usuário: ${item.senderName}` : null,
-  ].filter(Boolean);
-
   const filteredDownloads = useMemo(() => downloads.filter(item => {
     if (downloadFilter === 'active') return item.status === 'downloading';
     if (downloadFilter === 'completed') return item.status === 'completed';
@@ -209,16 +204,21 @@ export const Downloads: React.FC = () => {
     const visibleTotal = items.length || 1;
     const reportedTotal = Math.max(0, ...items.map(item => item.batchTotal || 0));
     const total = Math.max(visibleTotal, reportedTotal || 0) || 1;
+    const hasRetryHistory = items.some(item => item.retryAttempted);
     const visibleCompleted = items.filter(item => item.status === 'completed').length;
     const visibleFailed = items.filter(item => item.status === 'failed').length;
     const visibleCanceled = items.filter(item => item.status === 'canceled').length;
-    const completed = Math.max(visibleCompleted, ...items.map(item => item.batchCompleted || 0));
+    const completed = hasRetryHistory ? visibleCompleted : Math.max(visibleCompleted, ...items.map(item => item.batchCompleted || 0));
     const skipped = Math.max(0, ...items.map(item => item.batchSkipped || 0));
-    const failed = Math.max(visibleFailed, ...items.map(item => item.batchFailed || 0));
+    const failed = hasRetryHistory ? visibleFailed : Math.max(visibleFailed, ...items.map(item => item.batchFailed || 0));
     const canceled = visibleCanceled;
     const running = items.filter(item => item.status === 'downloading').length;
     const reportedDownloaded = Math.max(0, ...items.map(item => item.batchDownloaded || 0));
-    const progress = reportedTotal > 0
+    const retryingItems = items.filter(item => item.retrying && item.status === 'downloading');
+    const retryProgress = completed + skipped + retryingItems.reduce((sum, item) => sum + Math.max(0, Math.min(100, item.progress || 0)) / 100, 0);
+    const progress = hasRetryHistory
+      ? Math.round((Math.min(total, retryProgress) / total) * 100)
+      : reportedTotal > 0
       ? Math.round((Math.min(total, reportedDownloaded) / total) * 100)
       : Math.round(items.reduce((sum, item) => {
         if (item.status === 'completed') return sum + 100;
@@ -234,8 +234,7 @@ export const Downloads: React.FC = () => {
         : canceled > 0
           ? 'canceled'
         : 'completed';
-    const thumbnail = items.find(item => item.thumbnailUrl)?.thumbnailUrl;
-    return { total, completed, skipped, failed, canceled, running, status, progress, thumbnail };
+    return { total, completed, skipped, failed, canceled, running, status, progress };
   };
 
   const toggleGroup = (id: string) => {
@@ -273,33 +272,14 @@ export const Downloads: React.FC = () => {
       className={`download-item ${compact ? 'compact' : ''} ${item.status === 'completed' ? 'clickable' : ''}`}
       onClick={item.status === 'completed' ? () => handleOpenFolder(item) : undefined}
     >
-      <div className="download-icon-wrapper">
-        {item.thumbnailUrl ? (
-          <div className="download-thumbnail-container">
-            <img src={item.thumbnailUrl} alt="Thumbnail" className="download-thumbnail-img" />
-            <div className={`download-status-overlay ${item.status}`}>
-              {item.status === 'downloading' && <IconFileDownload size={14} stroke={2} />}
-              {item.status === 'completed' && <IconCircleCheck size={14} stroke={2} />}
-              {item.status === 'failed' && <IconAlertCircle size={14} stroke={2} />}
-              {item.status === 'canceled' && <IconCircleX size={14} stroke={2} />}
-            </div>
-          </div>
-        ) : (
-          <div className={`download-icon ${item.status}`}>
-            {item.status === 'downloading' && <IconFileDownload size={20} stroke={2} />}
-            {item.status === 'completed' && <IconCircleCheck size={20} stroke={2} />}
-            {item.status === 'failed' && <IconAlertCircle size={20} stroke={2} />}
-            {item.status === 'canceled' && <IconCircleX size={20} stroke={2} />}
-          </div>
-        )}
-      </div>
+      <DownloadArtwork item={item} />
 
       <div className="download-details">
         <div className="download-name-row">
           <h3 className="download-name" title={item.fileName}>{item.fileName}</h3>
           <span className={`download-percentage status-${item.status}`}>
             {item.status === 'downloading' ? `${Math.round(item.progress)}%` :
-             item.status === 'completed' ? '100%' :
+             item.status === 'completed' ? 'Concluído' :
              item.status === 'canceled' ? 'Cancelado' : 'Erro'}
           </span>
         </div>
@@ -307,18 +287,20 @@ export const Downloads: React.FC = () => {
         <div className={`progress-bar-container ${item.status}`}>
           <div
             className="progress-bar-fill"
-            style={{ width: `${item.status === 'completed' || item.status === 'failed' || item.status === 'canceled' ? 100 : item.progress}%` }}
+            style={{ width: `${item.status === 'completed' ? 100 : item.progress}%` }}
           />
         </div>
 
-        <div className="download-stats">
-          {downloadMetaItems(item).map(meta => (
-            <span key={meta} className="stat-item">{meta}</span>
-          ))}
-          {item.status === 'completed' && <span className="stat-item success-text">Finalizado</span>}
-          {item.status === 'canceled' && <span className="stat-item muted-text">Cancelado</span>}
-          {item.error && <span className="stat-item error-text">{item.error}</span>}
+        <div className="download-item-meta">
+          {item.platform && <span className="download-item-meta-part">{item.platform === 'telegram' ? <IconBrandTelegram size={17} stroke={1.8} /> : item.platform === 'twitter' ? <IconBrandX size={17} stroke={1.8} /> : item.platform === 'youtube' ? <IconBrandYoutube size={17} stroke={1.8} /> : item.platform === 'instagram' ? <IconBrandInstagram size={17} stroke={1.8} /> : item.platform === 'reddit' ? <IconBrandReddit size={17} stroke={1.8} /> : <IconCloudDownload size={17} stroke={1.8} />}<span>{platformLabel(item.platform)}</span></span>}
+          {formatBytes(item.fileSize) && <span className="download-item-meta-part"><IconDatabase size={17} stroke={1.8} /><span>{formatBytes(item.fileSize)}</span></span>}
+          {compact && !formatBytes(item.fileSize) && <span className="download-item-meta-part is-unavailable" title="Este download não tem tamanho registrado no histórico"><IconDatabase size={17} stroke={1.8} /><span>Tamanho não registrado</span></span>}
+          {item.chatTitle && <span className="download-item-meta-part"><IconUsers size={17} stroke={1.8} /><span>{item.chatKind === 'grupo' ? 'Grupo' : item.chatKind === 'canal' ? 'Canal' : item.chatKind === 'twitter' ? 'Twitter' : 'Chat'}: {item.chatTitle}</span></span>}
+          {item.topicTitle && <span className="download-item-meta-part"><IconMessageCircle size={17} stroke={1.8} /><span>Tópico: {item.topicTitle}</span></span>}
+          {item.sourceLabel && !item.chatTitle && <span className="download-item-meta-part"><IconLink size={17} stroke={1.8} /><span>Origem: {item.sourceLabel}</span></span>}
+          {item.senderName && <span className="download-item-meta-part"><IconUsers size={17} stroke={1.8} /><span>Usuário: {item.senderName}</span></span>}
         </div>
+        {item.error && <div className="download-item-error" title={item.error}>{item.error}</div>}
       </div>
       <div className="download-item-actions">
         {item.status === 'downloading' && item.canCancel && (
@@ -338,15 +320,16 @@ export const Downloads: React.FC = () => {
         {(item.status === 'failed' || item.status === 'canceled') && item.canRetry && (
           <button
             type="button"
-            className="download-action-icon"
-            title="Tentar novamente"
-            aria-label={`Tentar novamente ${item.fileName}`}
+            className="download-action-button"
+            title={item.error?.includes('interrompido') ? 'Retomar download interrompido' : 'Tentar novamente'}
+            aria-label={`${item.error?.includes('interrompido') ? 'Retomar' : 'Tentar novamente'} ${item.fileName}`}
             onClick={event => {
               event.stopPropagation();
               void handleRetryDownload(item);
             }}
           >
-            <IconRefresh size={16} stroke={2} />
+            <IconRefresh size={15} stroke={2} />
+            {item.error?.includes('interrompido') ? 'Retomar' : 'Tentar novamente'}
           </button>
         )}
         {item.status !== 'downloading' && (
@@ -415,7 +398,7 @@ export const Downloads: React.FC = () => {
           </div>
 
           <div className="downloader-input-group">
-            <input
+            <TextField
               type="text"
               placeholder="Cole aqui um link do YouTube, Reddit, X/Twitter ou Instagram..."
               aria-label="Link da mídia para analisar"
@@ -429,7 +412,7 @@ export const Downloads: React.FC = () => {
               disabled={analyzing || !url.trim()}
               aria-busy={analyzing}
             >
-                {analyzing ? <><IconLoader2 className="spin" size={18} stroke={2} /> Analisando…</> : (
+                {analyzing ? <><LoadingIndicator size="sm" /> Analisando…</> : (
                 <>Analisar <IconCloudDownload size={18} stroke={2} /></>
               )}
             </button>
@@ -489,11 +472,12 @@ export const Downloads: React.FC = () => {
         </div>
 
         {filteredDownloads.length === 0 ? (
-          <div className="empty-state">
-            <IconDatabase size={52} stroke={2} />
-            <p>{downloads.length ? 'Nenhum item neste filtro.' : 'Nenhum download registrado.'}</p>
-            {!downloads.length && <span>Cole um link acima para analisar e iniciar seu primeiro download.</span>}
-          </div>
+          <EmptyState
+            className="downloads-empty"
+            icon={<IconCloudDownload size={32} stroke={1.5} />}
+            title={downloads.length ? 'Nenhum item neste filtro' : 'Seus downloads começam aqui'}
+            description={downloads.length ? 'Escolha outro filtro para consultar os demais downloads.' : 'Cole um link acima para analisar e iniciar seu primeiro download.'}
+          />
         ) : (
           <div className="downloads-list">
             {groupedDownloads.map(entry => {
@@ -502,81 +486,61 @@ export const Downloads: React.FC = () => {
               const summary = groupSummary(entry.items);
               const first = entry.items[0];
               const expanded = expandedGroups.has(entry.id);
-              const meta = downloadMetaItems(first);
+              const groupSize = formatBytes(entry.items.reduce((sum, item) => sum + (item.fileSize || 0), 0));
+              const groupPlatform = platformLabel(first.platform);
+              const chatKind = first.chatKind === 'grupo' ? 'Grupo' : first.chatKind === 'canal' ? 'Canal' : first.chatKind === 'twitter' ? 'Twitter' : 'Chat';
               const groupCanCancel = entry.items.some(item => item.status === 'downloading' && item.canCancel);
               const groupCanRetry = entry.items.some(item => (item.status === 'failed' || item.status === 'canceled') && item.canRetry);
+              const groupHasRetryableIssue = summary.failed > 0 || summary.canceled > 0;
+              const artworkItem = entry.items.find(item => item.thumbnailUrl || (item.status === 'completed' && /\.(?:avif|bmp|gif|jpe?g|png|webp|avi|m4v|mkv|mov|mp4|mpeg|mpg)$/i.test(item.filePath || ''))) || first;
 
               return (
                 <div key={entry.id} className={`download-group ${summary.status}`}>
-                  <div className="download-group-header-row">
-                    <button type="button" className="download-group-header" onClick={() => toggleGroup(entry.id)}>
-                      <div className="download-icon-wrapper">
-                        {summary.thumbnail ? (
-                          <div className="download-thumbnail-container">
-                            <img src={summary.thumbnail} alt="Thumbnail" className="download-thumbnail-img" />
-                            <div className={`download-status-overlay ${summary.status}`}>
-                              {summary.status === 'downloading' && <IconFileDownload size={14} stroke={2} />}
-                              {summary.status === 'completed' && <IconCircleCheck size={14} stroke={2} />}
-                              {summary.status === 'failed' && <IconAlertCircle size={14} stroke={2} />}
-                              {summary.status === 'canceled' && <IconCircleX size={14} stroke={2} />}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className={`download-icon ${summary.status}`}>
-                            <IconStack2 size={20} stroke={2} />
-                          </div>
-                        )}
+                  <div className="download-group-overview">
+                    <DownloadArtwork key={artworkItem.id} item={artworkItem} status={summary.status} group />
+                    <div className="download-group-body">
+                      <button
+                        type="button"
+                        className="download-group-title-button"
+                        aria-expanded={expanded}
+                        onClick={() => toggleGroup(entry.id)}
+                      >
+                        <span className="download-name" title={first.batchTitle || first.fileName}>{first.batchTitle || 'Download em lote'}</span>
+                        <span className={`download-percentage status-${summary.status}`}>
+                          {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
+                        </span>
+                        <IconChevronDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} stroke={2} />
+                      </button>
+
+                      <div className={`progress-bar-container ${summary.status}`}>
+                        <div className="progress-bar-fill" style={{ width: `${summary.progress}%` }} />
                       </div>
 
-                      <div className="download-details">
-                        <div className="download-name-row">
-                          <h3 className="download-name" title={first.batchTitle || first.fileName}>
-                            {first.batchTitle || 'Download em lote'}
-                          </h3>
-                          <span className={`download-percentage status-${summary.status}`}>
-                            {summary.status === 'failed' ? 'Erro' : summary.status === 'canceled' ? 'Cancelado' : `${summary.progress}%`}
-                          </span>
-                        </div>
-
-                        <div className={`progress-bar-container ${summary.status}`}>
-                          <div className="progress-bar-fill" style={{ width: `${summary.progress}%` }} />
-                        </div>
-
-                        <div className="download-stats">
-                          <span className="stat-item">{summary.total} arquivos</span>
-                          <span className="stat-item">{summary.completed} finalizados</span>
-                          {summary.skipped > 0 && <span className="stat-item">{summary.skipped} ignorados</span>}
-                          {summary.running > 0 && <span className="stat-item">{summary.running} em andamento</span>}
-                          {summary.failed > 0 && <span className="stat-item error-text">{summary.failed} falharam</span>}
-                          {summary.canceled > 0 && <span className="stat-item muted-text">{summary.canceled} cancelados</span>}
-                          {meta.map(item => <span key={item} className="stat-item">{item}</span>)}
-                        </div>
+                      <div className="download-summary-metrics">
+                        <span className="download-summary-metric"><IconFileDownload size={20} stroke={1.8} /><strong>{summary.total}</strong><span>arquivos</span></span>
+                        <span className="download-summary-metric is-complete"><IconCircleCheck size={21} stroke={1.9} /><strong>{summary.completed}</strong><span>finalizados</span></span>
+                        <span className="download-summary-metric"><IconCircleMinus size={21} stroke={1.9} /><strong>{summary.skipped}</strong><span>ignorados</span></span>
+                        <span className={`download-summary-metric ${summary.failed ? 'has-error' : ''}`}><IconAlertCircle size={21} stroke={1.9} /><strong>{summary.failed}</strong><span>falharam</span></span>
+                        {summary.running > 0 && <span className="download-summary-metric"><IconCloudDownload size={20} stroke={1.8} /><strong>{summary.running}</strong><span>em andamento</span></span>}
+                        {summary.canceled > 0 && <span className="download-summary-metric is-muted"><IconCircleMinus size={21} stroke={1.9} /><strong>{summary.canceled}</strong><span>cancelados</span></span>}
+                        {groupPlatform && <span className="download-summary-metric is-source">{first.platform === 'telegram' ? <IconBrandTelegram size={20} stroke={1.8} /> : first.platform === 'twitter' ? <IconBrandX size={20} stroke={1.8} /> : first.platform === 'youtube' ? <IconBrandYoutube size={20} stroke={1.8} /> : first.platform === 'instagram' ? <IconBrandInstagram size={20} stroke={1.8} /> : first.platform === 'reddit' ? <IconBrandReddit size={20} stroke={1.8} /> : <IconCloudDownload size={20} stroke={1.8} />}<span>{groupPlatform}</span></span>}
+                        {groupSize && <span className="download-summary-metric is-source"><IconDatabase size={20} stroke={1.8} /><span>{groupSize}</span></span>}
                       </div>
+                    </div>
+                  </div>
 
-                      <IconChevronDown className={`download-group-caret ${expanded ? 'open' : ''}`} size={18} stroke={2} />
-                    </button>
-                    {(groupCanCancel || groupCanRetry) && (
+                  <div className="download-group-bottom-row">
+                    <div className="download-group-context">
+                      {(first.chatTitle || first.sourceLabel) && <span className="download-context-chip" title={first.chatTitle || first.sourceLabel}><IconUsers size={19} stroke={1.8} /><span>{first.chatTitle ? `${chatKind}:` : 'Origem:'}</span><strong>{first.chatTitle || first.sourceLabel}</strong></span>}
+                      {first.topicTitle && <span className="download-context-chip" title={first.topicTitle}><IconMessageCircle size={19} stroke={1.8} /><span>Tópico:</span><strong>{first.topicTitle}</strong></span>}
+                    </div>
+                    {(groupCanCancel || groupHasRetryableIssue) && (
                       <div className="download-group-actions">
-                        {groupCanCancel && (
-                          <button
-                            type="button"
-                            className="download-action-icon danger"
-                            title="Cancelar itens ativos"
-                            aria-label="Cancelar itens ativos"
-                            onClick={() => void handleCancelGroup(entry.items)}
-                          >
-                            <IconX size={16} stroke={2} />
-                          </button>
-                        )}
-                        {groupCanRetry && (
-                          <button
-                            type="button"
-                            className="download-action-icon"
-                            title="Tentar novamente itens com falha"
-                            aria-label="Tentar novamente itens com falha"
-                            onClick={() => void handleRetryGroup(entry.items)}
-                          >
-                            <IconRefresh size={16} stroke={2} />
+                        {groupCanCancel && <button type="button" className="download-action-icon danger" title="Cancelar itens ativos" aria-label="Cancelar itens ativos" onClick={() => void handleCancelGroup(entry.items)}><IconX size={16} stroke={2} /></button>}
+                        {groupHasRetryableIssue && (
+                          <button type="button" className="download-action-button download-group-retry" title={groupCanRetry ? 'Retomar itens com falha' : 'Não há itens recuperáveis neste lote'} aria-label="Retomar itens com falha" disabled={!groupCanRetry} onClick={() => void handleRetryGroup(entry.items)}>
+                            <IconRefresh size={17} stroke={2} />
+                            {summary.failed > 0 ? `Retomar ${summary.failed} ${summary.failed === 1 ? 'falha' : 'falhas'}` : 'Retomar itens'}
                           </button>
                         )}
                       </div>

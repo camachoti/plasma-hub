@@ -6,6 +6,8 @@ import type { Chat } from './TelegramDashboardTypes';
 import { hashColor } from './TelegramDashboardConstants';
 import { IconLogOut, IconSearch } from './DashboardIcons';
 import { debugWarn } from '../../shared/debug/logger';
+import { IconX } from '../../design-system/icons';
+import { TextField } from '../../design-system';
 
 interface DashboardChatListProps {
   activeFolder: 'all' | 'unread';
@@ -25,6 +27,7 @@ interface DashboardChatListProps {
   getChatKind: (chat: Chat) => string;
   onTelegramLoginRequest?: () => void;
   onLoadMoreChats: () => void;
+  onAllChatsContextMenu: (x: number, y: number) => void;
   readChatHistory: (chatId: string) => Promise<unknown>;
   setActiveFolder: React.Dispatch<React.SetStateAction<'all' | 'unread'>>;
   setChatContextMenu: React.Dispatch<React.SetStateAction<{ x: number; y: number; chat: Chat } | null>>;
@@ -133,6 +136,7 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   getChatKind,
   onTelegramLoginRequest,
   onLoadMoreChats,
+  onAllChatsContextMenu,
   readChatHistory,
   setActiveFolder,
   setChatContextMenu,
@@ -141,7 +145,16 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
   setError,
   setIsSearchOpen,
   setSelectedChat,
-}) => (
+}) => {
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  React.useEffect(() => {
+    if (isSearchOpen) {
+      searchRef.current?.focus();
+      setIsSearchOpen(false);
+    }
+  }, [isSearchOpen, setIsSearchOpen]);
+
+  return (
   <div className="list">
     <div className="list-header">
       <div className="list-title">
@@ -152,32 +165,21 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
           </span>
           <h1>Conversas</h1>
         </div>
-        <div className="list-title-actions">
-          <button
-            className={`icon-btn ${isSearchOpen ? 'active' : ''}`}
-            onClick={() => {
-              setIsSearchOpen(value => !value);
-              if (isSearchOpen) setChatSearch('');
-            }}
-            title={isSearchOpen ? 'Fechar pesquisa' : 'Pesquisar chats'}
-          >
-            <IconSearch />
-          </button>
-        </div>
       </div>
-      {isSearchOpen && (
         <div className="search">
           <IconSearch />
-          <input
-            autoFocus
+          <TextField
+            appearance="inline"
+            ref={searchRef}
             type="text"
             value={chatSearch}
             onChange={event => setChatSearch(event.target.value)}
-            placeholder="Pesquisar..."
+            placeholder="Buscar conversas"
             aria-label="Pesquisar na lista de chats e grupos"
+            onKeyDown={event => { if (event.key === 'Escape') setChatSearch(''); }}
           />
+          {chatSearch && <button type="button" className="icon-btn" aria-label="Limpar pesquisa" onClick={() => { setChatSearch(''); searchRef.current?.focus(); }}><IconX size={14} /></button>}
         </div>
-      )}
     </div>
 
     <div className="folders">
@@ -187,6 +189,10 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
         tabIndex={0}
         aria-pressed={activeFolder === 'all'}
         onClick={() => setActiveFolder('all')}
+        onContextMenu={event => {
+          event.preventDefault();
+          onAllChatsContextMenu(event.clientX, event.clientY);
+        }}
         onKeyDown={event => (event.key === 'Enter' || event.key === ' ') && event.currentTarget.click()}
       >
         Todos
@@ -296,5 +302,6 @@ const DashboardChatListComponent: React.FC<DashboardChatListProps> = ({
     </div>
   </div>
 );
+};
 
 export const DashboardChatList = React.memo(DashboardChatListComponent);

@@ -1,6 +1,6 @@
 import appIcon from "../assets/plasma-hub-logo.png";
 import { runtimeCapabilities } from "../shared/platform/runtime";
-import { Select } from "../design-system";
+import { Select, TextField } from "../design-system";
 
 interface LoginScreenProps {
   palette: string;
@@ -60,7 +60,7 @@ export function LoginScreen({
             <label>País e Número de Telefone</label>
             <div className="login-phone-row">
               <Select value={countryCode} onChange={onCountryCodeChange} disabled={isLoading} className="login-input" ariaLabel="Código do país" options={[['+55','🇧🇷 +55'],['+1','🇺🇸 +1'],['+351','🇵🇹 +351'],['+44','🇬🇧 +44'],['+49','🇩🇪 +49'],['+33','🇫🇷 +33'],['+39','🇮🇹 +39'],['+34','🇪🇸 +34'],['+54','🇦🇷 +54'],['+56','🇨🇱 +56'],['+57','🇨🇴 +57'],['+52','🇲🇽 +52']].map(([value, label]) => ({ value, label }))} />
-              <input
+              <TextField
                 type="text"
                 inputMode="numeric"
                 placeholder="DDD + Num..."
@@ -93,7 +93,7 @@ export function LoginScreen({
         ) : (
           <div className="login-form slide-up">
             <label>Código recebido no Telegram</label>
-            <input
+            <TextField
               type="text"
               inputMode="numeric"
               placeholder="12345"

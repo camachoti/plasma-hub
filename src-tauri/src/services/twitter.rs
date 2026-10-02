@@ -409,7 +409,24 @@ async fn fetch_twitter_graphql_json(
         .map_err(|e| e.to_string())?;
 
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
     let body = response.text().await.map_err(|e| e.to_string())?;
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let wait_message = match retry_after {
+            Some(seconds) if seconds > 0 => {
+                let minutes = seconds.div_ceil(60);
+                format!("Tente novamente em aproximadamente {minutes} min.")
+            }
+            _ => "Aguarde alguns minutos antes de tentar novamente.".to_string(),
+        };
+        return Err(format!(
+            "O X limitou temporariamente as consultas ({label}, HTTP 429). {wait_message}"
+        ));
+    }
     if !status.is_success() {
         return Err(format!(
             "Twitter GraphQL {} HTTP {}: {}",
@@ -664,7 +681,7 @@ async fn download_twitter_profile_native_inner(
     }
 
     let download_dir = twitter_download_dir(app_handle)?
-        .join(format!("plasma_twitter_{}", sanitize_filename(username)));
+        .join(format!("@{}", sanitize_filename(username)));
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
 
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;

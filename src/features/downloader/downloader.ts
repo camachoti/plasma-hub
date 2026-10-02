@@ -127,51 +127,29 @@ async function downloadViaBlob(
 }
 
 async function downloadViaNativeFile(
+  id: string,
   url: string,
   filename: string,
   platform: PlatformId,
   onProgress: (p: number) => void,
-  signal?: AbortSignal
+  onDestinationReady: (filePath: string) => void,
 ): Promise<string> {
   const downloadDir = await getDownloadDir();
   const filePath = await joinPath(downloadDir, filename);
-
-  const res = await tauriFetch(url, {
-    method: 'GET',
-    signal,
-    headers: getDownloadHeaders(platform),
+  onDestinationReady(filePath);
+  const unlisten = await listen<{ id: string; percent: number }>('native-file-download-progress', event => {
+    if (event.payload.id === id) onProgress(event.payload.percent);
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const contentLength = res.headers.get('content-length');
-  const total = contentLength ? parseInt(contentLength, 10) : 0;
-  const reader = res.body?.getReader();
-
-  await invoke('begin_download_file', { filePath });
   try {
-    if (!reader) {
-      const buffer = new Uint8Array(await res.arrayBuffer());
-      await invoke('append_download_file_chunk', { filePath, data: Array.from(buffer) });
-      onProgress(97);
-    } else {
-      let received = 0;
-      while (true) {
-        signal?.throwIfAborted();
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        received += value.length;
-        await invoke('append_download_file_chunk', { filePath, data: Array.from(value) });
-        onProgress(total > 0 ? Math.min(97, (received / total) * 100) : Math.min(90, received / 20000));
-      }
-    }
-
-    await invoke('finish_download_file', { filePath });
-    onProgress(100);
+    await invoke('download_url_to_file', {
+      id,
+      url,
+      filePath,
+      headers: getDownloadHeaders(platform),
+    });
     return filePath;
-  } catch (error) {
-    await invoke('abort_download_file', { filePath }).catch(() => {});
-    throw error;
+  } finally {
+    unlisten();
   }
 }
 
@@ -407,8 +385,12 @@ export async function downloadMedia(
   try {
     const abortController = new AbortController();
     downloadService.setActions(downloadId, {
-      cancel: () => {
-        abortController.abort();
+      cancel: async () => {
+        if (runtimeCapabilities.isTauri) {
+          await invoke<boolean>('cancel_native_download', { id: downloadId });
+        } else {
+          abortController.abort();
+        }
         downloadService.updateDownload(downloadId, {
           status: 'canceled',
           progress: 0,
@@ -418,7 +400,16 @@ export async function downloadMedia(
     });
 
     if (runtimeCapabilities.isTauri) {
-      const filePath = await downloadViaNativeFile(dlUrl, filename, info.platform, onProgress, abortController.signal);
+      const resumeHeaders = getDownloadHeaders(info.platform);
+      downloadService.updateDownload(downloadId, { sourceUrl: dlUrl, resumeHeaders }, true);
+      const filePath = await downloadViaNativeFile(
+        downloadId,
+        dlUrl,
+        filename,
+        info.platform,
+        onProgress,
+        path => downloadService.updateDownload(downloadId, { filePath: path }, true),
+      );
       downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, filePath });
     } else {
       await downloadViaBlob(dlUrl, filename, info.platform, onProgress, abortController.signal);

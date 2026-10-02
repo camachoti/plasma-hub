@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -176,6 +176,7 @@ pub async fn download_url_to_file(
     id: String,
     url: String,
     file_path: String,
+    headers: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     validate_download_url(&url)?;
     let destination = Path::new(&file_path);
@@ -203,13 +204,19 @@ pub async fn download_url_to_file(
         let resume_from = fs::metadata(&partial)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let request = if resume_from > 0 {
-            client
-                .get(&url)
-                .header(reqwest::header::RANGE, format!("bytes={resume_from}-"))
-        } else {
-            client.get(&url)
-        };
+        let mut request = client.get(&url);
+        if let Some(headers) = headers {
+            for (name, value) in headers {
+                let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|error| format!("Header inválido: {error}"))?;
+                let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+                    .map_err(|error| format!("Valor de header inválido: {error}"))?;
+                request = request.header(name, value);
+            }
+        }
+        if resume_from > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+        }
         let mut response = tokio::select! {
             result = request.send() => result.map_err(|error| error.to_string())?,
             _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),

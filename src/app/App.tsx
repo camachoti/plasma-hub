@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { useAppearance } from "../features/appearance/AppearanceStore";
 import { appStorage } from "../shared/storage/appStorage";
 import { AppShell, type AppTab } from "./AppShell";
@@ -10,6 +10,8 @@ import {
   takePendingSharedDownloadUrl,
 } from "../shared/platform/sharedDownloadIntent";
 import { debugWarn } from "../shared/debug/logger";
+import { runtimeCapabilities } from "../shared/platform/runtime";
+import { LoadingIndicator } from "../design-system";
 import "../styles/App.css";
 
 const SKIP_LOGIN_KEY = "skip_login";
@@ -28,7 +30,29 @@ function App() {
   const [skipLogin, setSkipLogin] = useState(() => appStorage.getBoolean(SKIP_LOGIN_KEY));
   const { palette, density } = useAppearance();
 
+  // Portals live under body, outside AppShell: keep their theme in sync too.
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const previousPalette = root.getAttribute('data-palette');
+    const previousDensity = root.getAttribute('data-density');
+    root.dataset.palette = palette;
+    root.dataset.density = density;
+    return () => {
+      if (previousPalette === null) root.removeAttribute('data-palette');
+      else root.dataset.palette = previousPalette;
+      if (previousDensity === null) root.removeAttribute('data-density');
+      else root.dataset.density = previousDensity;
+    };
+  }, [palette, density]);
+
   useWebviewLogger();
+
+  useEffect(() => {
+    if (!runtimeCapabilities.isTauri || runtimeCapabilities.isAndroid) return;
+    const suppressWebviewMenu = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener('contextmenu', suppressWebviewMenu, true);
+    return () => document.removeEventListener('contextmenu', suppressWebviewMenu, true);
+  }, []);
 
   useEffect(() => {
     const onTwitterFakeChatCreated = () => {
@@ -239,7 +263,7 @@ function App() {
         <div className="app-loading">
           <div className="auth-checking-state" role="status" aria-live="polite">
             <div className="loader-surface" aria-hidden="true">
-              <span className="modern-loader" />
+              <LoadingIndicator size="lg" />
             </div>
             <strong>Verificando sua sessão do Telegram</strong>
             <span>Isso deve levar apenas alguns segundos.</span>

@@ -213,6 +213,10 @@ class TelegramService {
     return `${chatId}:${messageId}`;
   }
 
+  private isSameMediaProgress(data: MediaProgressPayload, chatId: unknown, messageId: unknown) {
+    return String(data.chatId) === String(chatId) && Number(data.messageId) === Number(messageId);
+  }
+
   private emitMediaProgress(data: MediaProgressPayload) {
     this.mediaProgressCallbacks.forEach(cb => cb(data));
     const key = this.mediaProgressKey(data.chatId, data.messageId);
@@ -863,7 +867,7 @@ class TelegramService {
     };
   }
 
-  async getMessages({ chatId, limit = 50, offsetId = 0, topicId = undefined, topicKind = 'forum', refresh = false }: any): Promise<any> {
+  async getMessages({ chatId, limit = 50, offsetId = 0, offset = 0, topicId = undefined, topicKind = 'forum', refresh = false }: any): Promise<any> {
     const fakeChat = this.getTwitterFakeChat(chatId);
     if (fakeChat) {
       const allMessages = fakeChat.messages.map(message => ({
@@ -883,9 +887,12 @@ class TelegramService {
         mediaSize: message.mediaSize ?? null,
         isDeleted: false
       }));
-      const filtered = offsetId
-        ? allMessages.filter(message => message.id < Number(offsetId))
-        : allMessages;
+      const targetIndex = offsetId && offset < 0
+        ? allMessages.findIndex(message => Number(message.id) === Number(offsetId))
+        : -1;
+      const filtered = targetIndex >= 0
+        ? allMessages.slice(0, Math.min(allMessages.length, targetIndex - offset + 1))
+        : offsetId ? allMessages.filter(message => message.id < Number(offsetId)) : allMessages;
       const page = filtered.slice(-limit);
       return {
         success: true,
@@ -906,7 +913,7 @@ class TelegramService {
         }
 
         await this.tdlibInit();
-        const nativeRes: any = await this.tdlibBridge.getMessages({ chatId, limit, offsetId, topicId, topicKind });
+        const nativeRes: any = await this.tdlibBridge.getMessages({ chatId, limit, offsetId, offset, topicId, topicKind });
         if (nativeRes?.success) {
           const messages = Array.isArray(nativeRes.messages)
             ? this.normalizeNativeMessages(chatId, nativeRes.messages)
@@ -1084,7 +1091,17 @@ class TelegramService {
     return { success: false, fullInfo: null };
   }
   async resolveLink(_url: string): Promise<any> { return { success: false, chat: null }; }
-  async readHistory(_chatId: any): Promise<any> { return { success: true }; }
+  async readHistory(chatId: string): Promise<void> {
+    if (this.isTwitterFakeChat(chatId)) return;
+    await this.tdlibInit();
+    await this.tdlibBridge.readChat(chatId);
+  }
+
+  async readAllChats(): Promise<void> {
+    if (this.skipLogin) return;
+    await this.tdlibInit();
+    await this.tdlibBridge.readAllChats();
+  }
   async getForumTopics(chatId: any) {
     if (this.useTdlibOnly()) {
       try {
@@ -1306,6 +1323,7 @@ class TelegramService {
             downloadService.addDownload({
               id: downloadId,
               chatId,
+              messageId: Number.isSafeInteger(item.messageId) ? item.messageId : undefined,
               fileName: item.name,
               filePath: item.filePath,
               fileSize: item.size || undefined,
@@ -1322,7 +1340,15 @@ class TelegramService {
               batchTitle,
               batchKind: 'mass',
               ...batchMeta,
-            });
+            }, Number.isSafeInteger(item.messageId) ? {
+              retry: () => this.retryStoredDownload({
+                id: downloadId,
+                chatId,
+                messageId: item.messageId,
+                filePath: item.filePath,
+                fileName: item.name,
+              }),
+            } : {});
           } else if (existingId) {
             const updates: any = {
               progress: item.progress || 0,
@@ -1402,6 +1428,42 @@ class TelegramService {
     }
   }
 
+  async retryStoredDownload(item: { id: string; chatId?: string; messageId?: number; filePath?: string; fileName?: string }) {
+    const { id, chatId, messageId, filePath } = item;
+    if (!chatId || messageId === undefined) return { success: false, error: 'Referência da mídia não encontrada.' };
+
+    if (runtimeCapabilities.isTauri && runtimeCapabilities.supportsTdlib && filePath) {
+      downloadService.updateDownload(id, { status: 'downloading', error: undefined });
+      const unsubscribe = this.onMediaProgress((data: any) => {
+        if (this.isSameMediaProgress(data, chatId, messageId)) {
+          downloadService.updateDownload(id, { progress: data.progress || 0 });
+        }
+      });
+      try {
+        const cached: any = await this.tdlibBridge.ensureNativeMediaCached({ chatId, messageId, priority: 'user' });
+        if (!cached?.success) throw new Error(cached?.error || 'Falha ao preparar mídia para retomada.');
+        const result: any = await this.tdlibBridge.saveNativeMedia({ chatId, messageId, destinationPath: filePath });
+        if (!result?.success) throw new Error(result?.error || 'Falha ao salvar mídia retomada.');
+        downloadService.updateDownload(id, {
+          status: 'completed',
+          progress: 100,
+          fileName: result.fileName || item.fileName,
+          filePath: result.filePath || filePath,
+          fileSize: result.size > 0 ? result.size : downloadService.getDownload(id)?.fileSize,
+        });
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        downloadService.updateDownload(id, { status: 'failed', error: message });
+        return { success: false, error: message };
+      } finally {
+        unsubscribe();
+      }
+    }
+
+    return this.saveMessageMediaFile({ chatId, messageId, downloadId: id });
+  }
+
   private async startFakeChatDownload({ chatId, folderPath, fakeChat, chatMeta }: any) {
     const mediaMessages = fakeChat.messages.filter((message: TwitterFakeMessage) => message.url);
     const total = mediaMessages.length;
@@ -1469,6 +1531,16 @@ class TelegramService {
           await invoke<boolean>('cancel_native_download', { id: downloadId });
           downloadService.updateDownload(downloadId, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
         },
+        retry: () => this.fileStorage.downloadUrlToFile(message.url!, filePath, downloadId, payload => {
+          downloadService.updateDownload(downloadId, { progress: payload.percent, ...(payload.totalBytes && payload.totalBytes > 0 ? { fileSize: payload.totalBytes } : {}) });
+        }).then(() => {
+          downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, error: undefined });
+        }).catch(error => {
+          downloadService.updateDownload(downloadId, {
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }),
       });
       batchDownloadIds.add(downloadId);
       try {
@@ -1476,7 +1548,7 @@ class TelegramService {
           const percent = payload.percent;
           item.progress = percent;
           const partialDownloaded = downloadedCount + skippedCount + (percent / 100);
-          downloadService.updateDownload(downloadId, { progress: percent, ...batchMeta(partialDownloaded) });
+          downloadService.updateDownload(downloadId, { progress: percent, ...(payload.totalBytes && payload.totalBytes > 0 ? { fileSize: payload.totalBytes } : {}), ...batchMeta(partialDownloaded) });
           this.emitDownloadProgress({ chatId, total, downloaded: partialDownloaded, currentFile: `${safeName} (${percent}%)`, items: processedItems });
         });
         downloadedCount++;
@@ -1884,7 +1956,7 @@ class TelegramService {
         if (String(data.chatId) !== String(chatId)) return;
         const downloadId = activeDownloadIds.get(Number(data.messageId));
         if (!downloadId) return;
-        downloadService.updateDownload(downloadId, { progress: data.progress || 0 });
+        downloadService.updateDownload(downloadId, { progress: data.progress || 0, ...(data.totalBytes > 0 ? { fileSize: data.totalBytes } : {}) });
       });
 
       try {
@@ -1892,23 +1964,30 @@ class TelegramService {
           if (this.saveMultipleAborted) break;
           const messageId = Number(rawMessageId);
           let filename = sanitizeForFilename(`media_${messageId}`);
+          let knownFileSize: number | undefined;
           try {
             const meta: any = await this.tdlibBridge.getNativeMediaMeta({ chatId, messageId });
             if (meta?.fileName) filename = sanitizeForFilename(meta.fileName);
+            if (meta?.totalBytes > 0) knownFileSize = meta.totalBytes;
           } catch {
             // Metadata is best-effort; TDLib save can still resolve the final name.
           }
 
           const downloadId = `telegram_bulk_${chatId}_${messageId}_${runId}`;
           activeDownloadIds.set(messageId, downloadId);
+          let filePath = joinPath(folderPath, filename);
           downloadService.addDownload({
             id: downloadId,
             chatId,
             messageId,
             fileName: filename,
+            filePath,
+            fileSize: knownFileSize,
             progress: 0,
             status: 'downloading',
             platform: 'telegram',
+          }, {
+            retry: () => this.retryStoredDownload({ id: downloadId, chatId, messageId }),
           });
           this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount, currentFile: filename, status: 'downloading' });
 
@@ -1918,7 +1997,7 @@ class TelegramService {
               throw new Error(cached?.error || 'Falha ao preparar mídia.');
             }
             if (cached.fileName) filename = sanitizeForFilename(cached.fileName);
-            const filePath = joinPath(folderPath, filename);
+            filePath = joinPath(folderPath, filename);
             downloadService.updateDownload(downloadId, { fileName: filename, filePath });
 
             const res: any = await this.tdlibBridge.saveNativeMedia({ chatId, messageId, destinationPath: filePath });
@@ -1930,6 +2009,7 @@ class TelegramService {
                 progress: 100,
                 fileName: res.fileName || filename,
                 filePath: res.filePath || filePath,
+                fileSize: res.size > 0 ? res.size : downloadService.getDownload(downloadId)?.fileSize,
               });
             } else {
               failedCount++;
@@ -2000,6 +2080,7 @@ class TelegramService {
           fileName: filename,
           filePath,
           sourceUrl: message.url,
+          fileSize: message.mediaSize || undefined,
           progress: 0,
           status: 'downloading',
           platform: 'telegram',
@@ -2008,10 +2089,20 @@ class TelegramService {
             await invoke<boolean>('cancel_native_download', { id: downloadId });
             downloadService.updateDownload(downloadId, { status: 'canceled', progress: 0, error: 'Cancelado pelo usuário.' });
           },
+          retry: () => this.fileStorage.downloadUrlToFile(message.url!, filePath, downloadId, payload => {
+            downloadService.updateDownload(downloadId, { progress: payload.percent, ...(payload.totalBytes && payload.totalBytes > 0 ? { fileSize: payload.totalBytes } : {}) });
+          }).then(() => {
+            downloadService.updateDownload(downloadId, { status: 'completed', progress: 100, error: undefined });
+          }).catch(error => {
+            downloadService.updateDownload(downloadId, {
+              status: 'failed',
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }),
         });
         await this.fileStorage.downloadUrlToFile(message.url, filePath, downloadId, (payload) => {
           const percent = payload.percent;
-          downloadService.updateDownload(downloadId, { progress: percent });
+          downloadService.updateDownload(downloadId, { progress: percent, ...(payload.totalBytes && payload.totalBytes > 0 ? { fileSize: payload.totalBytes } : {}) });
           this.emitSaveMultipleProgress({ chatId, total, downloaded: downloadedCount + (percent / 100), currentFile: `${filename} (${percent}%)`, status: 'progress' });
         });
         downloadedCount++;
@@ -2072,7 +2163,7 @@ class TelegramService {
   async sendReaction(_opts: any): Promise<any> { return { success: true }; }
   getPathForFile(_file: any) { return ''; }
   async joinChat(_chatId: any): Promise<any> { return { success: true }; }
-  async saveMessageMediaFile({ chatId, messageId, downloadMeta = {}, saveAs = false }: any) {
+  async saveMessageMediaFile({ chatId, messageId, downloadMeta = {}, saveAs = false, downloadId }: any) {
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (!runtimeCapabilities.isTauri && !fakeMessage) return { success: false, error: 'TDLib nativo indisponível.' };
     let suggestedName = `media_${messageId}`;
@@ -2099,7 +2190,7 @@ class TelegramService {
       suggestedName = basename(selectedPath);
     }
 
-    const id = `${chatId}_${messageId}`;
+    const id = downloadId || `${chatId}_${messageId}`;
     let thumbnailUrl = fakeMessage?.thumbnailUrl || null;
     if (!thumbnailUrl) {
       try {
@@ -2115,6 +2206,7 @@ class TelegramService {
       chatId,
       messageId,
       fileName: suggestedName,
+      fileSize: fakeMessage?.mediaSize || undefined,
       progress: 0,
       status: 'downloading',
       platform: 'telegram',
@@ -2131,8 +2223,8 @@ class TelegramService {
 
     try {
       const unsub = this.onMediaProgress((data: any) => {
-        if (data.chatId === chatId && data.messageId === messageId) {
-          downloadService.updateDownload(id, { progress: data.progress });
+        if (this.isSameMediaProgress(data, chatId, messageId)) {
+          downloadService.updateDownload(id, { progress: data.progress, ...(data.totalBytes > 0 ? { fileSize: data.totalBytes } : {}) });
         }
       });
 
@@ -2151,6 +2243,7 @@ class TelegramService {
               progress: 100,
               fileName: nativeSave.fileName || basename(nativeSave.filePath),
               filePath: nativeSave.filePath,
+              fileSize: nativeSave.size > 0 ? nativeSave.size : downloadService.getDownload(id)?.fileSize,
             });
             return { success: true, filePath: nativeSave.filePath };
           }
@@ -2200,7 +2293,7 @@ class TelegramService {
           if (!fakeMessage.url) throw new Error('Mídia sem URL.');
           await this.fileStorage.downloadUrlToFile(fakeMessage.url, saveAsPath, id, (payload) => {
             const progress = payload.percent;
-            downloadService.updateDownload(id, { progress });
+            downloadService.updateDownload(id, { progress, ...(payload.totalBytes && payload.totalBytes > 0 ? { fileSize: payload.totalBytes } : {}) });
             this.emitMediaProgress({ chatId, messageId, progress, downloadedBytes: payload.downloadedBytes, totalBytes: payload.totalBytes, stage: 'downloading' });
           });
         } else {

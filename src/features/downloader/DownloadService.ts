@@ -18,6 +18,7 @@ export interface DownloadItem {
   filePath?: string;
   fileSize?: number;
   sourceUrl?: string;
+  resumeHeaders?: Record<string, string>;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
   sourceLabel?: string;
@@ -34,6 +35,8 @@ export interface DownloadItem {
   batchCompleted?: number;
   batchSkipped?: number;
   batchFailed?: number;
+  retrying?: boolean;
+  retryAttempted?: boolean;
   createdAt?: number;
   canCancel?: boolean;
   canRetry?: boolean;
@@ -72,6 +75,7 @@ class DownloadService {
         const wasInterrupted = item.status === 'downloading';
         const restored = {
           ...item,
+          retrying: false,
           ...(wasInterrupted
             ? { status: 'failed' as const, error: 'Download interrompido ao fechar o aplicativo.' }
             : {}),
@@ -80,6 +84,13 @@ class DownloadService {
           this.actionHandlers.set(restored.id, {
             cancel: () => invokeCommand<boolean>('cancel_native_download', { id: restored.id }),
             retry: () => this.retryPersistedNativeDownload(restored.id),
+          });
+        } else if (restored.platform === 'telegram' && restored.chatId && restored.messageId !== undefined) {
+          this.actionHandlers.set(restored.id, {
+            retry: async () => {
+              const { telegramService } = await import('../telegram/TelegramService');
+              return telegramService.retryStoredDownload(restored);
+            },
           });
         }
         const actions = this.actionHandlers.get(restored.id);
@@ -103,7 +114,7 @@ class DownloadService {
       if (event.payload.id !== id) return;
       this.updateDownload(id, {
         progress: event.payload.percent,
-        fileSize: event.payload.totalBytes,
+        ...(event.payload.totalBytes && event.payload.totalBytes > 0 ? { fileSize: event.payload.totalBytes } : {}),
       });
     });
     this.updateDownload(id, { status: 'downloading', error: undefined });
@@ -112,6 +123,7 @@ class DownloadService {
         id,
         url: item.sourceUrl,
         filePath: item.filePath,
+        headers: item.resumeHeaders,
       });
       this.updateDownload(id, { status: 'completed', progress: 100 });
       return true;
@@ -141,6 +153,7 @@ class DownloadService {
       .slice(-MAX_DOWNLOAD_HISTORY)
       .map(item => ({
         ...item,
+        retrying: undefined,
         canCancel: undefined,
         canRetry: undefined,
         thumbnailUrl: item.thumbnailUrl?.startsWith('blob:') ? undefined : item.thumbnailUrl,
@@ -197,7 +210,7 @@ class DownloadService {
     this.emitDownloadsChange();
   }
 
-  updateDownload(id: string, updates: Partial<DownloadItem>) {
+  updateDownload(id: string, updates: Partial<DownloadItem>, persistImmediately = false) {
     const item = this.activeDownloads.get(id);
     if (item) {
       const previousStatus = item.status;
@@ -209,7 +222,7 @@ class DownloadService {
       const reachedTerminalState = Boolean(
         updates.status && updates.status !== previousStatus && updates.status !== 'downloading',
       );
-      this.emitDownloadsChange(reachedTerminalState);
+      this.emitDownloadsChange(persistImmediately || reachedTerminalState);
       if (reachedTerminalState) {
         window.dispatchEvent(new CustomEvent(DOWNLOAD_STATUS_EVENT, { detail: { ...item } }));
       }
@@ -268,8 +281,13 @@ class DownloadService {
   async retryDownload(id: string) {
     const handler = this.actionHandlers.get(id)?.retry;
     if (!handler) return false;
-    await handler();
-    return true;
+    this.updateDownload(id, { status: 'downloading', progress: 0, error: undefined, retrying: true, retryAttempted: true });
+    try {
+      await handler();
+      return true;
+    } finally {
+      if (this.activeDownloads.has(id)) this.updateDownload(id, { retrying: false });
+    }
   }
 }
 

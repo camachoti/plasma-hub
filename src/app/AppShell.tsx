@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { IconAt, IconDownload, IconMessageCircle, IconSettings } from "../design-system/icons";
 import { runtimeCapabilities } from "../shared/platform/runtime";
 import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
-import { Dialog, IconButton } from "../design-system";
+import { Dialog, IconButton, LoadingIndicator, TextField } from "../design-system";
 
 const loadDashboard = () => import("../features/telegram/Dashboard");
 const loadDownloads = () => import("../features/telegram/Downloads");
@@ -65,6 +65,7 @@ export function AppShell({
     let timeoutId: number | undefined;
     const handleDownloadStatus = (event: Event) => {
       const item = (event as CustomEvent<DownloadItem>).detail;
+      if (item.status !== 'failed') return;
       setDownloadToast(item);
       window.clearTimeout(timeoutId);
       timeoutId = window.setTimeout(() => setDownloadToast(null), 4200);
@@ -107,7 +108,7 @@ export function AppShell({
   const fallback = (
     <div className="app-loading">
       <div className="loader-surface" role="status" aria-label="Carregando">
-        <span className="modern-loader" />
+        <LoadingIndicator size="lg" />
       </div>
     </div>
   );
@@ -137,10 +138,12 @@ export function AppShell({
           type="button"
           className={`app-toast ${downloadToast.status}`}
           onClick={() => setDownloadToast(null)}
-          aria-live="polite"
+          role="alert"
+          aria-live="assertive"
         >
-          <strong>{downloadToast.status === 'completed' ? 'Download concluído' : downloadToast.status === 'canceled' ? 'Download cancelado' : 'Falha no download'}</strong>
-          <span>{downloadToast.fileName}</span>
+          <strong>Falha no download</strong>
+          <span>{downloadToast.error || downloadToast.fileName}</span>
+          {downloadToast.error && <small>{downloadToast.fileName}</small>}
         </button>
       )}
       <div className="sidebar">
@@ -218,7 +221,8 @@ export function AppShell({
         <Dialog className="command-palette ds-surface" label="Comandos rápidos" onClose={() => setIsCommandPaletteOpen(false)} overlayClassName="command-palette-overlay">
             <div className="command-palette-search">
               <span aria-hidden="true">⌕</span>
-              <input
+              <TextField
+                appearance="inline"
                 autoFocus
                 value={commandQuery}
                 onChange={event => {

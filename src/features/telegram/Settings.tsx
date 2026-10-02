@@ -4,7 +4,7 @@ import { IconAlertCircle, IconBrandTelegram, IconBrandX, IconCircleCheck, IconTr
 import { DENSITIES, PALETTES, useAppearance } from '../appearance/AppearanceStore';
 import { getStoredTwitterCookies, loadStoredTwitterCookies, setStoredTwitterCookies } from '../twitter/TwitterSettingsStore';
 import { appStorage } from '../../shared/storage/appStorage';
-import { Dialog, Select } from '../../design-system';
+import { Dialog, LoadingIndicator, Select, TextArea, TextField } from '../../design-system';
 
 interface CacheStats {
   totalSize: number;
@@ -223,9 +223,10 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
 
         {loading ? (
           <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-            <span className="spinner" />
+            <LoadingIndicator size="md" />
           </div>
         ) : (
+          <>
           <div className="settings-body">
             {activeTab === 'general' && (
               <div className="settings-general-grid">
@@ -239,7 +240,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   </div>
                   <div className="settings-field settings-field-stack">
                     <label htmlFor="twitter-cookies">Cookies opcionais</label>
-                    <textarea
+                    <TextArea
                       id="twitter-cookies"
                       value={twitterCookies}
                       onChange={e => setTwitterCookies(e.target.value)}
@@ -268,15 +269,15 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   <div className="settings-auth-grid">
                     <label className="settings-input-group">
                       <span>Telefone</span>
-                      <input type="tel" value={tdlibPhone} onChange={e => setTdlibPhone(e.target.value)} placeholder="+55 11 99999-9999" />
+                      <TextField type="tel" value={tdlibPhone} onChange={e => setTdlibPhone(e.target.value)} placeholder="+55 11 99999-9999" />
                     </label>
                     <label className="settings-input-group">
                       <span>Código</span>
-                      <input inputMode="numeric" value={tdlibCode} onChange={e => setTdlibCode(e.target.value)} placeholder="12345" />
+                      <TextField inputMode="numeric" value={tdlibCode} onChange={e => setTdlibCode(e.target.value)} placeholder="12345" />
                     </label>
                     <label className="settings-input-group">
                       <span>Senha 2FA</span>
-                      <input type="password" value={tdlibPassword} onChange={e => setTdlibPassword(e.target.value)} placeholder="Se necessário" />
+                      <TextField type="password" value={tdlibPassword} onChange={e => setTdlibPassword(e.target.value)} placeholder="Se necessário" />
                     </label>
                   </div>
                   <div className="settings-tdlib-actions">
@@ -423,6 +424,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
               </>
             )}
 
+          </div>
             <div className="settings-actions">
               <button className="settings-save-btn" onClick={handleSave} disabled={saving}>
                 {saved ? '✓ Salvo!' : saving ? 'Salvando...' : 'Salvar configurações'}
@@ -444,7 +446,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 </div>
               )}
             </div>
-          </div>
+          </>
         )}
     </Dialog>
   );

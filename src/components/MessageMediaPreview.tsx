@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { LoadingIndicator } from '../design-system';
 import { IconPlayerPlay, IconVolume, IconVolumeOff } from "../design-system/icons";
 import {
   formatDuration,
@@ -46,6 +47,8 @@ interface MessageMediaPreviewProps {
   onLogVideoEvent: (label: string, video: HTMLVideoElement | null, context: Record<string, any>) => void;
 }
 
+type MediaShape = 'unknown' | 'landscape' | 'portrait' | 'square';
+
 export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
   chatId,
   messageId,
@@ -83,8 +86,33 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
   onCancelControl,
   onScheduleFullMediaPrefetch,
   onLogVideoEvent,
-}) => (
-  <div className={`media-preview ${isVideo ? 'is-video' : 'is-image'} ${shouldRenderInlinePlayer ? 'playing-inline' : ''}`}>
+}) => {
+  const [mediaShape, setMediaShape] = useState<MediaShape>('unknown');
+  const [mediaRatio, setMediaRatio] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMediaShape('unknown');
+    setMediaRatio(null);
+  }, [messageId, previewSrc]);
+
+  const updateMediaShape = (width: number, height: number) => {
+    if (!width || !height) return;
+
+    const rawRatio = width / height;
+    const boundedRatio = Math.min(16 / 9, Math.max(3 / 4, rawRatio));
+    setMediaShape(rawRatio > 1.12 ? 'landscape' : rawRatio < 0.88 ? 'portrait' : 'square');
+    setMediaRatio(`${boundedRatio} / 1`);
+  };
+
+  const previewStyle = mediaRatio
+    ? ({ '--media-preview-ratio': mediaRatio } as React.CSSProperties)
+    : undefined;
+
+  return (
+  <div
+    className={`media-preview media-shape-${mediaShape} ${isVideo ? 'is-video' : 'is-image'} ${shouldRenderInlinePlayer ? 'playing-inline' : ''}`}
+    style={previewStyle}
+  >
     {shouldRenderInlinePlayer ? (
       <div className="inline-video-wrapper" onClick={onOpen}>
         <video
@@ -95,7 +123,10 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           muted={isMuted}
           playsInline
           onLoadStart={event => onLogVideoEvent('inline loadstart', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
-          onLoadedMetadata={event => onLogVideoEvent('inline loadedmetadata', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
+          onLoadedMetadata={event => {
+            updateMediaShape(event.currentTarget.videoWidth, event.currentTarget.videoHeight);
+            onLogVideoEvent('inline loadedmetadata', event.currentTarget, { chatId, messageId, src: inlineStreamUrl });
+          }}
           onLoadedData={event => onLogVideoEvent('inline loadeddata', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
           onProgress={event => onLogVideoEvent('inline progress', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
           onSuspend={event => onLogVideoEvent('inline suspend', event.currentTarget, { chatId, messageId, src: inlineStreamUrl })}
@@ -145,7 +176,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
         )}
         {(shouldShowProgress || inlineBuffering) && (
           <div className="video-play-icon loading">
-            <span className="spinner"></span>
+            <LoadingIndicator size="sm" className="loading-indicator--light" />
           </div>
         )}
         {shouldShowProgress && (
@@ -175,6 +206,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
             className="media-img"
             onContextMenu={onContextMenu}
             onError={onPreviewImageError}
+            onLoad={event => updateMediaShape(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
           />
         ) : isVideo ? (
           <div className="video-preview-unavailable" onContextMenu={onContextMenu}>
@@ -191,7 +223,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
           isVideo ? (
             <>
               <div className="video-play-icon loading">
-                <span className="spinner"></span>
+                <LoadingIndicator size="sm" />
               </div>
               <MediaProgressBadge label={progressLabel} value={progressBytesLabel || `${mediaProgress}%`} video />
             </>
@@ -202,7 +234,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
 
         {inlineLoading && !shouldShowProgress && (
           <div className="video-play-icon loading">
-            <span className="spinner"></span>
+            <LoadingIndicator size="sm" />
           </div>
         )}
 
@@ -259,4 +291,5 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
       </button>
     )}
   </div>
-);
+  );
+};
