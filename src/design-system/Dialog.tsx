@@ -13,6 +13,8 @@ const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]
 
 export const Dialog: React.FC<DialogProps> = ({ children, className, label, onClose, overlayClassName }) => {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -21,7 +23,7 @@ export const Dialog: React.FC<DialogProps> = ({ children, className, label, onCl
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -46,7 +48,7 @@ export const Dialog: React.FC<DialogProps> = ({ children, className, label, onCl
       window.removeEventListener('keydown', handleKeyDown);
       previousFocus?.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return createPortal(
     <div className={`ds-dialog-overlay ${overlayClassName || ''}`} onMouseDown={onClose}>

@@ -28,6 +28,7 @@ interface DashboardMassDownloadPanelProps {
   filteredTopics: ForumTopic[];
   folderPath: string;
   forumTopics: ForumTopic[];
+  topicDownloadStatus: Record<string, 'downloaded' | 'new'>;
   hasTopics: boolean;
   isTopicDropdownOpen: boolean;
   loadingTopics: boolean;
@@ -94,6 +95,7 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
   filteredTopics,
   folderPath,
   forumTopics,
+  topicDownloadStatus,
   hasTopics,
   isTopicDropdownOpen,
   loadingTopics,
@@ -179,7 +181,12 @@ const DashboardMassDownloadPanelComponent: React.FC<DashboardMassDownloadPanelPr
                   {filteredTopics.map(topic => (
                     <button key={topic.id} type="button" className={`custom-select-option ${String(topic.id) === selectedTopicId ? 'selected' : ''}`} onClick={event => { event.stopPropagation(); setSelectedTopicId(String(topic.id)); setIsTopicDropdownOpen(false); setTopicSearch(''); }}>
                       {topic.pinned && <span className="option-pin">📌</span>}
-                      {topic.title}
+                      <span className="topic-download-option-title">{topic.title}</span>
+                      {topicDownloadStatus[`${topic.kind || 'forum'}:${topic.id}`] && (
+                        <span className={`topic-download-option-status ${topicDownloadStatus[`${topic.kind || 'forum'}:${topic.id}`] === 'new' ? 'has-new-media' : ''}`}>
+                          {topicDownloadStatus[`${topic.kind || 'forum'}:${topic.id}`] === 'new' ? 'Novas mídias' : 'Baixado'}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>

@@ -800,7 +800,7 @@ class TelegramService {
           return { success: true };
         }
         if (codeRes?.state === 'wait_password') {
-          return { success: false, error: 'Esta conta exige senha 2FA. Use Configurações > TDLib para validar a senha por enquanto.' };
+          return { success: false, requiresPassword: true };
         }
         return { success: false, error: codeRes?.error || `TDLib aguardando estado: ${codeRes?.state || 'desconhecido'}` };
       } catch (error: any) {
@@ -808,6 +808,20 @@ class TelegramService {
       }
     }
     return { success: false, error: 'TDLib nativo indisponível.' };
+  }
+
+  async signInWithPassword(password: string) {
+    if (!this.useTdlibOnly()) return { success: false, error: 'TDLib nativo indisponível.' };
+    try {
+      const result = await this.tdlibCheckPassword(password);
+      if (result.ready || result.state === 'ready') {
+        appStorage.set(this.tdlibSessionKey, 'ready');
+        return { success: true };
+      }
+      return { success: false, error: result.error || 'Não foi possível validar a senha.' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async getDialogs(limit = 250) {
@@ -1393,6 +1407,7 @@ class TelegramService {
           total: result.total ?? 0,
           aborted: !!result.aborted,
           native: true,
+          trackingError: result.tracking_error ?? result.trackingError ?? null,
         };
       } finally {
         unsubscribe();
@@ -1737,6 +1752,23 @@ class TelegramService {
 
   async getMessageMediaFile(opts: any) {
     return this.ensureMessageMediaCached(opts);
+  }
+
+  async getDuplicateSearchSource({ chatId, messageId }: { chatId: string; messageId: number }) {
+    if (this.findTwitterFakeMessage(chatId, messageId)) {
+      const media = await this.getMessageMediaFile({ chatId, messageId });
+      if (!media?.success || !media.filePath) throw new Error(media?.error || 'Mídia indisponível.');
+      const response = await fetch(media.filePath);
+      if (!response.ok) throw new Error('Não foi possível ler a mídia.');
+      return { bytes: Array.from(new Uint8Array(await response.arrayBuffer())) };
+    }
+
+    await this.tdlibInit();
+    const media = await this.tdlibBridge.ensureNativeMediaCached({ chatId, messageId });
+    if (!media.success || !media.nativeFilePath) {
+      throw new Error(media.error || 'Não foi possível obter o arquivo da mídia.');
+    }
+    return { path: media.nativeFilePath, name: media.fileName || `media_${messageId}` };
   }
 
   prefetchMessageMediaFile({ chatId, messageId }: any) {
@@ -2158,11 +2190,11 @@ class TelegramService {
     if (!messageId) return { success: false, error: 'Mensagem inválida.' };
     return this.tdlibBridge.forwardMessage(opts);
   }
-  async createTopic(_opts: any): Promise<any> { return { success: true }; }
-  async getOriginalMessage(_opts: any): Promise<any> { return { success: true, message: null }; }
-  async sendReaction(_opts: any): Promise<any> { return { success: true }; }
+  async createTopic(_opts: any): Promise<any> { return { success: false, error: 'Criar tópico ainda não está disponível.' }; }
+  async getOriginalMessage(_opts: any): Promise<any> { return { success: false, message: null, error: 'Mensagem original indisponível.' }; }
+  async sendReaction(_opts: any): Promise<any> { return { success: false, error: 'Reações ainda não estão disponíveis.' }; }
   getPathForFile(_file: any) { return ''; }
-  async joinChat(_chatId: any): Promise<any> { return { success: true }; }
+  async joinChat(_chatId: any): Promise<any> { return { success: false, error: 'Entrar em grupos ainda não está disponível.' }; }
   async saveMessageMediaFile({ chatId, messageId, downloadMeta = {}, saveAs = false, downloadId }: any) {
     const fakeMessage = this.findTwitterFakeMessage(chatId, messageId);
     if (!runtimeCapabilities.isTauri && !fakeMessage) return { success: false, error: 'TDLib nativo indisponível.' };
@@ -2357,7 +2389,7 @@ class TelegramService {
       return { success: false, error: e.message };
     }
   }
-  async muteChat(_opts: any): Promise<any> { return { success: true }; }
+  async muteChat(_opts: any): Promise<any> { return { success: false, error: 'Silenciar notificações ainda não está disponível.' }; }
   async leaveChat(chatId: any): Promise<any> {
     if (this.isTwitterFakeChat(chatId)) {
       writeTwitterFakeChats(readTwitterFakeChats().filter(chat => chat.id !== chatId));

@@ -9,9 +9,9 @@ import {
   queueSharedDownloadUrl,
   takePendingSharedDownloadUrl,
 } from "../shared/platform/sharedDownloadIntent";
-import { debugWarn } from "../shared/debug/logger";
+import { debugLog, debugWarn } from "../shared/debug/logger";
 import { runtimeCapabilities } from "../shared/platform/runtime";
-import { LoadingIndicator } from "../design-system";
+import { StartupLoader } from "./StartupLoader";
 import "../styles/App.css";
 
 const SKIP_LOGIN_KEY = "skip_login";
@@ -71,7 +71,9 @@ function App() {
   const [countryCode, setCountryCode] = useState("+55");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
   const [phoneCodeHash, setPhoneCodeHash] = useState<string | null>(null);
+  const [loginStep, setLoginStep] = useState<"phone" | "code" | "password">("phone");
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => appStorage.getBoolean(SKIP_LOGIN_KEY) || Boolean(appStorage.get(TELEGRAM_TDLIB_SESSION_KEY)),
   );
@@ -80,7 +82,6 @@ function App() {
   );
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [telegramConnectionState, setTelegramConnectionState] = useState("ready");
 
   useEffect(() => {
     const openSharedDownloadUrl = (url?: string | null) => {
@@ -119,6 +120,7 @@ function App() {
         return;
       }
       setIsCheckingAuth(true);
+      const startedAt = performance.now();
       try {
         const telegramService = await getTelegramService();
         telegramService.skipLogin = skipLogin;
@@ -130,6 +132,7 @@ function App() {
         debugWarn("Failed to check auth status", caughtError);
         if (!cancelled) setIsLoggedIn(false);
       } finally {
+        debugLog("[Startup] Verificação da sessão Telegram:", Math.round(performance.now() - startedAt), "ms");
         if (!cancelled) setIsCheckingAuth(false);
       }
     };
@@ -140,44 +143,42 @@ function App() {
   }, [skipLogin]);
 
   useEffect(() => {
+    if (!runtimeCapabilities.isTauri || skipLogin) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     getTelegramService().then(async service => {
-      unlisten = await service.onTdlibAuthState(state => {
+      const handleAuthState = (state: string) => {
         if (disposed || skipLogin) return;
         if (state === "wait_tdlib_parameters") return;
         if (state === "ready") {
+          setPassword("");
           setIsLoggedIn(true);
           setIsCheckingAuth(false);
           appStorage.set(TELEGRAM_TDLIB_SESSION_KEY, "ready");
           return;
         }
         if (LOGIN_REQUIRED_STATES.has(state) || SESSION_CLOSED_STATES.has(state)) {
+          if (state === "wait_password") setLoginStep("password");
+          else if (state === "wait_code") {
+            setPhoneCodeHash("tdlib");
+            setLoginStep("code");
+          }
+          else if (state === "wait_phone_number" || SESSION_CLOSED_STATES.has(state)) setLoginStep("phone");
           setIsLoggedIn(false);
           setIsCheckingAuth(false);
           appStorage.remove(TELEGRAM_TDLIB_SESSION_KEY);
         }
-      });
+      };
+      unlisten = await service.onTdlibAuthState(handleAuthState);
+      await service.tdlibInit(8000);
+      const current = await service.tdlibStatus();
+      handleAuthState(current.state);
     }).catch(error => debugWarn("Failed to subscribe to TDLib auth state", error));
     return () => {
       disposed = true;
       unlisten?.();
     };
   }, [skipLogin]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    getTelegramService().then(async service => {
-      unlisten = await service.onTdlibConnectionState(state => {
-        if (!disposed) setTelegramConnectionState(state);
-      });
-    }).catch(error => debugWarn("Failed to subscribe to TDLib connection state", error));
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
 
   const handleSendCode = async () => {
     if (!phone || !countryCode) return;
@@ -197,6 +198,7 @@ function App() {
       const res = await telegramService.sendCode(fullPhone);
       if (res.success && res.phoneCodeHash) {
         setPhoneCodeHash(res.phoneCodeHash);
+        setLoginStep("code");
       } else {
         setError(res.error || "Failed to send code");
       }
@@ -220,6 +222,9 @@ function App() {
         appStorage.remove(SKIP_LOGIN_KEY);
         setSkipLogin(false);
         setIsLoggedIn(true);
+      } else if (res.requiresPassword) {
+        setLoginStep("password");
+        setCode("");
       } else {
         setError(res.error || "Failed to sign in");
       }
@@ -228,6 +233,36 @@ function App() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handlePasswordSignIn = async () => {
+    if (!password) return;
+    setIsLoading(true);
+    setError("");
+    try {
+      const telegramService = await getTelegramService();
+      const res = await telegramService.signInWithPassword(password);
+      if (res.success) {
+        setPassword("");
+        appStorage.remove(SKIP_LOGIN_KEY);
+        setSkipLogin(false);
+        setIsLoggedIn(true);
+      } else {
+        setError(res.error || "Não foi possível validar a senha.");
+      }
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleChangePhone = () => {
+    setLoginStep("phone");
+    setPhoneCodeHash(null);
+    setCode("");
+    setPassword("");
+    setError("");
   };
 
   const handleEnterWithoutLogin = () => {
@@ -252,6 +287,8 @@ function App() {
     setIsLoggedIn(false);
     setPhoneCodeHash(null);
     setCode("");
+    setPassword("");
+    setLoginStep("phone");
     setIsLoading(false);
     setIsCheckingAuth(false);
     setError("");
@@ -260,15 +297,7 @@ function App() {
   if (isCheckingAuth && !skipLogin) {
     return (
       <div className="app-container" data-palette={palette} data-density={density}>
-        <div className="app-loading">
-          <div className="auth-checking-state" role="status" aria-live="polite">
-            <div className="loader-surface" aria-hidden="true">
-              <LoadingIndicator size="lg" />
-            </div>
-            <strong>Verificando sua sessão do Telegram</strong>
-            <span>Isso deve levar apenas alguns segundos.</span>
-          </div>
-        </div>
+        <StartupLoader />
       </div>
     );
   }
@@ -281,14 +310,18 @@ function App() {
         countryCode={countryCode}
         phone={phone}
         code={code}
-        phoneCodeHash={phoneCodeHash}
+        password={password}
+        loginStep={loginStep}
         error={error}
         isLoading={isLoading}
         onCountryCodeChange={setCountryCode}
         onPhoneChange={setPhone}
         onCodeChange={setCode}
+        onPasswordChange={setPassword}
         onSendCode={handleSendCode}
         onSignIn={handleSignIn}
+        onPasswordSignIn={handlePasswordSignIn}
+        onChangePhone={handleChangePhone}
         onEnterWithoutLogin={handleEnterWithoutLogin}
         onClearCache={handleClearCache}
       />
@@ -302,7 +335,6 @@ function App() {
       palette={palette}
       density={density}
       skipLogin={skipLogin}
-      telegramConnectionState={telegramConnectionState}
       onActiveTabChange={setActiveTab}
       onSettingsOpen={() => setIsSettingsOpen(true)}
       onSettingsClose={() => setIsSettingsOpen(false)}

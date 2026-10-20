@@ -2,7 +2,8 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { IconAt, IconDownload, IconMessageCircle, IconSettings } from "../design-system/icons";
 import { runtimeCapabilities } from "../shared/platform/runtime";
 import { DOWNLOAD_STATUS_EVENT, type DownloadItem } from "../features/downloader/DownloadService";
-import { Dialog, IconButton, LoadingIndicator, TextField } from "../design-system";
+import { Dialog, IconButton, TextField } from "../design-system";
+import { StartupLoader } from "./StartupLoader";
 
 const loadDashboard = () => import("../features/telegram/Dashboard");
 const loadDownloads = () => import("../features/telegram/Downloads");
@@ -22,7 +23,6 @@ interface AppShellProps {
   palette: string;
   density: string;
   skipLogin: boolean;
-  telegramConnectionState: string;
   onActiveTabChange: (tab: AppTab) => void;
   onSettingsOpen: () => void;
   onSettingsClose: () => void;
@@ -35,7 +35,6 @@ export function AppShell({
   palette,
   density,
   skipLogin,
-  telegramConnectionState,
   onActiveTabChange,
   onSettingsOpen,
   onSettingsClose,
@@ -105,21 +104,7 @@ export function AppShell({
     const query = commandQuery.trim().toLocaleLowerCase("pt-BR");
     return !query || `${command.label} ${command.hint}`.toLocaleLowerCase("pt-BR").includes(query);
   });
-  const fallback = (
-    <div className="app-loading">
-      <div className="loader-surface" role="status" aria-label="Carregando">
-        <LoadingIndicator size="lg" />
-      </div>
-    </div>
-  );
-  const connectionNotice = !skipLogin && telegramConnectionState !== "ready"
-    ? telegramConnectionState === "waiting_for_network"
-      ? "Sem rede. O Telegram será reconectado automaticamente."
-      : telegramConnectionState === "updating"
-        ? "Telegram conectado. Atualizando mensagens…"
-        : "Reconectando ao Telegram…"
-    : null;
-
+  const fallback = <StartupLoader />;
   return (
     <div
       className="app-container"
@@ -127,12 +112,6 @@ export function AppShell({
       data-density={density}
       data-runtime={runtimeCapabilities.kind}
     >
-      {connectionNotice && (
-        <div className="telegram-connection-notice" role="status" aria-live="polite">
-          <span className="telegram-connection-dot" />
-          {connectionNotice}
-        </div>
-      )}
       {downloadToast && (
         <button
           type="button"

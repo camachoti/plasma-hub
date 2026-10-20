@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { IconArrowDown, IconBrandTelegram, IconCheck as TablerCheck, IconChevronDown, IconMessageCircle, IconPhoto, IconX } from "../../design-system/icons";
+import { IconArrowDown, IconBrandTelegram, IconCheck as TablerCheck, IconChevronDown, IconCircleCheck, IconEye, IconEyeOff, IconFolderOpen, IconMessageCircle, IconPhoto, IconX } from "../../design-system/icons";
 import { EmptyState } from '../../design-system/EmptyState';
 import { LoadingIndicator, TextArea, TextField } from '../../design-system';
 import { convertFileSrc, invokeCommand as invoke, listenNativeDragDrop } from '../../shared/platform/tauri';
+import { openDialog } from '../../shared/platform/dialog';
+import { runtimeCapabilities } from '../../shared/platform/runtime';
 import '../../styles/Dashboard.css';
 import { ChatAvatar } from '../../components/ChatAvatar';
 import { MessageMedia } from '../../components/MessageMedia';
@@ -24,6 +26,7 @@ import { basename, compareTelegramMessages } from './TelegramMessageUtils';
 import { DashboardChatList } from './DashboardChatList';
 import { DashboardInfoPanel } from './DashboardInfoPanel';
 import { DashboardMassDownloadPanel } from './DashboardMassDownloadPanel';
+import { DashboardDuplicateSearch, type DuplicateSearchMedia } from './DashboardDuplicateSearch';
 import { JoinChannelBar, MessageComposer, SelectionActionBar } from './DashboardComposer';
 import { TimelineMessageItem, formatMessageTime, getChatKind, isTelegramLink } from './DashboardTimelineItem';
 import {
@@ -107,13 +110,20 @@ interface HistoricalJumpSnapshot {
   oldestMessageId: number | null;
 }
 
+interface TopicDownloadState {
+  topicId: string;
+  topicKind: string;
+  lastMessageId: number;
+  downloadedAt: number;
+}
+
 interface DashboardProps {
   skipLogin?: boolean;
   onTelegramLoginRequest?: () => void;
 }
 
-const LAST_CHAT_KEY = 'plasma_last_chat_id';
 const LAST_TOPIC_PREFIX = 'plasma_last_topic_';
+const HIDDEN_TOPICS_PREFIX = 'plasma_hidden_topics_';
 const CHAT_SEARCH_FILTER_PREFIX = 'plasma_chat_search_filters_';
 const TIMELINE_ANCHOR_PREFIX = 'plasma_timeline_anchor_';
 const INFO_PANEL_KEY = 'plasma_info_panel_open';
@@ -121,6 +131,12 @@ const CHAT_MEDIA_SIZE_KEY = 'plasma_chat_media_size';
 const CHAT_ORDER_KEY = 'plasma_chat_order_v1';
 const CHAT_LIST_CACHE_KEY = 'plasma_chat_list_cache_v1';
 const CHAT_LIST_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const topicDownloadKey = (topicId: string | number, topicKind?: string) => `${topicKind || 'forum'}:${topicId}`;
+const topicVisibilityKey = (topic: ForumTopic) => topicDownloadKey(topic.id, topic.kind);
+const indexTopicDownloads = (rows: TopicDownloadState[]) => Object.fromEntries(
+  rows.map(row => [topicDownloadKey(row.topicId, row.topicKind), row]),
+) as Record<string, TopicDownloadState>;
 
 const CHAT_MEDIA_SIZE_MIN = 220;
 const CHAT_MEDIA_SIZE_MAX = 460;
@@ -291,12 +307,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [loadingMoreChats, setLoadingMoreChats] = useState(false);
   const [hasMoreChats, setHasMoreChats] = useState(false);
   const [chatLoadLimit, setChatLoadLimit] = useState(INITIAL_CHAT_LOAD_LIMIT);
-  const [selectedChat, setSelectedChat] = useState<Chat | null>(() => {
-    const lastChatId = appStorage.get(LAST_CHAT_KEY);
-    return lastChatId
-      ? initialCachedChatsRef.current?.find(chat => chat.id === lastChatId) || null
-      : null;
-  });
+  const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const selectedChatRef = useRef<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const sentMediaThumbnailUrlsRef = useRef(new Map<string, string>());
@@ -336,8 +347,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const fullChatLoadSeqRef = useRef(0);
   const fullChatRequestedChatIdRef = useRef<string | null>(null);
   const topicsLoadSeqRef = useRef(0);
+  const topicDownloadLoadSeqRef = useRef(0);
   const chatSearchSeqRef = useRef(0);
-  const restoredChatRef = useRef(false);
 
   const withTransientSentThumbnail = useCallback((chatId: string, message: Message): Message => {
     if (message.thumbnailUrl || !message.hasMedia) return message;
@@ -350,6 +361,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [updatingTwitterMessages, setUpdatingTwitterMessages] = useState(false);
   const [forumTopics, setForumTopics] = useState<ForumTopic[]>([]);
   const [loadingTopics, setLoadingTopics] = useState(false);
+  const [topicDownloadStates, setTopicDownloadStates] = useState<Record<string, TopicDownloadState>>({});
+  const topicDownloadStatesRef = useRef<Record<string, TopicDownloadState>>({});
+  const [topicsWithNewMedia, setTopicsWithNewMedia] = useState<Set<string>>(new Set());
+  const topicLiveMediaRevisionRef = useRef<Map<string, number>>(new Map());
+  const [topicCheckEpoch, setTopicCheckEpoch] = useState(0);
+  const [hiddenTopicKeys, setHiddenTopicKeys] = useState<Set<string>>(new Set());
+  const [showHiddenTopics, setShowHiddenTopics] = useState(false);
+  const [topicContextMenu, setTopicContextMenu] = useState<{ x: number; y: number; topic: ForumTopic; chatId: string } | null>(null);
   const [selectedTopicId, setSelectedTopicId] = useState<string>('all');
   const [viewingTopic, setViewingTopic] = useState<ForumTopic | null>(null);
 
@@ -379,6 +398,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const [chatContextMenu, setChatContextMenu] = useState<{ x: number; y: number; chat: Chat } | null>(null);
   const [allChatsContextMenu, setAllChatsContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [imgContextMenu, setImgContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null);
+  const [duplicateSearch, setDuplicateSearch] = useState<{ folderPath: string; media: DuplicateSearchMedia[] } | null>(null);
   const [userContextMenu, setUserContextMenu] = useState<{ x: number; y: number; senderId: string; senderName: string } | null>(null);
   const [searchMediaUser, setSearchMediaUser] = useState<{ senderId: string; senderName: string } | null>(null);
   const [searchMediaResults, setSearchMediaResults] = useState<Message[]>([]);
@@ -487,9 +507,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [activeFolder, chatSearch, chats]);
   const filteredTopics = useMemo(() => {
     const search = topicSearch.trim().toLowerCase();
-    if (!search) return forumTopics;
-    return forumTopics.filter(topic => topic.title.toLowerCase().includes(search));
-  }, [forumTopics, topicSearch]);
+    return forumTopics.filter(topic => {
+      if (!showHiddenTopics && hiddenTopicKeys.has(topicVisibilityKey(topic))) return false;
+      return !search || topic.title.toLowerCase().includes(search);
+    });
+  }, [forumTopics, hiddenTopicKeys, showHiddenTopics, topicSearch]);
+  const hiddenTopicsCount = useMemo(
+    () => forumTopics.filter(topic => hiddenTopicKeys.has(topicVisibilityKey(topic))).length,
+    [forumTopics, hiddenTopicKeys]
+  );
+  const topicDownloadStatus = useMemo(() => Object.fromEntries(
+    Object.keys(topicDownloadStates).map(key => [key, topicsWithNewMedia.has(key) ? 'new' : 'downloaded']),
+  ) as Record<string, 'downloaded' | 'new'>, [topicDownloadStates, topicsWithNewMedia]);
   const messagesById = useMemo(() => {
     const map = new Map<number, Message>();
     messages.forEach(message => map.set(Number(message.id), message));
@@ -829,6 +858,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setIsTopicDropdownOpen(false);
       setMsgContextMenu(null);
       setChatContextMenu(null);
+      setTopicContextMenu(null);
       setImgContextMenu(null);
       setUserContextMenu(null);
     };
@@ -839,6 +869,111 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   useEffect(() => {
     appStorage.setBoolean(INFO_PANEL_KEY, infoOpen);
   }, [infoOpen]);
+
+  useEffect(() => {
+    if (!selectedChat) {
+      setHiddenTopicKeys(new Set());
+      setShowHiddenTopics(false);
+      return;
+    }
+    const key = `${HIDDEN_TOPICS_PREFIX}${selectedChat.id}`;
+    try {
+      const stored = JSON.parse(appStorage.get(key) || '[]');
+      setHiddenTopicKeys(new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === 'string') : []));
+    } catch {
+      appStorage.remove(key);
+      setHiddenTopicKeys(new Set());
+    }
+    setShowHiddenTopics(false);
+    setTopicContextMenu(null);
+  }, [selectedChat?.id]);
+
+  const toggleTopicVisibility = useCallback((chatId: string, topic: ForumTopic) => {
+    setHiddenTopicKeys(current => {
+      const next = new Set(current);
+      const key = topicVisibilityKey(topic);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      appStorage.set(`${HIDDEN_TOPICS_PREFIX}${chatId}`, JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const loadSeq = ++topicDownloadLoadSeqRef.current;
+    topicDownloadStatesRef.current = {};
+    topicLiveMediaRevisionRef.current.clear();
+    setTopicDownloadStates({});
+    setTopicsWithNewMedia(new Set());
+    if (!selectedChat || !runtimeCapabilities.isTauri) return;
+
+    void invoke<TopicDownloadState[]>('topic_download_state_get', { chatId: selectedChat.id })
+      .then(rows => {
+        if (loadSeq !== topicDownloadLoadSeqRef.current) return;
+        const indexed = indexTopicDownloads(rows);
+        topicDownloadStatesRef.current = indexed;
+        setTopicDownloadStates(indexed);
+      })
+      .catch(error => debugWarn('[Telegram] Falha ao carregar downloads dos tópicos:', error));
+  }, [selectedChat?.id]);
+
+  useEffect(() => {
+    if (!selectedChat?.hasTopics || !runtimeCapabilities.isTauri) return;
+    let lastRefreshAt = 0;
+    const refreshOnResume = () => {
+      const now = Date.now();
+      if (document.visibilityState !== 'visible' || now - lastRefreshAt < 30_000) return;
+      lastRefreshAt = now;
+      setTopicCheckEpoch(current => current + 1);
+    };
+    window.addEventListener('focus', refreshOnResume);
+    document.addEventListener('visibilitychange', refreshOnResume);
+    return () => {
+      window.removeEventListener('focus', refreshOnResume);
+      document.removeEventListener('visibilitychange', refreshOnResume);
+    };
+  }, [selectedChat?.id, selectedChat?.hasTopics]);
+
+  useEffect(() => {
+    if (!selectedChat || !runtimeCapabilities.isTauri || (viewingTopic && !isDownloadModalOpen)) return;
+    const chatId = selectedChat.id;
+    const records = forumTopics
+      .map(topic => topicDownloadStates[topicDownloadKey(topic.id, topic.kind)])
+      .filter((record): record is TopicDownloadState => Boolean(record));
+    if (records.length === 0) return;
+
+    let cancelled = false;
+    let nextIndex = 0;
+    const checkNext = async () => {
+      while (!cancelled && nextIndex < records.length) {
+        const record = records[nextIndex++];
+        const key = topicDownloadKey(record.topicId, record.topicKind);
+        const liveRevision = topicLiveMediaRevisionRef.current.get(key) ?? 0;
+        try {
+          const hasNewMedia = await invoke<boolean>('tdlib_topic_has_new_media', {
+            chatId: Number(chatId),
+            topicId: Number(record.topicId),
+            topicKind: record.topicKind,
+            afterMessageId: record.lastMessageId,
+          });
+          if (!cancelled) {
+            setTopicsWithNewMedia(current => {
+              if ((topicLiveMediaRevisionRef.current.get(key) ?? 0) !== liveRevision) return current;
+              if (current.has(key) === hasNewMedia) return current;
+              const next = new Set(current);
+              if (hasNewMedia) next.add(key);
+              else next.delete(key);
+              return next;
+            });
+          }
+        } catch (error) {
+          debugWarn('[Telegram] Falha ao verificar novas mídias do tópico:', error);
+        }
+      }
+    };
+    void Promise.all(Array.from({ length: Math.min(3, records.length) }, () => checkNext()));
+    return () => { cancelled = true; };
+  }, [selectedChat?.id, viewingTopic?.id, isDownloadModalOpen, forumTopics, topicDownloadStates, topicCheckEpoch]);
 
   useEffect(() => {
     if (!selectedChat) return;
@@ -878,6 +1013,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     telegramService.cancelQueuedThumbnails({ activeChatId: selectedChat?.id ?? null });
     jumpRequestRef.current += 1;
     pendingJumpToMsgIdRef.current = null;
+    historicalJumpSnapshotRef.current = null;
+    historicalJumpSeqRef.current += 1;
+    setIsHistoricalJump(false);
+    setLoadingHistoricalJump(false);
     if (visibleRangeSettleTimerRef.current) {
       window.clearTimeout(visibleRangeSettleTimerRef.current);
       visibleRangeSettleTimerRef.current = null;
@@ -894,7 +1033,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     setLoadingFullInfo(false);
 
     if (selectedChat) {
-      appStorage.set(LAST_CHAT_KEY, selectedChat.id);
       shouldScrollToBottomRef.current = false;
       pendingTimelineAnchorRef.current = null;
       setIsDownloadModalOpen(false);
@@ -944,7 +1082,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         }
       }
     } else {
-      if (restoredChatRef.current) appStorage.remove(LAST_CHAT_KEY);
       setMessages([]);
       setHasMoreMessages(false);
       setOldestMessageId(null);
@@ -966,6 +1103,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       setChatSearchSenderFilter('all');
     }
   }, [selectedChat?.id, prepareTimelineRestore]);
+
+  useEffect(() => {
+    historicalJumpSnapshotRef.current = null;
+    historicalJumpSeqRef.current += 1;
+    setIsHistoricalJump(false);
+    setLoadingHistoricalJump(false);
+  }, [viewingTopic?.id]);
 
   useEffect(() => {
     const pendingAnchor = pendingTimelineAnchorRef.current;
@@ -1023,6 +1167,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         : chat
       ));
 
+      if (isActiveChat && message.hasMedia) {
+        const incomingTopicId = topicId ?? message.topicId;
+        if (incomingTopicId != null) {
+          const key = topicDownloadKey(incomingTopicId, topicKind || message.topicKind);
+          const record = topicDownloadStatesRef.current[key];
+          if (record && Number(message.id) > record.lastMessageId) {
+            topicLiveMediaRevisionRef.current.set(key, (topicLiveMediaRevisionRef.current.get(key) ?? 0) + 1);
+            setTopicsWithNewMedia(current => current.has(key) ? current : new Set(current).add(key));
+          }
+        }
+      }
+
       if (!activeChat || !isActiveChat) return;
 
       const activeTopicId = viewingTopic && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
@@ -1031,6 +1187,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         return;
       }
       if (activeTopicId && (topicKind || message.topicKind || 'forum') !== activeTopicKind) {
+        return;
+      }
+
+      const historicalSnapshot = historicalJumpSnapshotRef.current;
+      if (historicalSnapshot) {
+        const byId = new Map<number, Message>();
+        historicalSnapshot.messages.forEach(item => byId.set(Number(item.id), item));
+        byId.set(Number(message.id), withTransientSentThumbnail(String(chatId), message));
+        historicalSnapshot.messages = Array.from(byId.values()).sort(compareTelegramMessages);
+        if (!message.out) setPendingIncomingMessages(current => current + 1);
         return;
       }
 
@@ -1216,6 +1382,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   const fetchDialogs = async (limit = INITIAL_CHAT_LOAD_LIMIT, loadingMore = false) => {
     if (loadingMore) setLoadingMoreChats(true);
     else setIsRefreshingChats(true);
+    const startedAt = performance.now();
     try {
       const res = await telegramService.getDialogs(limit);
       if (res.success && res.dialogs) {
@@ -1232,12 +1399,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             appStorage.remove('plasma_twitter_pending_fake_chat');
           }
         }
-        if (!restoredChatRef.current && !pendingFakeChatId) {
-          restoredChatRef.current = true;
-          const lastChatId = appStorage.get(LAST_CHAT_KEY);
-          const restoredChat = lastChatId ? res.dialogs.find((chat: Chat) => chat.id === lastChatId) : null;
-          if (restoredChat) setSelectedChat(restoredChat);
-        }
         // ChatAvatar is rendered by a virtual list and requests only visible rows.
         // Avoid an eager background batch competing with the first visible avatars.
       }
@@ -1245,6 +1406,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     } catch (e: any) {
       setError(e.message || 'Unknown error');
     } finally {
+      if (!loadingMore) debugLog("[Startup] Carregamento das conversas Telegram:", Math.round(performance.now() - startedAt), "ms");
       if (loadingMore) setLoadingMoreChats(false);
       else {
         setLoading(false);
@@ -1425,6 +1587,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, []);
 
   const loadMessages = async (chatId: string, offsetId = 0, topicId?: number, options: { silent?: boolean; refresh?: boolean; forceRefresh?: boolean; latestKnownMessageDate?: number | null; topicKind?: string } = {}) => {
+    if (options.silent && historicalJumpSnapshotRef.current) return;
     const loadSeq = ++messagesLoadSeqRef.current;
     const preserveMountedTimeline = Boolean(options.silent && messagesRef.current.length > 0);
     if (!options.silent) setLoadingMessages(true);
@@ -1443,7 +1606,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           setLoadingMessages(false);
           const latestKnownMessageDate = Number(options.latestKnownMessageDate || 0);
           const cacheHasKnownLatest = !latestKnownMessageDate || Number(cached.newestMessageDate || 0) >= latestKnownMessageDate;
-          if (cached.isFresh && cacheHasKnownLatest && !options.forceRefresh) return;
+          // O cache só pode encerrar a busca se também comprovar que há histórico
+          // para a paginação; uma página de 50 itens sozinha não comprova isso.
+          if (cached.isFresh && cacheHasKnownLatest && cached.hasMore && !options.forceRefresh) return;
         }
       }
 
@@ -1475,16 +1640,25 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
 
   const loadOlderMessages = async () => {
     if (!selectedChat || !oldestMessageId || loadingMoreMessages) return;
+    const chatId = selectedChat.id;
+    const loadSeq = messagesLoadSeqRef.current;
     setLoadingMoreMessages(true);
     if (timelineRef.current) preserveScrollPositionRef.current = timelineRef.current.scrollHeight;
     try {
       const res = await telegramService.getMessages({
-        chatId: selectedChat.id, limit: PAGE_SIZE, offsetId: oldestMessageId, topicId: viewingTopic?.id, topicKind: viewingTopic?.kind
+        chatId, limit: PAGE_SIZE, offsetId: oldestMessageId, topicId: viewingTopic?.id, topicKind: viewingTopic?.kind
       });
+      if (loadSeq !== messagesLoadSeqRef.current || selectedChatRef.current?.id !== chatId) return;
       if (res.success && res.messages?.length) {
-        setMessages(current => [...res.messages!, ...current]);
-        setHasMoreMessages(Boolean(res.hasMore));
-        setOldestMessageId(res.oldestMessageId ?? null);
+        const existingIds = new Set(messagesRef.current.map(message => Number(message.id)));
+        const olderMessages = res.messages.filter((message: Message) => !existingIds.has(Number(message.id)));
+        if (olderMessages.length) {
+          setMessages(current => [...olderMessages, ...current].sort(compareTelegramMessages));
+          setHasMoreMessages(Boolean(res.hasMore));
+          setOldestMessageId(res.oldestMessageId ?? null);
+        } else {
+          setHasMoreMessages(false);
+        }
       } else setHasMoreMessages(false);
     } catch (e) { debugWarn(e); }
     finally { setLoadingMoreMessages(false); }
@@ -1541,6 +1715,28 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
         }
       });
       if (!res.success) showDashboardToast({ tone: 'error', title: 'Falha ao iniciar download', message: res.error || undefined });
+      else if (res.trackingError) showDashboardToast({
+        tone: 'error',
+        title: 'Download concluído, mas sem registro do tópico',
+        message: res.trackingError,
+      });
+      else if (selectedTopic && !res.aborted && res.failedCount === 0) {
+        try {
+          const rows = await invoke<TopicDownloadState[]>('topic_download_state_get', { chatId: selectedChat.id });
+          if (selectedChatRef.current?.id === selectedChat.id) {
+            const indexed = indexTopicDownloads(rows);
+            topicDownloadStatesRef.current = indexed;
+            setTopicsWithNewMedia(current => {
+              const next = new Set(current);
+              next.delete(topicDownloadKey(selectedTopic.id, selectedTopic.kind));
+              return next;
+            });
+            setTopicDownloadStates(indexed);
+          }
+        } catch (error) {
+          showDashboardToast({ tone: 'error', title: 'Falha ao atualizar estado do tópico', message: error instanceof Error ? error.message : String(error) });
+        }
+      }
     } catch (e: any) { showDashboardToast({ tone: 'error', title: 'Falha ao iniciar download', message: e.message || String(e) }); }
     finally { setDownloading(false); setStopping(false); }
   };
@@ -1917,6 +2113,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
       }
 
       if (res.success) {
+        if (historicalJumpSnapshotRef.current) scrollToLatestMessages();
         if (res.message) {
           setMessages(current => {
             const byId = new Map<number, Message>();
@@ -1969,6 +2166,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     if (res.success && res.message) {
       setOriginalMsgModal({ msg, original: res.message });
       setMsgContextMenu(null);
+    } else {
+      showDashboardToast({ tone: 'error', title: 'Mensagem original indisponível', message: res.error || undefined });
     }
   };
 
@@ -2031,10 +2230,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     }));
 
     try {
-      await telegramService.sendReaction({ chatId: selectedChat.id, messageId: msg.id, reaction: emoji });
+      const result = await telegramService.sendReaction({ chatId: selectedChat.id, messageId: msg.id, reaction: emoji });
+      if (!result.success) throw new Error(result.error || 'Não foi possível enviar a reação.');
     } catch (err) {
-      debugWarn('Failed to send reaction:', err);
-      // Revert or fetch messages again if needed
+      setMessages(current => current.map(message => message.id === msg.id
+        ? { ...message, reactions: msg.reactions }
+        : message));
+      showDashboardToast({ tone: 'error', title: 'Reação não enviada', message: err instanceof Error ? err.message : String(err) });
     }
   }, [selectedChat]);
 
@@ -2210,74 +2412,61 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
   }, [chatSearchResultIndex, chatSearchResults.length, remoteChatSearchNextFromMessageId, loadMoreChatSearchResults, jumpToChatSearchResult]);
 
   const handleJumpToMessage = async (replyToMsgId: number) => {
-    let currentMessages = [...messagesRef.current];
-    debugLog('[TelegramEnchanted] Jump to Message triggered. Target replyToMsgId:', replyToMsgId);
-    debugLog('[TelegramEnchanted] Total loaded messages:', currentMessages.length);
+    if (!selectedChat || !Number.isFinite(replyToMsgId)) return;
+    if (jumpToLoadedMessage(replyToMsgId)) return;
 
-    let originalMsgIdx = currentMessages.findIndex(m => Number(m.id) === Number(replyToMsgId));
-    debugLog('[TelegramEnchanted] Message index in array:', originalMsgIdx);
+    const chatId = selectedChat.id;
+    const topicId = viewingTopic?.id && viewingTopic.id !== 0 ? viewingTopic.id : undefined;
+    const topicKind = viewingTopic?.kind;
+    const requestId = ++historicalJumpSeqRef.current;
+    setLoadingHistoricalJump(true);
 
-    if (originalMsgIdx >= 0) {
-      // The rendered timeline groups albums, so its index differs from the raw message index.
-      jumpToLoadedMessage(replyToMsgId);
-    } else {
-      // 1. If not found in memory, load older messages automatically (up to 15 attempts / 750 messages)
-      if (hasMoreMessages && oldestMessageId) {
-        pendingJumpToMsgIdRef.current = replyToMsgId;
-        setLoadingMessages(true);
-        try {
-          let currentOldestId: number | null = oldestMessageId;
-          let found = false;
-          let attempts = 0;
-          let newMessages = [...currentMessages];
-          
-          while (!found && currentOldestId && attempts < 15) {
-            debugLog('[TelegramEnchanted] Target message not found in local feed. Loading older chunk... Attempt:', attempts + 1);
-            const res = await telegramService.getMessages({
-              chatId: selectedChat!.id,
-              limit: PAGE_SIZE,
-              offsetId: currentOldestId,
-              topicId: viewingTopic?.id,
-              topicKind: viewingTopic?.kind,
-            });
-            
-            if (res.success && res.messages?.length) {
-              newMessages = [...res.messages, ...newMessages];
-              currentOldestId = res.oldestMessageId ?? null;
-              
-              originalMsgIdx = newMessages.findIndex(m => Number(m.id) === Number(replyToMsgId));
-              if (originalMsgIdx >= 0) {
-                found = true;
-                const byId = new Map<number, Message>();
-                newMessages.forEach(message => byId.set(Number(message.id), message));
-                setMessages(Array.from(byId.values()).sort(compareTelegramMessages));
-                setHasMoreMessages(Boolean(res.hasMore));
-                setOldestMessageId(res.oldestMessageId ?? null);
-                break;
-              }
-              if (!res.hasMore) {
-                break;
-              }
-            } else {
-              break;
-            }
-            attempts++;
-          }
-          
-          if (!found) {
-            pendingJumpToMsgIdRef.current = null;
-            setError('A mensagem original não foi encontrada no histórico.');
-          }
-        } catch (e) {
-          debugWarn('Error loading older messages for jump:', e);
-          pendingJumpToMsgIdRef.current = null;
-        } finally {
-          setLoadingMessages(false);
-        }
-      } else {
-        debugWarn('[TelegramEnchanted] Target message not found in local feed and cannot load older.');
-        setError('A mensagem original está muito antiga.');
+    try {
+      const result = await telegramService.getMessages({
+        chatId,
+        limit: 60,
+        offsetId: replyToMsgId,
+        offset: -18,
+        topicId,
+        topicKind,
+      });
+      if (requestId !== historicalJumpSeqRef.current || selectedChatRef.current?.id !== chatId) return;
+
+      const contextMessages: Message[] = Array.isArray(result.messages)
+        ? result.messages.map((message: Message) => withTransientSentThumbnail(chatId, message))
+        : [];
+      if (!result.success || !contextMessages.some(message => Number(message.id) === Number(replyToMsgId))) {
+        showDashboardToast({
+          tone: 'error',
+          title: 'Mensagem original indisponível',
+          message: result.error || 'Não foi possível localizar esta mensagem no histórico.',
+        });
+        return;
       }
+
+      if (!historicalJumpSnapshotRef.current) {
+        historicalJumpSnapshotRef.current = {
+          messages: [...messagesRef.current],
+          hasMoreMessages,
+          oldestMessageId,
+        };
+      }
+      messagesLoadSeqRef.current += 1;
+      pendingTimelineAnchorRef.current = null;
+      shouldScrollToBottomRef.current = false;
+      pendingJumpToMsgIdRef.current = replyToMsgId;
+      setMessages(contextMessages.sort(compareTelegramMessages));
+      setHasMoreMessages(Boolean(result.hasMore));
+      setOldestMessageId(result.oldestMessageId ?? contextMessages[0]?.id ?? null);
+      setIsHistoricalJump(true);
+      isNearLatestRef.current = false;
+      setIsNearLatest(false);
+    } catch (error) {
+      if (requestId === historicalJumpSeqRef.current) {
+        showDashboardToast({ tone: 'error', title: 'Falha ao abrir mensagem original', message: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      if (requestId === historicalJumpSeqRef.current) setLoadingHistoricalJump(false);
     }
   };
 
@@ -2312,6 +2501,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
     handleTelegramLinkRef.current?.(url);
   }, []);
   const handleClearEmojiPicker = useCallback(() => setEmojiPickerMsgId(null), []);
+  const handleSearchInSystem = useCallback((chatId: string, messageId: number, isVideo: boolean) => {
+    void openDialog({ title: 'Selecione a pasta para procurar', directory: true, multiple: false })
+      .then(folderPath => {
+        if (typeof folderPath === 'string') {
+          setDuplicateSearch({
+            folderPath,
+            media: [{ id: `${chatId}_${messageId}`, chatId, messageId, isVideo, name: `${isVideo ? 'Vídeo' : 'Foto'} ${messageId}` }],
+          });
+        }
+      })
+      .catch(caught => showDashboardToast({ tone: 'error', title: 'Falha ao selecionar pasta', message: caught instanceof Error ? caught.message : String(caught) }));
+  }, [showDashboardToast]);
   const handleOpenMessageContextMenu = useCallback((x: number, y: number, message: Message) => {
     setMsgContextMenu({ x, y, message });
   }, []);
@@ -2799,6 +3000,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                     filteredTopics={filteredTopics}
                     folderPath={folderPath}
                     forumTopics={forumTopics}
+                    topicDownloadStatus={topicDownloadStatus}
                     hasTopics={hasTopicView}
                     isTopicDropdownOpen={isTopicDropdownOpen}
                     loadingTopics={loadingTopics}
@@ -2874,6 +3076,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       <div className="topic-search-row">
                         <TextField type="text" placeholder="Pesquisar tópicos..." value={topicSearch} onChange={e => setTopicSearch(e.target.value)} />
                       </div>
+                      {hiddenTopicsCount > 0 && (
+                        <button
+                          type="button"
+                          className="topic-hidden-toggle"
+                          aria-pressed={showHiddenTopics}
+                          onClick={() => setShowHiddenTopics(value => !value)}
+                        >
+                          {showHiddenTopics ? <IconEyeOff size={17} stroke={2} /> : <IconEye size={17} stroke={2} />}
+                          <span>{showHiddenTopics ? 'Ocultar tópicos ocultos' : `Exibir tópicos ocultos (${hiddenTopicsCount})`}</span>
+                        </button>
+                      )}
                       <div className="topic-item" onClick={handleViewAllTopics}>
                         <div className="topic-item-avatar topic-item-avatar-all">
                           <IconMessageCircle size={20} stroke={2} />
@@ -2885,7 +3098,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                       </div>
                       <div className="topic-divider" />
                       {filteredTopics.map(topic => (
-                        <div key={topic.id} className="topic-item" onClick={() => handleSelectTopic(topic)}>
+                        <div
+                          key={`${topic.kind || 'forum'}:${topic.id}`}
+                          className={`topic-item ${hiddenTopicKeys.has(topicVisibilityKey(topic)) ? 'topic-item-hidden' : ''}`}
+                          onClick={() => handleSelectTopic(topic)}
+                          onContextMenu={event => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (!selectedChat) return;
+                            setTopicContextMenu({ x: event.clientX, y: event.clientY, topic, chatId: selectedChat.id });
+                          }}
+                        >
                           <div className="topic-item-avatar" style={{ background: `linear-gradient(135deg, ${getTopicColor(topic.id)})` }}>
                             {topic.title ? topic.title.charAt(0).toUpperCase() : '?'}
                           </div>
@@ -2895,11 +3118,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                               {topic.pinned && <span className="topic-pin">📌</span>}
                             </div>
                             <div className="topic-item-sub">
+                              {hiddenTopicKeys.has(topicVisibilityKey(topic)) && <span className="topic-hidden-label">Oculto · </span>}
                               {topic.unreadCount > 0 ? `${topic.unreadCount} não lidas${topic.closed ? ' · Fechado' : ''}` : topic.closed ? 'Fechado' : 'Aberto'}
                             </div>
+                            {topicDownloadStates[topicDownloadKey(topic.id, topic.kind)] && (
+                              <div
+                                className={`topic-download-status ${topicsWithNewMedia.has(topicDownloadKey(topic.id, topic.kind)) ? 'has-new-media' : ''}`}
+                                title={`Mass Download concluído em ${new Date(topicDownloadStates[topicDownloadKey(topic.id, topic.kind)].downloadedAt).toLocaleString('pt-BR')}`}
+                              >
+                                {topicsWithNewMedia.has(topicDownloadKey(topic.id, topic.kind))
+                                  ? <><IconPhoto size={14} stroke={2} aria-hidden="true" /> Novas mídias</>
+                                  : <><IconCircleCheck size={14} stroke={2} aria-hidden="true" /> Mídias baixadas</>}
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
+                      {filteredTopics.length === 0 && (
+                        <div className="topic-list-empty" role="status">
+                          {topicSearch.trim() ? 'Nenhum tópico corresponde à pesquisa.' : 'Todos os tópicos estão ocultos.'}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -2971,6 +3210,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                             onMessageContextMenu={handleOpenMessageContextMenu}
                             onUserContextMenu={handleOpenUserContextMenu}
                             onImageContextMenu={handleOpenImageContextMenu}
+                            onSearchInSystem={handleSearchInSystem}
                             onToggleSelectedMessage={handleToggleSelectedMessage}
                             onShowEmojiPicker={handleShowEmojiPicker}
                             onReact={handleReactStable}
@@ -2981,10 +3221,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                         ) : null;
                       }}
                     />
-                    {!isNearLatest && (
+                    {loadingHistoricalJump && (
+                      <div className="timeline-jump-loading" role="status" aria-live="polite">
+                        <LoadingIndicator size="xs" />
+                        <span>Buscando mensagem original</span>
+                      </div>
+                    )}
+                    {(!isNearLatest || isHistoricalJump) && (
                       <button type="button" className="timeline-latest-button" onClick={scrollToLatestMessages}>
                         <IconArrowDown size={18} stroke={2} aria-hidden="true" />
-                        {pendingIncomingMessages > 0
+                        {isHistoricalJump
+                          ? 'Voltar às recentes'
+                          : pendingIncomingMessages > 0
                           ? `${pendingIncomingMessages} ${pendingIncomingMessages === 1 ? 'nova mensagem' : 'novas mensagens'}`
                           : 'Ir para recentes'}
                       </button>
@@ -3066,6 +3314,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           sharedMedia={sharedMedia}
           getChatKind={getChatKind}
           getDownloadMeta={getDownloadMeta}
+          onSearchInSystem={handleSearchInSystem}
           setInfoOpen={setInfoOpen}
         />
       </div>
@@ -3273,6 +3522,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
               icon: <IcoCopy />,
               onClick: () => { writeClipboardText(msgContextMenu.message.text); setMsgContextMenu(null); },
             }] : []),
+            ...(msgContextMenu.message.hasMedia && selectedChat ? [{
+              label: 'Procurar arquivo no sistema',
+              icon: <IconFolderOpen size={16} />,
+              disabled: !runtimeCapabilities.isTauri || runtimeCapabilities.isAndroid,
+              onClick: () => handleSearchInSystem(selectedChat.id, msgContextMenu.message.id, msgContextMenu.message.isVideo),
+            }] : []),
             {
               label: 'Encaminhar',
               icon: <IcoForward />,
@@ -3372,6 +3627,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                 if (result?.success) showDashboardToast({ tone: 'success', title: 'Mídia salva', message: result.filePath || undefined });
               },
             },
+            {
+              label: 'Procurar arquivo no sistema',
+              icon: <IconFolderOpen size={16} />,
+              disabled: !runtimeCapabilities.isTauri || runtimeCapabilities.isAndroid,
+              onClick: () => handleSearchInSystem(selectedChat.id, imgContextMenu.msg.id, imgContextMenu.msg.isVideo),
+            },
             { separator: true },
             {
               label: 'Responder',
@@ -3387,6 +3648,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
           onClose={() => setImgContextMenu(null)}
         />
       )}
+      {duplicateSearch && <DashboardDuplicateSearch folderPath={duplicateSearch.folderPath} media={duplicateSearch.media} onClose={() => setDuplicateSearch(null)} />}
       {userContextMenu && selectedChat && (
         <ContextMenu
           x={userContextMenu.x}
@@ -3408,6 +3670,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
             },
           ]}
           onClose={() => setUserContextMenu(null)}
+        />
+      )}
+      {topicContextMenu && (
+        <ContextMenu
+          x={topicContextMenu.x}
+          y={topicContextMenu.y}
+          palette={palette}
+          density={density}
+          items={[{
+            label: hiddenTopicKeys.has(topicVisibilityKey(topicContextMenu.topic)) ? 'Mostrar tópico' : 'Ocultar tópico',
+            icon: hiddenTopicKeys.has(topicVisibilityKey(topicContextMenu.topic))
+              ? <IconEye size={16} stroke={2} />
+              : <IconEyeOff size={16} stroke={2} />,
+            onClick: () => toggleTopicVisibility(topicContextMenu.chatId, topicContextMenu.topic),
+          }]}
+          onClose={() => setTopicContextMenu(null)}
         />
       )}
       {searchMediaUser && selectedChat && (
@@ -3518,6 +3796,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                                   density={density}
                                   downloadMeta={getDownloadMeta(albumMsg, albumMsg.senderName || searchMediaUser.senderName)}
                                   albumMedias={albumMedias}
+                                  onSearchInSystem={handleSearchInSystem}
                                   selectionMode={isSearchMediaSelectionMode}
                                   onClickOverride={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(albumMsg.id)) : undefined}
                                 />
@@ -3548,6 +3827,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ skipLogin = false, onTeleg
                           downloadMeta={getDownloadMeta(message, message.senderName || searchMediaUser.senderName)}
                           selectionMode={isSearchMediaSelectionMode}
                           onClickOverride={isSearchMediaSelectionMode ? () => handleToggleSearchMedia(Number(message.id)) : undefined}
+                          onSearchInSystem={handleSearchInSystem}
                         />
                       </div>
                     );

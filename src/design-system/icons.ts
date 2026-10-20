@@ -24,6 +24,8 @@ export { default as IconCornerUpLeft } from "@tabler/icons-react/dist/esm/icons/
 export { default as IconDatabase } from "@tabler/icons-react/dist/esm/icons/IconDatabase.mjs";
 export { default as IconDots } from "@tabler/icons-react/dist/esm/icons/IconDots.mjs";
 export { default as IconDownload } from "@tabler/icons-react/dist/esm/icons/IconDownload.mjs";
+export { default as IconEye } from "@tabler/icons-react/dist/esm/icons/IconEye.mjs";
+export { default as IconEyeOff } from "@tabler/icons-react/dist/esm/icons/IconEyeOff.mjs";
 export { default as IconFileDownload } from "@tabler/icons-react/dist/esm/icons/IconFileDownload.mjs";
 export { default as IconFolderOpen } from "@tabler/icons-react/dist/esm/icons/IconFolderOpen.mjs";
 export { default as IconLayoutSidebarRight } from "@tabler/icons-react/dist/esm/icons/IconLayoutSidebarRight.mjs";

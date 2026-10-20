@@ -1,23 +1,62 @@
+#[cfg(not(target_os = "android"))]
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+#[cfg(not(target_os = "android"))]
 use std::net::{TcpListener, TcpStream};
+#[cfg(not(target_os = "android"))]
 use std::sync::OnceLock;
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
 
 use tauri::AppHandle;
 
+#[cfg(not(target_os = "android"))]
 use super::{
     complete_native_media_meta, ensure_native_playback_file, parse_plasma_media_path,
     parse_range_header,
 };
 
+#[cfg(not(target_os = "android"))]
 static PLASMA_MEDIA_HTTP_PORT: OnceLock<u16> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+static PLASMA_MEDIA_HTTP_TOKEN: OnceLock<String> = OnceLock::new();
 
-pub fn playback_url(chat_id: i64, message_id: i64) -> String {
-    if let Some(port) = PLASMA_MEDIA_HTTP_PORT.get() {
-        return format!("http://127.0.0.1:{port}/telegram/{chat_id}/{message_id}");
-    }
-    format!("plasma-media://localhost/telegram/{chat_id}/{message_id}")
+#[cfg(not(target_os = "android"))]
+fn request_has_token(target: &str, expected: &str) -> bool {
+    target
+        .split_once('?')
+        .and_then(|(_, query)| {
+            query
+                .split('&')
+                .find_map(|parameter| parameter.strip_prefix("token="))
+        })
+        .is_some_and(|provided| provided == expected)
 }
 
+pub fn playback_url(chat_id: i64, message_id: i64) -> String {
+    // Android release disallows cleartext HTTP; the registered Tauri protocol
+    // serves ranged playback without a loopback network request.
+    #[cfg(target_os = "android")]
+    return format!("plasma-media://localhost/telegram/{chat_id}/{message_id}");
+
+    #[cfg(not(target_os = "android"))]
+    {
+        if let (Some(port), Some(token)) =
+            (PLASMA_MEDIA_HTTP_PORT.get(), PLASMA_MEDIA_HTTP_TOKEN.get())
+        {
+            return format!(
+                "http://127.0.0.1:{port}/telegram/{chat_id}/{message_id}?token={token}"
+            );
+        }
+        format!("plasma-media://localhost/telegram/{chat_id}/{message_id}")
+    }
+}
+
+#[cfg(target_os = "android")]
+pub fn start_server(_app: AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn start_server(app: AppHandle) -> Result<(), String> {
     if PLASMA_MEDIA_HTTP_PORT.get().is_some() {
         return Ok(());
@@ -28,6 +67,12 @@ pub fn start_server(app: AppHandle) -> Result<(), String> {
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
+    let random_bytes: [u8; 32] = rand::random();
+    let token = random_bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let _ = PLASMA_MEDIA_HTTP_TOKEN.set(token);
     let _ = PLASMA_MEDIA_HTTP_PORT.set(port);
     println!("[plasma-media-http] listening on http://127.0.0.1:{port}");
 
@@ -48,7 +93,10 @@ pub fn start_server(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn handle_stream(app: AppHandle, mut stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let cloned = match stream.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
@@ -56,7 +104,9 @@ fn handle_stream(app: AppHandle, mut stream: TcpStream) {
             return;
         }
     };
-    let mut reader = BufReader::new(cloned);
+    // Bound request headers before parsing; a local client must not allocate
+    // arbitrarily large buffers while waiting for the access token check.
+    let mut reader = BufReader::new(cloned.take(16 * 1024));
     let mut first_line = String::new();
     if reader.read_line(&mut first_line).is_err() || first_line.trim().is_empty() {
         return;
@@ -64,10 +114,14 @@ fn handle_stream(app: AppHandle, mut stream: TcpStream) {
 
     let mut method = "";
     let mut path = "";
+    let mut authorized = false;
     let mut first_parts = first_line.split_whitespace();
     if let (Some(request_method), Some(request_path)) = (first_parts.next(), first_parts.next()) {
         method = request_method;
         path = request_path.split('?').next().unwrap_or(request_path);
+        authorized = PLASMA_MEDIA_HTTP_TOKEN
+            .get()
+            .is_some_and(|expected| request_has_token(request_path, expected));
     }
 
     let mut range_header: Option<String> = None;
@@ -87,25 +141,32 @@ fn handle_stream(app: AppHandle, mut stream: TcpStream) {
         }
     }
 
+    if !authorized || !(method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")) {
+        let _ = write_text_response(&mut stream, 403, "Acesso negado".to_string());
+        return;
+    }
+
     if let Err(error) = write_response(&app, &mut stream, method, path, range_header.as_deref()) {
         println!("[plasma-media-http] write error={error}");
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn http_status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
         206 => "Partial Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         416 => "Range Not Satisfiable",
         _ => "Internal Server Error",
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn build_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Vec<u8> {
     let mut response = format!("HTTP/1.1 {status} {}\r\n", http_status_text(status));
-    response.push_str("Access-Control-Allow-Origin: *\r\n");
     response.push_str("Connection: close\r\n");
     for (name, value) in headers {
         response.push_str(&name);
@@ -119,6 +180,7 @@ fn build_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8
     bytes
 }
 
+#[cfg(not(target_os = "android"))]
 fn text_response(status: u16, message: String) -> Vec<u8> {
     build_http_response(
         status,
@@ -133,13 +195,13 @@ fn text_response(status: u16, message: String) -> Vec<u8> {
     )
 }
 
+#[cfg(not(target_os = "android"))]
 fn write_headers(
     stream: &mut TcpStream,
     status: u16,
     headers: Vec<(String, String)>,
 ) -> std::io::Result<()> {
     let mut response = format!("HTTP/1.1 {status} {}\r\n", http_status_text(status));
-    response.push_str("Access-Control-Allow-Origin: *\r\n");
     response.push_str("Connection: close\r\n");
     for (name, value) in headers {
         response.push_str(&name);
@@ -151,6 +213,7 @@ fn write_headers(
     stream.write_all(response.as_bytes())
 }
 
+#[cfg(not(target_os = "android"))]
 fn write_text_response(
     stream: &mut TcpStream,
     status: u16,
@@ -159,6 +222,7 @@ fn write_text_response(
     stream.write_all(&text_response(status, message))
 }
 
+#[cfg(not(target_os = "android"))]
 fn copy_file_range(
     file: &mut std::fs::File,
     stream: &mut TcpStream,
@@ -184,6 +248,7 @@ fn copy_file_range(
     Ok(sent)
 }
 
+#[cfg(not(target_os = "android"))]
 fn write_response(
     app: &AppHandle,
     stream: &mut TcpStream,
@@ -258,4 +323,16 @@ fn write_response(
     write_headers(stream, status, headers)?;
     copy_file_range(&mut file, stream, start, content_len)?;
     stream.flush()
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::request_has_token;
+
+    #[test]
+    fn local_media_requires_the_session_token() {
+        assert!(request_has_token("/telegram/1/2?token=secret", "secret"));
+        assert!(!request_has_token("/telegram/1/2", "secret"));
+        assert!(!request_has_token("/telegram/1/2?token=wrong", "secret"));
+    }
 }

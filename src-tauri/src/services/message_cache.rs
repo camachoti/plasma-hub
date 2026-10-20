@@ -38,6 +38,15 @@ pub struct SharedMediaCacheResult {
     error: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDownloadState {
+    topic_id: String,
+    topic_kind: String,
+    last_message_id: i64,
+    downloaded_at: i64,
+}
+
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -93,8 +102,62 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 raw_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS topic_download_state (
+                chat_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                topic_kind TEXT NOT NULL,
+                last_message_id INTEGER NOT NULL,
+                downloaded_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, topic_id, topic_kind)
+            );
             "#,
         )
+        .map_err(|error| error.to_string())
+}
+
+pub fn record_topic_mass_download(
+    app: &AppHandle,
+    chat_id: i64,
+    topic_id: i64,
+    topic_kind: &str,
+    last_message_id: i64,
+) -> Result<(), String> {
+    let connection = connect(app)?;
+    connection.execute(
+        "INSERT INTO topic_download_state (chat_id, topic_id, topic_kind, last_message_id, downloaded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(chat_id, topic_id, topic_kind) DO UPDATE SET
+           last_message_id = MAX(topic_download_state.last_message_id, excluded.last_message_id),
+           downloaded_at = excluded.downloaded_at",
+        params![chat_id.to_string(), topic_id.to_string(), topic_kind, last_message_id, now_millis()],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn topic_download_state_get(
+    app: AppHandle,
+    chat_id: String,
+) -> Result<Vec<TopicDownloadState>, String> {
+    let connection = connect(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT topic_id, topic_kind, last_message_id, downloaded_at
+         FROM topic_download_state WHERE chat_id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![chat_id], |row| {
+            Ok(TopicDownloadState {
+                topic_id: row.get(0)?,
+                topic_kind: row.get(1)?,
+                last_message_id: row.get(2)?,
+                downloaded_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
 }
 

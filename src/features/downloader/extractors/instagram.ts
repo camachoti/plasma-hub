@@ -49,9 +49,7 @@ export async function extractInstagram(url: string): Promise<MediaInfo> {
         video: videoUrl ? [
           { id: 'ig-hd', label: 'HD', sub: 'MP4 · Instagram', size: `~${(durSec * 0.4).toFixed(1)} MB`, best: true, url: videoUrl },
         ] : [{ id: 'na', label: 'Imagem', sub: 'Não é um vídeo', size: '—', url: m.display_url }],
-        audio: videoUrl ? [
-          { id: 'ig-audio', label: 'Áudio', sub: 'AAC · Instagram', size: '—', url: videoUrl },
-        ] : [{ id: 'na', label: 'Sem áudio', sub: '—', size: '—' }],
+        audio: [],
       },
     };
   }
@@ -85,7 +83,7 @@ async function extractInstagramEmbed(_url: string, code: string): Promise<MediaI
     thumbnailUrl: thumbUrl,
     formats: {
       video: [{ id: 'ig-hd', label: 'HD', sub: 'MP4 · Instagram', size: '—', best: true, url: videoUrl }],
-      audio: [{ id: 'ig-audio', label: 'Áudio', sub: 'AAC · Instagram', size: '—', url: videoUrl }],
+      audio: [],
     },
   };
 }

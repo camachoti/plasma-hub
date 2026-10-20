@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { IconAlertCircle, IconBrandInstagram, IconBrandReddit, IconBrandTelegram, IconBrandX, IconBrandYoutube, IconChevronDown, IconCircleCheck, IconCircleMinus, IconCloudDownload, IconDatabase, IconFileDownload, IconFolderOpen, IconLink, IconMessageCircle, IconRefresh, IconTrash, IconUsers, IconX } from "../../design-system/icons";
 import { LoadingIndicator } from "../../design-system";
 import '../../styles/Downloads.css';
@@ -37,6 +37,28 @@ export const Downloads: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [media, setMedia] = useState<MediaInfo | null>(null);
   const [selectedFormat, setSelectedFormat] = useState<string>('');
+  const analysisRequestRef = useRef(0);
+
+  const analyzeMediaUrl = async (requestedUrl: string) => {
+    const request = ++analysisRequestRef.current;
+    setAnalyzing(true);
+    setError(null);
+    setMedia(null);
+    try {
+      const info = await analyzeUrl(requestedUrl);
+      if (request !== analysisRequestRef.current) return;
+      setMedia(info);
+      const formats = [...info.formats.video, ...info.formats.audio];
+      const firstDownloadable = formats.find(format => canDownloadFormat(info, format));
+      setSelectedFormat(firstDownloadable?.id || formats[0]?.id || '');
+    } catch (caughtError) {
+      if (request === analysisRequestRef.current) {
+        setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
+      }
+    } finally {
+      if (request === analysisRequestRef.current) setAnalyzing(false);
+    }
+  };
 
   useEffect(() => {
     setDownloads(Array.from(downloadService.activeDownloads.values()).reverse());
@@ -50,20 +72,7 @@ export const Downloads: React.FC = () => {
     const applySharedUrl = (sharedUrl?: string) => {
       if (!sharedUrl) return;
       setUrl(sharedUrl);
-      setError(null);
-      setMedia(null);
-      window.setTimeout(() => {
-        setAnalyzing(true);
-        analyzeUrl(sharedUrl)
-          .then((info) => {
-            setMedia(info);
-            const formats = [...info.formats.video, ...info.formats.audio];
-            const firstDownloadable = formats.find(f => canDownloadFormat(info, f));
-            setSelectedFormat(firstDownloadable?.id || formats[0]?.id || '');
-          })
-          .catch((err: any) => setError(err.message || 'Erro ao analisar URL compartilhada'))
-          .finally(() => setAnalyzing(false));
-      }, 0);
+      void analyzeMediaUrl(sharedUrl);
     };
 
     applySharedUrl(takePendingSharedDownloadUrl() || undefined);
@@ -75,7 +84,10 @@ export const Downloads: React.FC = () => {
     };
 
     window.addEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedUrl);
-    return () => window.removeEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedUrl);
+    return () => {
+      analysisRequestRef.current++;
+      window.removeEventListener(SHARED_DOWNLOAD_URL_EVENT, onSharedUrl);
+    };
   }, []);
 
   useEffect(() => {
@@ -91,20 +103,7 @@ export const Downloads: React.FC = () => {
 
   const handleAnalyze = async () => {
     if (!url.trim()) return;
-    setAnalyzing(true);
-    setError(null);
-    setMedia(null);
-    try {
-      const info = await analyzeUrl(url.trim());
-      setMedia(info);
-      const formats = [...info.formats.video, ...info.formats.audio];
-      const firstDownloadable = formats.find(f => canDownloadFormat(info, f));
-      setSelectedFormat(firstDownloadable?.id || formats[0]?.id || '');
-    } catch (err: any) {
-      setError(err.message || 'Erro ao analisar URL');
-    } finally {
-      setAnalyzing(false);
-    }
+    await analyzeMediaUrl(url.trim());
   };
 
   const handleDownload = () => {

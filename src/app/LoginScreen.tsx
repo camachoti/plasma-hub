@@ -8,14 +8,18 @@ interface LoginScreenProps {
   countryCode: string;
   phone: string;
   code: string;
-  phoneCodeHash: string | null;
+  password: string;
+  loginStep: "phone" | "code" | "password";
   error: string;
   isLoading: boolean;
   onCountryCodeChange: (value: string) => void;
   onPhoneChange: (value: string) => void;
   onCodeChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
   onSendCode: () => void;
   onSignIn: () => void;
+  onPasswordSignIn: () => void;
+  onChangePhone: () => void;
   onEnterWithoutLogin: () => void;
   onClearCache: () => void;
 }
@@ -26,14 +30,18 @@ export function LoginScreen({
   countryCode,
   phone,
   code,
-  phoneCodeHash,
+  password,
+  loginStep,
   error,
   isLoading,
   onCountryCodeChange,
   onPhoneChange,
   onCodeChange,
+  onPasswordChange,
   onSendCode,
   onSignIn,
+  onPasswordSignIn,
+  onChangePhone,
   onEnterWithoutLogin,
   onClearCache,
 }: LoginScreenProps) {
@@ -55,7 +63,7 @@ export function LoginScreen({
 
         {error && <div className="error-message shake">{error}</div>}
 
-        {!phoneCodeHash ? (
+        {loginStep === "phone" ? (
           <div className="login-form slide-up">
             <label>País e Número de Telefone</label>
             <div className="login-phone-row">
@@ -90,10 +98,11 @@ export function LoginScreen({
               </button>
             </div>
           </div>
-        ) : (
+        ) : loginStep === "code" ? (
           <div className="login-form slide-up">
-            <label>Código recebido no Telegram</label>
+            <label htmlFor="telegram-login-code">Código recebido no Telegram</label>
             <TextField
+              id="telegram-login-code"
               type="text"
               inputMode="numeric"
               placeholder="12345"
@@ -113,6 +122,32 @@ export function LoginScreen({
             >
               {isLoading ? "Entrando..." : "Entrar"}
             </button>
+            <div className="login-links">
+              <button type="button" onClick={onChangePhone} disabled={isLoading}>Usar outro número</button>
+            </div>
+          </div>
+        ) : (
+          <div className="login-form slide-up">
+            <label htmlFor="telegram-login-password">Senha de duas etapas do Telegram</label>
+            <TextField
+              id="telegram-login-password"
+              type="password"
+              value={password}
+              onChange={event => onPasswordChange(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === "Enter" && password && !isLoading) onPasswordSignIn();
+              }}
+              disabled={isLoading}
+              autoFocus
+              autoComplete="current-password"
+              className="login-input"
+            />
+            <button onClick={onPasswordSignIn} disabled={isLoading || !password} className="login-button">
+              {isLoading ? "Validando..." : "Validar senha"}
+            </button>
+            <div className="login-links">
+              <button type="button" onClick={onChangePhone} disabled={isLoading}>Usar outro número</button>
+            </div>
           </div>
         )}
       </div>

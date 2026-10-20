@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { IconDownload } from "../design-system/icons";
+import { IconDownload, IconFolderOpen } from "../design-system/icons";
 import { ContextMenu } from './ContextMenu';
 import { MessageMediaLightbox } from './MessageMediaLightbox';
 import { MessageMediaPreview } from './MessageMediaPreview';
 import { useMessageMediaProgress } from './useMessageMediaProgress';
 import { telegramService } from '../features/telegram/TelegramService';
 import { debugLog, debugWarn } from '../shared/debug/logger';
+import { runtimeCapabilities } from '../shared/platform/runtime';
 import {
   IMAGE_MEDIA_MIME_TYPE,
   MediaCancelControl,
@@ -27,6 +28,7 @@ interface Props {
   albumMedias?: Array<{ id: number; isVideo: boolean; videoDuration?: number | null; messageDate?: number; mediaSize?: number | null }>;
   downloadMeta?: Record<string, any>;
   mediaPriority?: 'visible' | 'background';
+  onSearchInSystem?: (chatId: string, messageId: number, isVideo: boolean) => void;
 }
 
 interface ContextMenuState {
@@ -104,12 +106,13 @@ const areMessageMediaPropsEqual = (prev: Props, next: Props) => (
   && prev.density === next.density
   && prev.selectionMode === next.selectionMode
   && prev.mediaPriority === next.mediaPriority
+  && prev.onSearchInSystem === next.onSearchInSystem
   && Boolean(prev.onClickOverride) === Boolean(next.onClickOverride)
   && areAlbumMediasEqual(prev.albumMedias, next.albumMedias)
   && areDownloadMetaEqual(prev.downloadMeta, next.downloadMeta)
 );
 
-const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, mediaSize, thumbnailUrl, palette, density, onClickOverride, selectionMode = false, albumMedias, downloadMeta, mediaPriority = 'visible' }) => {
+const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, videoDuration, messageDate, mediaSize, thumbnailUrl, palette, density, onClickOverride, selectionMode = false, albumMedias, downloadMeta, mediaPriority = 'visible', onSearchInSystem }) => {
   const [previewSrc, setPreviewSrc] = useState<string | null>(thumbnailUrl || null);
   const [loading, setLoading] = useState(() => !thumbnailUrl);
   const [isOpen, setIsOpen] = useState(false);
@@ -657,6 +660,11 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
       onClick: () => handleSaveMedia(true),
       disabled: savingMedia,
     },
+    ...(onSearchInSystem && runtimeCapabilities.isTauri && !runtimeCapabilities.isAndroid ? [{
+      label: 'Procurar arquivo no sistema',
+      icon: <IconFolderOpen size={18} stroke={2} />,
+      onClick: () => onSearchInSystem(chatId, activeMessageId, activeIsVideo),
+    }] : []),
     ...(albumMedias && albumMedias.length > 1 ? [{
       label: 'Salvar álbum como...',
       icon: <DownloadActionIcon />,
@@ -805,9 +813,21 @@ const MessageMediaComponent: React.FC<Props> = ({ chatId, messageId, isVideo, vi
   }
 
   return (
-    <div className={`media-preview media-skeleton ${isVideo ? 'is-video' : 'is-image'}`}>
-      <MediaSkeleton />
-    </div>
+    <>
+      <div className={`media-preview media-skeleton ${isVideo ? 'is-video' : 'is-image'}`} onContextMenu={handleContextMenu}>
+        <MediaSkeleton />
+      </div>
+      {contextMenu.visible && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenuItems}
+          onClose={closeContextMenu}
+          palette={palette}
+          density={density}
+        />
+      )}
+    </>
   );
 };
 

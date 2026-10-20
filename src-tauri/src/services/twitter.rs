@@ -680,8 +680,8 @@ async fn download_twitter_profile_native_inner(
         return Err("Nenhuma mídia encontrada para baixar".to_string());
     }
 
-    let download_dir = twitter_download_dir(app_handle)?
-        .join(format!("@{}", sanitize_filename(username)));
+    let download_dir =
+        twitter_download_dir(app_handle)?.join(format!("@{}", sanitize_filename(username)));
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
 
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;

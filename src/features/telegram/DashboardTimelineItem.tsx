@@ -87,6 +87,7 @@ interface TimelineMessageItemProps {
   onMessageContextMenu: (x: number, y: number, message: Message) => void;
   onUserContextMenu: (x: number, y: number, senderId: string, senderName: string) => void;
   onImageContextMenu: (x: number, y: number, message: Message) => void;
+  onSearchInSystem: (chatId: string, messageId: number, isVideo: boolean) => void;
   onToggleSelectedMessage: (messageId: number) => void;
   onShowEmojiPicker: (messageId: number, rect: DOMRect) => void;
   onReact: (message: Message, emoji: string) => void;
@@ -114,6 +115,7 @@ export const TimelineMessageItem = React.memo(({
   onMessageContextMenu,
   onUserContextMenu,
   onImageContextMenu,
+  onSearchInSystem,
   onToggleSelectedMessage,
   onShowEmojiPicker,
   onReact,
@@ -263,6 +265,7 @@ export const TimelineMessageItem = React.memo(({
                       palette={palette}
                       density={density}
                       downloadMeta={buildDownloadMeta(albumMsg, albumMsg.out ? 'Você' : albumMsg.senderName || displayName)}
+                      onSearchInSystem={onSearchInSystem}
                       selectionMode={isSelectionMode}
                       onClickOverride={isSelectionMode ? () => onToggleSelectedMessage(albumMsg.id) : undefined}
                       albumMedias={albumMedias}
@@ -288,6 +291,7 @@ export const TimelineMessageItem = React.memo(({
                     palette={palette}
                     density={density}
                     downloadMeta={buildDownloadMeta(msg, displayName)}
+                    onSearchInSystem={onSearchInSystem}
                     selectionMode={isSelectionMode}
                     onClickOverride={isSelectionMode ? () => onToggleSelectedMessage(msg.id) : undefined}
                   />

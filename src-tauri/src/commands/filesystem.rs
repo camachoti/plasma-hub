@@ -61,6 +61,40 @@ fn content_range_total(response: &reqwest::Response) -> Option<u64> {
     parse_content_range_total(value)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PartialDownloadMeta {
+    source_key: u64,
+    etag: String,
+}
+
+fn source_key(url: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn partial_meta_path(partial: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.meta", partial.display()))
+}
+
+fn content_range_start(response: &reqwest::Response) -> Option<u64> {
+    let value = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    parse_content_range_start(value)
+}
+
+fn parse_content_range_start(value: &str) -> Option<u64> {
+    value
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn parse_content_range_total(value: &str) -> Option<u64> {
     value.rsplit('/').next()?.parse::<u64>().ok()
 }
@@ -181,6 +215,7 @@ pub async fn download_url_to_file(
     validate_download_url(&url)?;
     let destination = Path::new(&file_path);
     let partial = partial_path(&file_path)?;
+    let partial_meta = partial_meta_path(&partial);
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -201,9 +236,19 @@ pub async fn download_url_to_file(
             }))
             .build()
             .map_err(|error| error.to_string())?;
-        let resume_from = fs::metadata(&partial)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let stored_meta = fs::read(&partial_meta)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PartialDownloadMeta>(&bytes).ok())
+            .filter(|meta| meta.source_key == source_key(&url));
+        let resume_from = if stored_meta.is_some() {
+            fs::metadata(&partial)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        } else {
+            let _ = fs::remove_file(&partial);
+            let _ = fs::remove_file(&partial_meta);
+            0
+        };
         let mut request = client.get(&url);
         if let Some(headers) = headers {
             for (name, value) in headers {
@@ -216,6 +261,9 @@ pub async fn download_url_to_file(
         }
         if resume_from > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+            if let Some(meta) = &stored_meta {
+                request = request.header(reqwest::header::IF_RANGE, meta.etag.as_str());
+            }
         }
         let mut response = tokio::select! {
             result = request.send() => result.map_err(|error| error.to_string())?,
@@ -226,6 +274,29 @@ pub async fn download_url_to_file(
         }
 
         let resumed = resume_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+            && content_range_start(&response) != Some(resume_from)
+        {
+            return Err("Servidor retornou um intervalo de download inesperado.".to_string());
+        }
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.starts_with("W/"));
+        if let Some(etag) = etag {
+            let meta = PartialDownloadMeta {
+                source_key: source_key(&url),
+                etag: etag.to_string(),
+            };
+            fs::write(
+                &partial_meta,
+                serde_json::to_vec(&meta).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            let _ = fs::remove_file(&partial_meta);
+        }
         let total_bytes = if resumed {
             content_range_total(&response)
                 .or_else(|| response.content_length().map(|length| length + resume_from))
@@ -266,6 +337,7 @@ pub async fn download_url_to_file(
         file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
         fs::rename(&partial, destination).map_err(|error| error.to_string())?;
+        let _ = fs::remove_file(&partial_meta);
         let _ = app.emit(
             "native-file-download-progress",
             NativeFileDownloadProgress {
@@ -285,6 +357,7 @@ pub async fn download_url_to_file(
         .is_some_and(|error| !is_cancellation_error(error))
     {
         let _ = fs::remove_file(&partial);
+        let _ = fs::remove_file(&partial_meta);
     }
     result
 }
@@ -396,5 +469,15 @@ mod tests {
             Some(8388608)
         );
         assert_eq!(parse_content_range_total("bytes */*"), None);
+    }
+
+    #[test]
+    fn rejects_unexpected_resume_offset() {
+        assert_eq!(
+            parse_content_range_start("bytes 1048576-2097151/8388608"),
+            Some(1048576)
+        );
+        assert_eq!(parse_content_range_start("bytes */8388608"), None);
+        assert_eq!(parse_content_range_start("bytes 0-99/1000"), Some(0));
     }
 }

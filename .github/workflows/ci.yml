@@ -19,6 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm test
 
   native:
     name: Rust / Tauri
@@ -36,3 +37,26 @@ jobs:
       - name: Run native tests
         working-directory: src-tauri
         run: cargo test --lib
+
+  android:
+    name: Android aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+      - run: npm ci
+      - run: npm run tauri:android:init -- --ci --skip-targets-install
+      - run: npx tauri android build --debug --apk --target aarch64 --ci

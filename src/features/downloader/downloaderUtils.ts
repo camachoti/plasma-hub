@@ -67,17 +67,25 @@ export function extractInstagramCode(url: string): string | null {
   return m ? m[1] : null;
 }
 
-export function getDownloadExtension(platform: string, mode: 'video' | 'audio', url?: string): string {
-  if (platform === 'twitter' && url) {
-    const cleanUrl = url.split('?')[0].toLowerCase();
-    const match = cleanUrl.match(/\.([a-z0-9]{2,5})$/);
-    if (match?.[1]) {
-      const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
-      if (['jpg', 'png', 'webp', 'gif', 'mp4', 'mov'].includes(ext)) return ext;
-    }
-    if (url.includes('format=jpg')) return 'jpg';
+export function getDownloadExtension(platform: string, mode: 'video' | 'audio', url?: string, formatDescription = ''): string {
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      const extension = parsed.pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1];
+      if (extension && ['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'mov', 'm4a', 'mp3', 'webm', 'opus', 'aac'].includes(extension)) {
+        return extension === 'jpeg' ? 'jpg' : extension;
+      }
+      const imageFormat = parsed.searchParams.get('format');
+      if (imageFormat && ['jpg', 'jpeg', 'png', 'webp'].includes(imageFormat)) return imageFormat === 'jpeg' ? 'jpg' : imageFormat;
+    } catch { /* A native extractor may supply an opaque URL. */ }
   }
 
-  if (platform === 'twitter') return mode === 'audio' ? 'mp4' : 'mp4';
-  return mode === 'audio' ? 'mp3' : 'mp4';
+  if (mode === 'audio') {
+    if (/webm|opus/i.test(formatDescription)) return 'webm';
+    if (/mp3/i.test(formatDescription)) return 'mp3';
+    if (/aac|m4a|mp4/i.test(formatDescription)) return 'm4a';
+    return platform === 'youtube' ? 'm4a' : 'mp4';
+  }
+  if (/webm/i.test(formatDescription)) return 'webm';
+  return 'mp4';
 }

@@ -46,7 +46,7 @@ export async function extractReddit(url: string): Promise<MediaInfo> {
     thumbnailUrl,
     formats: {
       video: rv ? [
-        { id: 'best', label: 'Melhor', sub: 'MP4 · Reddit', size: `~${(durSec * 0.22).toFixed(1)} MB`, best: true, url: videoUrl },
+        { id: 'best', label: 'Vídeo sem áudio', sub: 'MP4 · Reddit', size: `~${(durSec * 0.22).toFixed(1)} MB`, best: true, url: videoUrl, hasAudio: false },
         { id: 'audio-mp4', label: 'Áudio', sub: 'MP4 · Reddit Audio', size: `~${(durSec * 0.05).toFixed(1)} MB`, url: audioUrl },
       ] : [
         { id: 'link', label: 'Abrir link', sub: 'Imagem ou link externo', size: '—', url: post.url },

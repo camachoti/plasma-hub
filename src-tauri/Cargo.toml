@@ -28,6 +28,8 @@ tokio = { version = "1.52.3", features = ["full"] }
 reqwest = { version = "0.13.4", features = ["stream", "json", "query"] }
 tauri-plugin-http = "2"
 regex = "1.12.4"
+rand = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tauri-plugin-dialog = "2"
 tdlib-rs = { version = "1.4.0", features = ["download-tdlib"] }
 

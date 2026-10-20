@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check:form-controls": "node scripts/check-form-controls.mjs",
+    "test": "node --test tests/*.test.mjs",
     "predev": "npm run check:form-controls",
     "prebuild": "npm run check:form-controls",
     "dev": "vite",

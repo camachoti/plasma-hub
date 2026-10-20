@@ -112,6 +112,7 @@ export const MessageMediaPreview: React.FC<MessageMediaPreviewProps> = ({
   <div
     className={`media-preview media-shape-${mediaShape} ${isVideo ? 'is-video' : 'is-image'} ${shouldRenderInlinePlayer ? 'playing-inline' : ''}`}
     style={previewStyle}
+    onContextMenu={onContextMenu}
   >
     {shouldRenderInlinePlayer ? (
       <div className="inline-video-wrapper" onClick={onOpen}>

@@ -19,6 +19,7 @@ interface DashboardInfoPanelProps {
   sharedMedia: Message[];
   getChatKind: (chat: Chat) => string;
   getDownloadMeta: (msg: Message, senderName?: string | null) => Record<string, unknown>;
+  onSearchInSystem: (chatId: string, messageId: number, isVideo: boolean) => void;
   setInfoOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
@@ -35,6 +36,7 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
   sharedMedia,
   getChatKind,
   getDownloadMeta,
+  onSearchInSystem,
   setInfoOpen,
 }) => (
   <div className="info" data-collapsed={!infoOpen}>
@@ -112,6 +114,7 @@ const DashboardInfoPanelComponent: React.FC<DashboardInfoPanelProps> = ({
                     palette={palette}
                     density={density}
                     downloadMeta={getDownloadMeta(media)}
+                    onSearchInSystem={onSearchInSystem}
                   />
                 </div>
               ))}

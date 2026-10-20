@@ -1,16 +1,76 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>Plasma Hub</title>
+    <style>
+      html, body { margin: 0; }
+      .startup-screen {
+        box-sizing: border-box;
+        display: grid;
+        place-items: center;
+        width: 100%;
+        min-height: 100vh;
+        min-height: 100dvh;
+        background: var(--bg-0, #1f2310);
+      }
+      .startup-loader {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 104px;
+        height: 104px;
+        color: #fff;
+      }
+      .startup-loader__halo {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: conic-gradient(from 30deg, #86cfff, #24a1de 22%, transparent 52%, #24a1de 82%, #86cfff);
+        opacity: .65;
+        animation: startup-loader-spin 4s linear infinite;
+      }
+      .startup-loader__outer {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        background: #16354a;
+      }
+      .startup-loader__inner {
+        display: grid;
+        place-items: center;
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        background: #24a1de;
+        box-shadow: 0 10px 24px #0005;
+      }
+      .startup-loader svg { width: 32px; height: 32px; }
+      @keyframes startup-loader-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .startup-loader__halo { animation: none; }
+      }
+    </style>
   </head>
 
   <body>
     <div id="root">
-      <div style="min-height:100vh;display:grid;place-items:center;background:#18232c;color:#f2f5f6;font:16px system-ui,sans-serif">
-        Iniciando a interface do Plasma Hub…
+      <div class="startup-screen" role="status" aria-label="Carregando Plasma Hub">
+        <div class="startup-loader" aria-hidden="true">
+          <span class="startup-loader__halo"></span>
+          <span class="startup-loader__outer">
+            <span class="startup-loader__inner">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 10l-4 4 6 6 4-16-18 7 4 2 2 6 3-4"></path>
+              </svg>
+            </span>
+          </span>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

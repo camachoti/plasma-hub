@@ -83,20 +83,6 @@
   place-items: center;
 }
 
-.auth-checking-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 24px;
-  color: var(--text-2);
-  text-align: center;
-}
-
-.auth-checking-state .loader-surface { margin: 0 0 8px; }
-.auth-checking-state strong { color: var(--text-1); font-size: 15px; }
-.auth-checking-state > span { font-size: 12px; }
-
 .runtime-notice {
   position: absolute;
   top: 10px;
@@ -115,36 +101,6 @@
   transform: translateX(-50%);
   backdrop-filter: blur(10px);
   pointer-events: none;
-}
-
-.telegram-connection-notice {
-  position: absolute;
-  top: 10px;
-  left: 50%;
-  z-index: 120;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(520px, calc(100% - 32px));
-  padding: 8px 13px;
-  border: 1px solid color-mix(in oklch, var(--warning, #f2b84b) 38%, var(--line-soft));
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--bg-1) 94%, transparent);
-  color: var(--text-1);
-  font-size: 12px;
-  font-weight: 650;
-  box-shadow: var(--shadow-md);
-  transform: translateX(-50%);
-  backdrop-filter: blur(12px);
-}
-
-.telegram-connection-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--warning, #f2b84b);
-  box-shadow: 0 0 0 4px color-mix(in oklch, var(--warning, #f2b84b) 18%, transparent);
 }
 
 .app-toast {

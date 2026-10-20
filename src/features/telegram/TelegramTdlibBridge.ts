@@ -180,6 +180,7 @@ interface TdlibMassDownloadResult {
   total: number;
   aborted: boolean;
   error?: string | null;
+  tracking_error?: string | null;
 }
 
 export interface TdlibDownloadProgress {
@@ -200,6 +201,8 @@ export interface TdlibDownloadProgress {
 }
 
 export class TelegramTdlibBridge {
+  private readonly pendingChatRequests = new Map<number, Promise<TdlibChatsResult>>();
+
   constructor(
     private readonly getCredentials: () => TelegramCredentials,
   ) {}
@@ -239,7 +242,21 @@ export class TelegramTdlibBridge {
   }
 
   getChats(limit = 100) {
-    return invoke<TdlibChatsResult>('tdlib_get_chats', { limit });
+    const pending = this.pendingChatRequests.get(limit);
+    if (pending) return pending;
+
+    const request = invoke<TdlibChatsResult>('tdlib_get_chats', { limit }).then(
+      result => {
+        this.pendingChatRequests.delete(limit);
+        return result;
+      },
+      error => {
+        this.pendingChatRequests.delete(limit);
+        throw error;
+      },
+    );
+    this.pendingChatRequests.set(limit, request);
+    return request;
   }
 
   readChat(chatId: unknown) {

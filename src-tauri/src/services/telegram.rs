@@ -9,6 +9,8 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(debug_assertions)]
+use std::time::Instant;
 use tauri::{
     http, AppHandle, Emitter, Manager, Runtime, State, UriSchemeContext, UriSchemeResponder,
 };
@@ -328,6 +330,7 @@ pub struct TdlibMassDownloadResult {
     total: usize,
     aborted: bool,
     error: Option<String>,
+    tracking_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -549,7 +552,6 @@ fn media_protocol_response(
 ) -> http::Response<Cow<'static, [u8]>> {
     let mut builder = http::Response::builder()
         .status(status)
-        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(http::header::ACCEPT_RANGES, "bytes")
         .header(http::header::CACHE_CONTROL, "no-store");
     if let Some(content_type) = content_type {
@@ -605,7 +607,6 @@ fn get_plasma_media_response<R: Runtime>(
     if request.method() == http::Method::HEAD {
         return http::Response::builder()
             .status(http::StatusCode::OK)
-            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(http::header::ACCEPT_RANGES, "bytes")
             .header(http::header::CONTENT_TYPE, content_type)
             .header(http::header::CONTENT_LENGTH, len)
@@ -625,7 +626,6 @@ fn get_plasma_media_response<R: Runtime>(
             );
             return http::Response::builder()
                 .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
-                .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .header(http::header::ACCEPT_RANGES, "bytes")
                 .header(http::header::CONTENT_RANGE, format!("bytes */{len}"))
                 .body(Cow::Owned(Vec::new()))
@@ -650,7 +650,6 @@ fn get_plasma_media_response<R: Runtime>(
         buffer.truncate(read);
         return http::Response::builder()
             .status(http::StatusCode::PARTIAL_CONTENT)
-            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(http::header::ACCEPT_RANGES, "bytes")
             .header(http::header::CONTENT_TYPE, content_type)
             .header(
@@ -672,7 +671,6 @@ fn get_plasma_media_response<R: Runtime>(
         } else {
             http::StatusCode::PARTIAL_CONTENT
         })
-        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(http::header::ACCEPT_RANGES, "bytes")
         .header(http::header::CONTENT_TYPE, content_type)
         .header(
@@ -2491,6 +2489,8 @@ pub async fn tdlib_get_chats(
     state: State<'_, TdlibManager>,
     limit: Option<i32>,
 ) -> Result<TdlibChatsResult, String> {
+    #[cfg(debug_assertions)]
+    let started_at = Instant::now();
     let client_id = match ready_client_id(&state).await {
         Ok(client_id) => client_id,
         Err(status) => {
@@ -2511,17 +2511,20 @@ pub async fn tdlib_get_chats(
     let load_limit = limit.min(100);
     let _ = functions::load_chats(Some(ChatList::Main), load_limit, client_id).await;
     let _ = functions::load_chats(Some(ChatList::Archive), load_limit, client_id).await;
-    let main_chat_ids = match functions::get_chats(Some(ChatList::Main), main_limit, client_id).await {
-        Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
-        Err(error) => {
-            return Ok(TdlibChatsResult {
-                success: false,
-                dialogs: Vec::new(),
-                has_more: false,
-                error: Some(error.message),
-            });
-        }
-    };
+    #[cfg(debug_assertions)]
+    let loaded_at = Instant::now();
+    let main_chat_ids =
+        match functions::get_chats(Some(ChatList::Main), main_limit, client_id).await {
+            Ok(tdlib_rs::enums::Chats::Chats(chats)) => chats.chat_ids,
+            Err(error) => {
+                return Ok(TdlibChatsResult {
+                    success: false,
+                    dialogs: Vec::new(),
+                    has_more: false,
+                    error: Some(error.message),
+                });
+            }
+        };
 
     let archive_chat_ids = if let Ok(tdlib_rs::enums::Chats::Chats(chats)) =
         functions::get_chats(Some(ChatList::Archive), archive_limit, client_id).await
@@ -2534,6 +2537,8 @@ pub async fn tdlib_get_chats(
         || archive_chat_ids.len() >= archive_limit as usize;
     let mut chat_ids = main_chat_ids;
     chat_ids.extend(archive_chat_ids);
+    #[cfg(debug_assertions)]
+    let listed_at = Instant::now();
 
     let mut dialogs = Vec::new();
     let mut seen_chat_ids = HashMap::<String, bool>::new();
@@ -2548,6 +2553,10 @@ pub async fn tdlib_get_chats(
             dialogs.push(tdlib_chat_to_app(chat));
         }
     }
+    #[cfg(debug_assertions)]
+    let chats_resolved_at = Instant::now();
+    #[cfg(debug_assertions)]
+    let resolved_chats = dialogs.len();
 
     let remaining_contact_slots = (limit as usize).saturating_sub(dialogs.len());
     if remaining_contact_slots > 0 {
@@ -2575,6 +2584,17 @@ pub async fn tdlib_get_chats(
             dialogs.extend(contact_dialogs);
         }
     }
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[Startup] TDLib conversas: carregar={}ms, listar={}ms, resolver={}ms, contatos={}ms, total={}ms, chats={}, contatos={}",
+        loaded_at.duration_since(started_at).as_millis(),
+        listed_at.duration_since(loaded_at).as_millis(),
+        chats_resolved_at.duration_since(listed_at).as_millis(),
+        chats_resolved_at.elapsed().as_millis(),
+        started_at.elapsed().as_millis(),
+        resolved_chats,
+        dialogs.len().saturating_sub(resolved_chats),
+    );
 
     Ok(TdlibChatsResult {
         success: true,
@@ -2647,62 +2667,118 @@ pub async fn tdlib_get_messages(
 
     let history_offset = offset.unwrap_or(0).clamp(-99, 0);
     let requested_limit = limit.unwrap_or(50).clamp((-history_offset).max(1), 100);
-    let from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
-    let history_result = if let Some(topic_id) = topic_id {
-        if topic_kind.as_deref() == Some("thread") {
-            functions::get_message_thread_history(
-                chat_id,
-                tdlib_message_id_from_app_id(topic_id),
-                from_message_id,
-                history_offset,
-                requested_limit,
-                client_id,
-            )
-            .await
-        } else {
-            let forum_topic_id = i32::try_from(topic_id).map_err(|_| "ID de tópico inválido")?;
-            functions::get_forum_topic_history(
-                chat_id,
-                forum_topic_id,
-                from_message_id,
-                history_offset,
-                requested_limit,
-                client_id,
-            )
-            .await
-        }
+    let mut from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
+    let forum_topic_id = if topic_id.is_some() && topic_kind.as_deref() != Some("thread") {
+        Some(i32::try_from(topic_id.unwrap()).map_err(|_| "ID de tópico inválido")?)
     } else {
-        functions::get_chat_history(
-            chat_id,
-            from_message_id,
-            history_offset,
-            requested_limit,
-            false,
-            client_id,
-        )
-        .await
+        None
     };
+    let mut seen_message_ids = HashSet::new();
+    // A página anterior já contém a âncora usada para buscar mensagens antigas.
+    if from_message_id != 0 && history_offset == 0 {
+        seen_message_ids.insert(from_message_id);
+    }
+    let mut raw_messages = Vec::new();
+    let mut has_more_hint = false;
+    let mut stalled_requests = 0;
 
-    let history = match history_result {
-        Ok(tdlib_rs::enums::Messages::Messages(messages)) => messages,
-        Err(error) => {
-            return Ok(TdlibMessagesResult {
-                success: false,
-                messages: Vec::new(),
-                has_more: false,
-                oldest_message_id: None,
-                error: Some(error.message),
-            });
+    // TDLib escolhe quantas mensagens devolver e pode retornar só uma mesmo
+    // quando o limite é 50. Continue pela âncora até preencher a página ou
+    // chegar ao fim, preservando a busca contextual com offset negativo.
+    for request_index in 0..12 {
+        let remaining = requested_limit as usize - raw_messages.len();
+        let page_limit = if history_offset < 0 {
+            requested_limit
+        } else {
+            (remaining + usize::from(from_message_id != 0)).min(100) as i32
+        };
+        let history_result = if let Some(topic_id) = topic_id {
+            if topic_kind.as_deref() == Some("thread") {
+                functions::get_message_thread_history(
+                    chat_id,
+                    tdlib_message_id_from_app_id(topic_id),
+                    from_message_id,
+                    history_offset,
+                    page_limit,
+                    client_id,
+                )
+                .await
+            } else {
+                functions::get_forum_topic_history(
+                    chat_id,
+                    forum_topic_id.expect("forum topic ID validated"),
+                    from_message_id,
+                    history_offset,
+                    page_limit,
+                    client_id,
+                )
+                .await
+            }
+        } else {
+            functions::get_chat_history(
+                chat_id,
+                from_message_id,
+                history_offset,
+                page_limit,
+                false,
+                client_id,
+            )
+            .await
+        };
+
+        let history = match history_result {
+            Ok(tdlib_rs::enums::Messages::Messages(messages)) => messages,
+            Err(error) if raw_messages.is_empty() => {
+                return Ok(TdlibMessagesResult {
+                    success: false,
+                    messages: Vec::new(),
+                    has_more: false,
+                    oldest_message_id: None,
+                    error: Some(error.message),
+                });
+            }
+            Err(_) => {
+                has_more_hint = true;
+                break;
+            }
+        };
+
+        has_more_hint = history.total_count > history.messages.len() as i32;
+        let mut oldest_in_batch = None;
+        let mut added = 0;
+        for message in history.messages.into_iter().flatten() {
+            oldest_in_batch = Some(message.id);
+            if !seen_message_ids.insert(message.id)
+                || is_hidden_membership_service_message(&message.content)
+            {
+                continue;
+            }
+            raw_messages.push(message);
+            added += 1;
         }
-    };
 
-    let raw_messages: Vec<tdlib_rs::types::Message> = history
-        .messages
-        .into_iter()
-        .flatten()
-        .filter(|message| !is_hidden_membership_service_message(&message.content))
-        .collect();
+        if history_offset < 0 || raw_messages.len() >= requested_limit as usize {
+            break;
+        }
+        if request_index == 11 && added > 0 {
+            has_more_hint = true;
+        }
+        let Some(oldest_in_batch) = oldest_in_batch else {
+            break;
+        };
+        if oldest_in_batch == from_message_id && added == 0 {
+            stalled_requests += 1;
+            if stalled_requests >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        } else {
+            stalled_requests = 0;
+            from_message_id = oldest_in_batch;
+        }
+    }
 
+    let collected_count = raw_messages.len();
     let mut messages: Vec<TdlibMessageInfo> =
         raw_messages.into_iter().map(tdlib_message_to_app).collect();
 
@@ -2716,7 +2792,7 @@ pub async fn tdlib_get_messages(
         (message.date, id_order)
     });
     let oldest_message_id = messages.first().map(|message| message.id);
-    let has_more = messages.len() as i32 >= requested_limit;
+    let has_more = collected_count as i32 >= requested_limit || has_more_hint;
 
     Ok(TdlibMessagesResult {
         success: true,
@@ -3280,40 +3356,139 @@ pub async fn tdlib_get_forum_topics(
         });
     }
 
-    match functions::get_forum_topics(
-        chat_id,
-        String::new(),
-        0,
-        0,
-        0,
-        limit.unwrap_or(100),
-        client_id,
-    )
-    .await
-    {
-        Ok(tdlib_rs::enums::ForumTopics::ForumTopics(topics)) => Ok(TdlibForumTopicsResult {
-            success: true,
-            is_forum: true,
-            topics: topics
-                .topics
-                .into_iter()
-                .map(|topic| TdlibForumTopicInfo {
-                    id: i64::from(topic.info.forum_topic_id),
-                    kind: "forum".to_string(),
-                    title: topic.info.name,
-                    is_closed: topic.info.is_closed,
-                    is_pinned: topic.is_pinned,
-                    unread_count: topic.unread_count,
-                })
-                .collect(),
-            error: None,
-        }),
-        Err(error) => Ok(TdlibForumTopicsResult {
-            success: false,
-            is_forum: true,
-            topics: Vec::new(),
-            error: Some(error.message),
-        }),
+    let page_size = limit.unwrap_or(100).clamp(1, 100);
+    let mut offset_date = 0;
+    let mut offset_message_id = 0;
+    let mut offset_forum_topic_id = 0;
+    let mut seen_cursors = HashSet::new();
+    let mut all_topics = Vec::new();
+    loop {
+        let cursor = (offset_date, offset_message_id, offset_forum_topic_id);
+        if !seen_cursors.insert(cursor) {
+            break;
+        }
+
+        match functions::get_forum_topics(
+            chat_id,
+            String::new(),
+            offset_date,
+            offset_message_id,
+            offset_forum_topic_id,
+            page_size,
+            client_id,
+        )
+        .await
+        {
+            Ok(tdlib_rs::enums::ForumTopics::ForumTopics(page)) => {
+                if page.topics.is_empty() {
+                    break;
+                }
+
+                all_topics.extend(page.topics);
+                let next_cursor = (
+                    page.next_offset_date,
+                    page.next_offset_message_id,
+                    page.next_offset_forum_topic_id,
+                );
+                if next_cursor == cursor || next_cursor == (0, 0, 0) {
+                    break;
+                }
+                offset_date = next_cursor.0;
+                offset_message_id = next_cursor.1;
+                offset_forum_topic_id = next_cursor.2;
+            }
+            Err(error) => {
+                return Ok(TdlibForumTopicsResult {
+                    success: false,
+                    is_forum: true,
+                    topics: Vec::new(),
+                    error: Some(error.message),
+                });
+            }
+        }
+    }
+
+    let mut seen_topics = HashSet::new();
+    all_topics.retain(|topic| seen_topics.insert(topic.info.forum_topic_id));
+    Ok(TdlibForumTopicsResult {
+        success: true,
+        is_forum: true,
+        topics: all_topics
+            .into_iter()
+            .map(|topic| TdlibForumTopicInfo {
+                id: i64::from(topic.info.forum_topic_id),
+                kind: "forum".to_string(),
+                title: topic.info.name,
+                is_closed: topic.info.is_closed,
+                is_pinned: topic.is_pinned,
+                unread_count: topic.unread_count,
+            })
+            .collect(),
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub async fn tdlib_topic_has_new_media(
+    state: State<'_, TdlibManager>,
+    chat_id: i64,
+    topic_id: i64,
+    topic_kind: Option<String>,
+    after_message_id: i64,
+) -> Result<bool, String> {
+    let client_id = ready_client_id(&state)
+        .await
+        .map_err(|status| status.error.unwrap_or(status.state))?;
+    let baseline_id = tdlib_message_id_from_app_id(after_message_id);
+    let mut from_message_id = 0;
+
+    loop {
+        let result = if topic_kind.as_deref() == Some("thread") {
+            functions::get_message_thread_history(
+                chat_id,
+                tdlib_message_id_from_app_id(topic_id),
+                from_message_id,
+                0,
+                100,
+                client_id,
+            )
+            .await
+        } else {
+            let forum_topic_id = i32::try_from(topic_id).map_err(|_| "ID de tópico inválido")?;
+            functions::get_forum_topic_history(
+                chat_id,
+                forum_topic_id,
+                from_message_id,
+                0,
+                100,
+                client_id,
+            )
+            .await
+        }
+        .map_err(|error| error.message)?;
+
+        let tdlib_rs::enums::Messages::Messages(history) = result;
+        if history.messages.is_empty() {
+            return Ok(false);
+        }
+
+        let mut next_from_message_id = from_message_id;
+        let mut reached_baseline = false;
+        for message in history.messages.into_iter().flatten() {
+            next_from_message_id = message.id;
+            if message.id <= baseline_id {
+                reached_baseline = true;
+                continue;
+            }
+            if message_media_file(message.content, message.id).is_some() {
+                return Ok(true);
+            }
+        }
+        if reached_baseline || next_from_message_id == 0 || next_from_message_id == from_message_id
+        {
+            return Ok(false);
+        }
+        from_message_id = next_from_message_id;
     }
 }
 
@@ -4083,6 +4258,7 @@ pub async fn tdlib_start_mass_download(
                 total: 0,
                 aborted: false,
                 error: status.error.or(Some(status.state)),
+                tracking_error: None,
             });
         }
     };
@@ -4135,6 +4311,7 @@ pub async fn tdlib_start_mass_download(
                             total: items.len(),
                             aborted: false,
                             error: Some("ID de tópico inválido".to_string()),
+                            tracking_error: None,
                         });
                     }
                 };
@@ -4164,6 +4341,7 @@ pub async fn tdlib_start_mass_download(
                     total: items.len(),
                     aborted: false,
                     error: Some(error.message),
+                    tracking_error: None,
                 });
             }
         };
@@ -4185,6 +4363,11 @@ pub async fn tdlib_start_mass_download(
         from_message_id = next_from_message_id;
     }
 
+    let last_scanned_message_id = scanned_messages
+        .iter()
+        .map(|message| app_message_id_from_tdlib(message.id))
+        .max()
+        .unwrap_or(0);
     scanned_messages.reverse();
     let album_split_mode = request.album_split_mode.as_deref().unwrap_or("separator");
     let mut album_folder_names = HashMap::<i64, String>::new();
@@ -4400,6 +4583,21 @@ pub async fn tdlib_start_mass_download(
         &items,
     );
 
+    let tracking_error = if !aborted && failed_count == 0 {
+        request.topic_id.and_then(|topic_id| {
+            crate::services::message_cache::record_topic_mass_download(
+                &app,
+                request.chat_id,
+                topic_id,
+                request.topic_kind.as_deref().unwrap_or("forum"),
+                last_scanned_message_id,
+            )
+            .err()
+        })
+    } else {
+        None
+    };
+
     Ok(TdlibMassDownloadResult {
         success: true,
         downloaded_count,
@@ -4408,6 +4606,7 @@ pub async fn tdlib_start_mass_download(
         total,
         aborted,
         error: None,
+        tracking_error,
     })
 }
 

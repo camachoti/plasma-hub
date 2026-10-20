@@ -18,6 +18,9 @@ export interface DownloadItem {
   filePath?: string;
   fileSize?: number;
   sourceUrl?: string;
+  sourcePageUrl?: string;
+  sourceMode?: 'video' | 'audio';
+  sourceFormatId?: string;
   resumeHeaders?: Record<string, string>;
   platform?: 'telegram' | 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'reddit' | 'web';
   thumbnailUrl?: string;
@@ -62,7 +65,11 @@ class DownloadService {
   private nativePersistQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    this.restoreFromStorage(appStorage.get(DOWNLOAD_HISTORY_KEY));
+    try {
+      this.restoreFromStorage(appStorage.get(DOWNLOAD_HISTORY_KEY));
+    } catch {
+      // Storage may be unavailable in restricted webviews.
+    }
     if (runtimeCapabilities.isTauri) void this.restoreFromNativeStorage();
     window.addEventListener('pagehide', () => this.flushPersist());
   }
@@ -110,6 +117,21 @@ class DownloadService {
     const item = this.activeDownloads.get(id);
     if (!item?.sourceUrl || !item.filePath || !runtimeCapabilities.isTauri) return false;
 
+    let downloadUrl = item.sourceUrl;
+    if (item.sourcePageUrl && item.sourceMode && item.sourceFormatId) {
+      try {
+        const { analyzeUrl } = await import('./downloader');
+        const refreshed = await analyzeUrl(item.sourcePageUrl);
+        const format = refreshed.formats[item.sourceMode].find(option => option.id === item.sourceFormatId);
+        if (format?.url) {
+          downloadUrl = format.url;
+          this.updateDownload(id, { sourceUrl: downloadUrl }, true);
+        }
+      } catch {
+        // The saved media URL may still work when the source page is unavailable.
+      }
+    }
+
     const unlisten = await listenEvent<NativeDownloadProgress>('native-file-download-progress', event => {
       if (event.payload.id !== id) return;
       this.updateDownload(id, {
@@ -121,7 +143,7 @@ class DownloadService {
     try {
       await invokeCommand('download_url_to_file', {
         id,
-        url: item.sourceUrl,
+        url: downloadUrl,
         filePath: item.filePath,
         headers: item.resumeHeaders,
       });
@@ -159,7 +181,11 @@ class DownloadService {
         thumbnailUrl: item.thumbnailUrl?.startsWith('blob:') ? undefined : item.thumbnailUrl,
       }));
     const serialized = JSON.stringify(items);
-    appStorage.set(DOWNLOAD_HISTORY_KEY, serialized);
+    try {
+      appStorage.set(DOWNLOAD_HISTORY_KEY, serialized);
+    } catch {
+      // Native storage is still attempted when localStorage is full or unavailable.
+    }
     if (runtimeCapabilities.isTauri) {
       this.nativePersistQueue = this.nativePersistQueue
         .catch(() => {})
@@ -213,6 +239,9 @@ class DownloadService {
   updateDownload(id: string, updates: Partial<DownloadItem>, persistImmediately = false) {
     const item = this.activeDownloads.get(id);
     if (item) {
+      // A late native event must not turn a canceled transfer into a failure or success.
+      if (item.status === 'canceled' && updates.status !== 'downloading'
+        && (updates.status !== undefined || updates.progress !== undefined)) return;
       const previousStatus = item.status;
       Object.assign(item, updates);
       const actionHandlers = this.actionHandlers.get(id);
@@ -283,8 +312,15 @@ class DownloadService {
     if (!handler) return false;
     this.updateDownload(id, { status: 'downloading', progress: 0, error: undefined, retrying: true, retryAttempted: true });
     try {
-      await handler();
-      return true;
+      const result = await handler();
+      const current = this.activeDownloads.get(id);
+      if (current?.status === 'downloading') {
+        this.updateDownload(id, { status: 'failed', error: 'A nova tentativa terminou sem confirmar o download.' });
+      }
+      return result !== false && this.activeDownloads.get(id)?.status === 'completed';
+    } catch (error) {
+      this.updateDownload(id, { status: 'failed', error: error instanceof Error ? error.message : String(error) });
+      return false;
     } finally {
       if (this.activeDownloads.has(id)) this.updateDownload(id, { retrying: false });
     }

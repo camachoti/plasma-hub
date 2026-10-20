@@ -91,7 +91,7 @@ export async function extractYoutube(url: string): Promise<MediaInfo> {
       uniqueVideos.push({
         id: String(f.itag),
         label,
-        sub: `MP4 · ${f.quality}`,
+        sub: `${f.mimeType.split(';')[0].split('/')[1].toUpperCase()} · ${f.quality}`,
         size: f.contentLength ? formatBytes(parseInt(f.contentLength)) : '—',
         best: uniqueVideos.length === 0 && !isAdaptive,
         url: f.url,
@@ -103,7 +103,7 @@ export async function extractYoutube(url: string): Promise<MediaInfo> {
         uniqueVideos[existingIdx] = {
           id: String(f.itag),
           label,
-          sub: `MP4 · ${f.quality}`,
+          sub: `${f.mimeType.split(';')[0].split('/')[1].toUpperCase()} · ${f.quality}`,
           size: f.contentLength ? formatBytes(parseInt(f.contentLength)) : '—',
           best: existingIdx === 0,
           url: f.url,
@@ -130,10 +130,6 @@ export async function extractYoutube(url: string): Promise<MediaInfo> {
     best: i === 0,
     url: f.url,
   }));
-
-  if (audioFormats.length === 0) {
-    audioFormats.push({ id: 'mp3-mock', label: 'MP3 256kbps', sub: 'Extraído do vídeo', size: '—' });
-  }
 
   const thumb = details?.thumbnail?.thumbnails;
   const thumbnailUrl = thumb ? thumb[thumb.length - 1]?.url : undefined;

@@ -24,6 +24,10 @@ export interface TwitterRequestOptions {
   twitterCookies?: string;
 }
 
+function withSourceUrl(url: string, info: MediaInfo): MediaInfo {
+  return { ...info, originalUrl: info.originalUrl || url };
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 export async function analyzeUrl(url: string, options: TwitterRequestOptions = {}): Promise<MediaInfo> {
@@ -31,14 +35,14 @@ export async function analyzeUrl(url: string, options: TwitterRequestOptions = {
   if (!platform) throw new Error('unsupported');
 
   switch (platform) {
-    case 'reddit':    return extractReddit(url);
-    case 'youtube':   return extractYoutube(url);
+    case 'reddit':    return withSourceUrl(url, await extractReddit(url));
+    case 'youtube':   return withSourceUrl(url, await extractYoutube(url));
     case 'tiktok':
       if (runtimeCapabilities.isTauri && !runtimeCapabilities.isAndroid) {
-        return invoke<MediaInfo>('analyze_tiktok_native', { url });
+        return withSourceUrl(url, await invoke<MediaInfo>('analyze_tiktok_native', { url }));
       }
-      return extractTikTok(url);
-    case 'instagram': return extractInstagram(url);
+      return withSourceUrl(url, await extractTikTok(url));
+    case 'instagram': return withSourceUrl(url, await extractInstagram(url));
     case 'twitter':
       if (!extractTwitterId(url)) {
         if (isTwitterProfileUrl(url)) {
@@ -47,13 +51,13 @@ export async function analyzeUrl(url: string, options: TwitterRequestOptions = {
         throw new Error('Nao foi possivel identificar o tweet. Cole uma URL /status/... do Twitter/X.');
       }
       try {
-        return await invoke<MediaInfo>('analyze_twitter_tweet_native', {
+        return withSourceUrl(url, await invoke<MediaInfo>('analyze_twitter_tweet_native', {
           url,
           cookies: cleanOptional(options.twitterCookies),
-        });
+        }));
       } catch (err) {
         debugWarn('Native Twitter analyzer failed, falling back to syndication extractor:', err);
-        return extractTwitter(url);
+        return withSourceUrl(url, await extractTwitter(url));
       }
   }
 }
@@ -157,27 +161,31 @@ export async function downloadMedia(
   info: MediaInfo,
   mode: 'video' | 'audio',
   formatId: string,
-  options: TwitterRequestOptions = {}
+  options: TwitterRequestOptions = {},
+  retryId?: string,
 ): Promise<void> {
   const format = info.formats[mode].find((f) => f.id === formatId) ?? info.formats[mode][0];
   let dlUrl = format?.url;
 
-  const ext = getDownloadExtension(info.platform, mode, dlUrl);
+  const ext = getDownloadExtension(info.platform, mode, dlUrl, format?.sub);
   const safeName = info.title.replace(/[^a-z0-9]/gi, '_').slice(0, 40);
-  const filename = `plasma_${safeName}.${ext}`;
+  const downloadId = retryId ?? `${info.platform}_${crypto.randomUUID()}`;
+  const filename = retryId
+    ? downloadService.getDownload(retryId)?.fileName ?? `plasma_${safeName}_${retryId.slice(-12)}.${ext}`
+    : `plasma_${safeName}_${downloadId.slice(-12)}.${ext}`;
 
-  const downloadId = `${info.platform}_${Date.now()}`;
-  
-  downloadService.addDownload({
-    id: downloadId,
-    fileName: filename,
-    progress: 0,
-    status: 'downloading',
-    platform: info.platform as any,
-    thumbnailUrl: info.thumbnailUrl
-  }, {
-    retry: () => downloadMedia(info, mode, formatId, options),
-  });
+  if (!retryId) {
+    downloadService.addDownload({
+      id: downloadId,
+      fileName: filename,
+      progress: 0,
+      status: 'downloading',
+      platform: info.platform,
+      thumbnailUrl: info.thumbnailUrl,
+    }, {
+      retry: () => downloadMedia(info, mode, formatId, options, downloadId),
+    });
+  }
 
   const onProgress = (p: number) => {
     downloadService.updateDownload(downloadId, { progress: p });
@@ -197,6 +205,7 @@ export async function downloadMedia(
     runtimeCapabilities.supportsNativeYoutube
   ) {
     const unlisteners: Array<() => void> = [];
+    let nativeError: string | null = null;
     downloadService.setActions(downloadId, {
       cancel: async () => {
         await invoke<boolean>('cancel_native_download', { id: downloadId });
@@ -211,7 +220,7 @@ export async function downloadMedia(
       // se for vídeo e não tiver áudio nativo, combina com o melhor áudio
       let ytFormat = formatId;
       if (mode === 'video' && format.hasAudio === false) {
-        ytFormat = `${formatId}+bestaudio[ext=m4a]/best`;
+        ytFormat = `${formatId}+bestaudio[ext=${ext === 'webm' ? 'webm' : 'm4a'}]/best`;
       }
 
       const unlistenProgress = await listen<{id: string, progress: number}>('youtube-download-progress', (e) => {
@@ -230,7 +239,7 @@ export async function downloadMedia(
 
       const unlistenError = await listen<{id: string, error: string}>('youtube-download-error', (e) => {
         if (e.payload.id === downloadId) {
-          downloadService.updateDownload(downloadId, { status: 'failed', error: e.payload.error });
+          nativeError = e.payload.error;
         }
       });
       unlisteners.push(unlistenError);
@@ -242,10 +251,12 @@ export async function downloadMedia(
         filename: filename
       });
 
+      downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+
       return;
     } catch (err: any) {
       if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
-      debugWarn('Backend download failed, fallback to direct url:', err);
+      debugWarn('Backend download failed, fallback to direct url:', nativeError || err);
       // Try to fallback
       try {
         dlUrl = await invoke<string>('get_youtube_stream_url', { 
@@ -262,6 +273,7 @@ export async function downloadMedia(
 
   if (info.platform === 'twitter' && dlUrl && runtimeCapabilities.supportsNativeTwitter) {
     const unlisteners: Array<() => void> = [];
+    let nativeError: string | null = null;
     downloadService.setActions(downloadId, {
       cancel: async () => {
         await invoke<boolean>('cancel_native_download', { id: downloadId });
@@ -289,7 +301,7 @@ export async function downloadMedia(
 
       const unlistenError = await listen<{id: string, error: string}>('twitter-download-error', (e) => {
         if (e.payload.id === downloadId) {
-          downloadService.updateDownload(downloadId, { status: 'failed', error: e.payload.error });
+          nativeError = e.payload.error;
         }
       });
       unlisteners.push(unlistenError);
@@ -301,10 +313,12 @@ export async function downloadMedia(
         cookies: cleanOptional(options.twitterCookies),
       });
 
+      downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
+
       return;
     } catch (err: any) {
       if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
-      debugWarn('Native Twitter download failed, falling back to blob download:', err);
+      debugWarn('Native Twitter download failed, falling back to blob download:', nativeError || err);
       downloadService.updateDownload(downloadId, { status: 'downloading', error: undefined });
     } finally {
       unlisteners.forEach(unlisten => unlisten());
@@ -356,6 +370,7 @@ export async function downloadMedia(
         filename,
         directUrl: dlUrl,
       });
+      downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
       return;
     } catch (error) {
       if (downloadService.getDownload(downloadId)?.status === 'canceled') return;
@@ -401,7 +416,13 @@ export async function downloadMedia(
 
     if (runtimeCapabilities.isTauri) {
       const resumeHeaders = getDownloadHeaders(info.platform);
-      downloadService.updateDownload(downloadId, { sourceUrl: dlUrl, resumeHeaders }, true);
+      downloadService.updateDownload(downloadId, {
+        sourceUrl: dlUrl,
+        sourcePageUrl: info.originalUrl,
+        sourceMode: mode,
+        sourceFormatId: formatId,
+        resumeHeaders,
+      }, true);
       const filePath = await downloadViaNativeFile(
         downloadId,
         dlUrl,
@@ -416,7 +437,7 @@ export async function downloadMedia(
       downloadService.updateDownload(downloadId, { status: 'completed', progress: 100 });
     }
   } catch (err: any) {
-    if (err?.name === 'AbortError') {
+    if (err?.name === 'AbortError' || downloadService.getDownload(downloadId)?.status === 'canceled') {
       downloadService.updateDownload(downloadId, {
         status: 'canceled',
         progress: 0,
@@ -425,7 +446,7 @@ export async function downloadMedia(
       return;
     }
     debugWarn("Download failed", err);
-    downloadService.updateDownload(downloadId, { status: 'failed', error: err.message });
+    downloadService.updateDownload(downloadId, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
   } finally {
     downloadService.clearActions(downloadId, ['cancel']);
   }
