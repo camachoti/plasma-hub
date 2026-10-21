@@ -8,6 +8,7 @@ description = "TDLib integration for Telegram"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+plasma-media = { path = "../plasma-media" }
 plasma-store = { path = "../plasma-store" }
 tdlib-rs = { workspace = true }
 serde = { workspace = true }

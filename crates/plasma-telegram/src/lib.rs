@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -2080,32 +2079,10 @@ fn generate_video_thumbnail_to_cache(source_path: &str, destination: &Path) -> O
     }
     std::fs::create_dir_all(destination.parent()?).ok()?;
 
-    for seek in ["1", "0.25", "0"] {
-        let status = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-ss",
-                seek,
-                "-i",
-                source_path,
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=420:-2",
-                &destination.to_string_lossy(),
-            ])
-            .status();
-
-        if matches!(status, Ok(exit_status) if exit_status.success()) && destination.is_file() {
-            return Some(destination.to_string_lossy().to_string());
-        }
-        let _ = std::fs::remove_file(destination);
-    }
-
-    None
+    plasma_media::generate_video_thumbnail_to_path(Path::new(source_path), destination).ok()?;
+    destination
+        .is_file()
+        .then(|| destination.to_string_lossy().to_string())
 }
 
 async fn download_avatar_to_cache(

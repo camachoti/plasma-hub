@@ -37,7 +37,13 @@ pub fn App() -> Element {
     let settings = services.settings.clone();
     let skip_login = settings.get_bool(SettingKey::SKIP_LOGIN).unwrap_or(false);
 
-    let tab = use_signal(|| Tab::Telegram);
+    let tab = use_signal(|| {
+        if services.initial_shared_url.is_some() {
+            Tab::Downloads
+        } else {
+            Tab::Telegram
+        }
+    });
     let palette = use_signal(|| {
         Palette::from_stored(settings.get(SettingKey::APPEARANCE_PALETTE).ok().flatten())
     });
@@ -75,6 +81,7 @@ pub fn App() -> Element {
 
     let telegram_tick = use_signal(|| 0u64);
     let downloads = use_signal(Vec::<DownloadRecord>::new);
+    let shared_url = use_signal(|| services.initial_shared_url.clone());
 
     let mut ui = use_context_provider(|| UiState {
         tab,
@@ -105,6 +112,7 @@ pub fn App() -> Element {
         search_error,
         telegram_tick,
         downloads,
+        shared_url,
     });
 
     // Restore the persisted download history once. The React frontend uses the
@@ -214,6 +222,10 @@ pub fn App() -> Element {
                     Ok(AppEvent::DownloadError { id, error }) => {
                         apply_download_error(ui, &id, error);
                         persist_downloads(event_services.clone(), ui);
+                    }
+                    Ok(AppEvent::SharedUrl { url }) => {
+                        ui.shared_url.set(Some(url));
+                        ui.tab.set(Tab::Downloads);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}

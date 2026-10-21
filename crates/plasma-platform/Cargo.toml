@@ -9,5 +9,10 @@ description = "Filesystem, dialogs and OS integration helpers"
 [dependencies]
 plasma-core = { path = "../plasma-core" }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+tokio = { workspace = true }
+
 [lints]
 workspace = true

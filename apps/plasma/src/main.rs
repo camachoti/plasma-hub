@@ -44,7 +44,14 @@ fn run() -> Result<(), String> {
             "missing"
         }
     );
-    let services = AppServices::new(env.clone(), settings, events, telegram, credentials);
+    let mut services = AppServices::new(env.clone(), settings, events, telegram, credentials);
+    services.initial_shared_url = plasma_platform::take_initial_shared_url()
+        .or_else(plasma_platform::take_pending_shared_url);
+
+    let share_events = services.events.clone();
+    plasma_platform::set_share_handler(Box::new(move |url| {
+        share_events.publish(AppEvent::SharedUrl { url });
+    }));
 
     if std::env::args().any(|argument| argument == "--telegram-smoke") {
         let Some(credentials) = services.credentials.clone() else {
@@ -135,19 +142,34 @@ fn build_paths() -> Result<AppPaths, String> {
         .map_err(|error| format!("não foi possível criar PLASMA_HOME: {error}"));
     }
 
-    const IDENTIFIER: &str = "com.camacho.plasmahub";
-    let fallback = std::env::temp_dir();
-    let data_base = dirs::data_dir().unwrap_or_else(|| fallback.clone());
-    let local_base = dirs::data_local_dir().unwrap_or_else(|| fallback.clone());
-    let cache_base = dirs::cache_dir().unwrap_or_else(|| fallback.clone());
+    #[cfg(target_os = "android")]
+    {
+        let dirs = plasma_platform::android_app_dirs()?;
+        AppPaths::new(
+            dirs.data_dir,
+            dirs.local_data_dir,
+            dirs.cache_dir,
+            Some(dirs.download_dir),
+        )
+        .map_err(|error| format!("não foi possível criar os diretórios Android: {error}"))
+    }
 
-    AppPaths::new(
-        data_base.join(IDENTIFIER),
-        local_base.join(IDENTIFIER),
-        cache_base.join(IDENTIFIER),
-        dirs::download_dir(),
-    )
-    .map_err(|error| format!("não foi possível criar os diretórios do app: {error}"))
+    #[cfg(not(target_os = "android"))]
+    {
+        const IDENTIFIER: &str = "com.camacho.plasmahub";
+        let fallback = std::env::temp_dir();
+        let data_base = dirs::data_dir().unwrap_or_else(|| fallback.clone());
+        let local_base = dirs::data_local_dir().unwrap_or_else(|| fallback.clone());
+        let cache_base = dirs::cache_dir().unwrap_or_else(|| fallback.clone());
+
+        AppPaths::new(
+            data_base.join(IDENTIFIER),
+            local_base.join(IDENTIFIER),
+            cache_base.join(IDENTIFIER),
+            dirs::download_dir(),
+        )
+        .map_err(|error| format!("não foi possível criar os diretórios do app: {error}"))
+    }
 }
 
 /// Reads the Telegram credentials embedded by `build.rs`.

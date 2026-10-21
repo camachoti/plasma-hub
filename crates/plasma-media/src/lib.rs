@@ -4,10 +4,12 @@ use plasma_core::AppEnv;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+
+#[cfg(not(target_os = "android"))]
 use std::process::Command;
 
-/// Extracts a JPEG poster for a local video using `ffmpeg` and caches it in the
-/// app cache directory. Mirrors the previous `generate_video_thumbnail` command.
+/// Extracts a JPEG poster for a local video and caches it in the app cache
+/// directory. Mirrors the previous `generate_video_thumbnail` command.
 pub fn generate_video_thumbnail(app: &AppEnv, file_path: &str) -> Result<String, String> {
     let source_path = Path::new(file_path);
     if !source_path.is_file() {
@@ -30,48 +32,75 @@ pub fn generate_video_thumbnail(app: &AppEnv, file_path: &str) -> Result<String,
         return Ok(output_path.to_string_lossy().to_string());
     }
 
-    let source = source_path.to_string_lossy().to_string();
-    let output = output_path.to_string_lossy().to_string();
-    let attempts = ["1", "0.25", "0"];
-    let mut last_error = String::new();
+    generate_video_thumbnail_to_path(source_path, &output_path)?;
+    Ok(output_path.to_string_lossy().to_string())
+}
 
-    for seek in attempts {
-        let status = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-ss",
-                seek,
-                "-i",
-                &source,
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=420:-2",
-                &output,
-            ])
-            .status();
-
-        match status {
-            Ok(exit_status) if exit_status.success() && output_path.is_file() => {
-                return Ok(output);
-            }
-            Ok(exit_status) => {
-                last_error = format!("ffmpeg saiu com status {exit_status}");
-                let _ = std::fs::remove_file(&output_path);
-            }
-            Err(error) => {
-                last_error = if error.kind() == std::io::ErrorKind::NotFound {
-                    "ffmpeg não encontrado no sistema.".to_string()
-                } else {
-                    error.to_string()
-                };
-                break;
-            }
-        }
+/// Extracts a JPEG poster into a specific path.
+///
+/// Desktop uses `ffmpeg`; Android uses `MediaMetadataRetriever` through JNI so
+/// the same cache layout works on both platforms.
+pub fn generate_video_thumbnail_to_path(
+    source_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    if !source_path.is_file() {
+        return Err("Arquivo de vídeo não encontrado.".to_string());
     }
 
-    Err(last_error)
+    #[cfg(target_os = "android")]
+    {
+        return plasma_platform::android_video_thumbnail(
+            source_path.to_string_lossy().as_ref(),
+            output_path,
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let source = source_path.to_string_lossy().to_string();
+        let output = output_path.to_string_lossy().to_string();
+        let attempts = ["1", "0.25", "0"];
+        let mut last_error = String::new();
+
+        for seek in attempts {
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-ss",
+                    seek,
+                    "-i",
+                    &source,
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=420:-2",
+                    &output,
+                ])
+                .status();
+
+            match status {
+                Ok(exit_status) if exit_status.success() && output_path.is_file() => {
+                    return Ok(());
+                }
+                Ok(exit_status) => {
+                    last_error = format!("ffmpeg saiu com status {exit_status}");
+                    let _ = std::fs::remove_file(output_path);
+                }
+                Err(error) => {
+                    last_error = if error.kind() == std::io::ErrorKind::NotFound {
+                        "ffmpeg não encontrado no sistema.".to_string()
+                    } else {
+                        error.to_string()
+                    };
+                    break;
+                }
+            }
+        }
+
+        Err(last_error)
+    }
 }

@@ -50,6 +50,9 @@ pub enum AppEvent {
         id: String,
         error: String,
     },
+    SharedUrl {
+        url: String,
+    },
     SearchProgress {
         run_id: String,
         scanned: u64,
@@ -72,6 +75,7 @@ impl AppEvent {
             Self::DownloadProgress { .. } => "download-progress",
             Self::DownloadDone { .. } => "download-done",
             Self::DownloadError { .. } => "download-error",
+            Self::SharedUrl { .. } => "shared-url",
             Self::SearchProgress { .. } => "search-progress",
             Self::Log { .. } => "log",
         }
@@ -140,6 +144,21 @@ mod tests {
             json!({
                 "type": "downloadDone",
                 "id": "job-1"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_shared_url_events() {
+        let event = AppEvent::SharedUrl {
+            url: "https://youtu.be/abc".to_string(),
+        };
+        assert_eq!(event.name(), "shared-url");
+        assert_eq!(
+            event.payload().expect("payload"),
+            json!({
+                "type": "sharedUrl",
+                "url": "https://youtu.be/abc"
             })
         );
     }

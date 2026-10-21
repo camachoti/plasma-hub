@@ -1,26 +1,18 @@
-#[cfg(not(target_os = "android"))]
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-#[cfg(not(target_os = "android"))]
 use std::net::{TcpListener, TcpStream};
-#[cfg(not(target_os = "android"))]
 use std::sync::OnceLock;
-#[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
 use plasma_core::AppEnv;
 
-#[cfg(not(target_os = "android"))]
 use super::{
     complete_native_media_meta, ensure_native_playback_file, parse_plasma_media_path,
     parse_range_header,
 };
 
-#[cfg(not(target_os = "android"))]
 static PLASMA_MEDIA_HTTP_PORT: OnceLock<u16> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
 static PLASMA_MEDIA_HTTP_TOKEN: OnceLock<String> = OnceLock::new();
 
-#[cfg(not(target_os = "android"))]
 fn request_has_token(target: &str, expected: &str) -> bool {
     target
         .split_once('?')
@@ -33,30 +25,13 @@ fn request_has_token(target: &str, expected: &str) -> bool {
 }
 
 pub fn playback_url(chat_id: i64, message_id: i64) -> String {
-    // Android release disallows cleartext HTTP; the registered Tauri protocol
-    // serves ranged playback without a loopback network request.
-    #[cfg(target_os = "android")]
-    return format!("plasma-media://localhost/telegram/{chat_id}/{message_id}");
-
-    #[cfg(not(target_os = "android"))]
+    if let (Some(port), Some(token)) = (PLASMA_MEDIA_HTTP_PORT.get(), PLASMA_MEDIA_HTTP_TOKEN.get())
     {
-        if let (Some(port), Some(token)) =
-            (PLASMA_MEDIA_HTTP_PORT.get(), PLASMA_MEDIA_HTTP_TOKEN.get())
-        {
-            return format!(
-                "http://127.0.0.1:{port}/telegram/{chat_id}/{message_id}?token={token}"
-            );
-        }
-        format!("plasma-media://localhost/telegram/{chat_id}/{message_id}")
+        return format!("http://127.0.0.1:{port}/telegram/{chat_id}/{message_id}?token={token}");
     }
+    format!("plasma-media://localhost/telegram/{chat_id}/{message_id}")
 }
 
-#[cfg(target_os = "android")]
-pub fn start_server(_app: AppEnv) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "android"))]
 pub fn start_server(app: AppEnv) -> Result<(), String> {
     if PLASMA_MEDIA_HTTP_PORT.get().is_some() {
         return Ok(());
@@ -93,7 +68,6 @@ pub fn start_server(app: AppEnv) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "android"))]
 fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
@@ -151,7 +125,6 @@ fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn http_status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -164,7 +137,6 @@ fn http_status_text(status: u16) -> &'static str {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn build_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Vec<u8> {
     let mut response = format!("HTTP/1.1 {status} {}\r\n", http_status_text(status));
     response.push_str("Connection: close\r\n");
@@ -180,7 +152,6 @@ fn build_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8
     bytes
 }
 
-#[cfg(not(target_os = "android"))]
 fn text_response(status: u16, message: String) -> Vec<u8> {
     build_http_response(
         status,
@@ -195,7 +166,6 @@ fn text_response(status: u16, message: String) -> Vec<u8> {
     )
 }
 
-#[cfg(not(target_os = "android"))]
 fn write_headers(
     stream: &mut TcpStream,
     status: u16,
@@ -213,7 +183,6 @@ fn write_headers(
     stream.write_all(response.as_bytes())
 }
 
-#[cfg(not(target_os = "android"))]
 fn write_text_response(
     stream: &mut TcpStream,
     status: u16,
@@ -222,7 +191,6 @@ fn write_text_response(
     stream.write_all(&text_response(status, message))
 }
 
-#[cfg(not(target_os = "android"))]
 fn copy_file_range(
     file: &mut std::fs::File,
     stream: &mut TcpStream,
@@ -248,7 +216,6 @@ fn copy_file_range(
     Ok(sent)
 }
 
-#[cfg(not(target_os = "android"))]
 fn write_response(
     app: &AppEnv,
     stream: &mut TcpStream,
@@ -325,7 +292,7 @@ fn write_response(
     stream.flush()
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 mod tests {
     use super::request_has_token;
 

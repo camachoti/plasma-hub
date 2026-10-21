@@ -580,9 +580,57 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    dedicada; Reddit pode responder 403 em IPs bloqueados; YouTube não trata vídeos com
    idade/região restrita; retry de downloads de plataforma é feito reanalisando o link
    (não pelo botão genérico); mass download de Telegram, cache de mídia e duplicados
-   continuam pendentes. O código Android foi validado com `cargo check`/`clippy
-   --target aarch64-linux-android` usando NDK 27.1; execução de UI, SAF, players e
-   downloads Android continuam pendentes para a Fase 7.
+   continuam pendentes. O código Android foi validado com `cargo check` e
+   `cargo clippy --target aarch64-linux-android` usando NDK 27.1; execução de UI, SAF,
+   players e downloads Android continuam pendentes para a Fase 7.
+
+### Fase 7 — paridade Android implementada (2026-10-21)
+
+1. `plasma-platform::android` usa `ndk-context` + JNI 0.21 para resolver
+   `filesDir`/`cacheDir`/`getExternalFilesDir("Downloads")` sem depender de `tauri` ou
+   `dioxus`. O shell usa esses caminhos no Android e mantém o mesmo `plasma-hub.sqlite3`,
+   cookies e diretórios de mídia do app Tauri; `PLASMA_HOME` continua sendo override de
+   desenvolvimento.
+2. O seletor de mídia do Telegram no Android usa SAF (`ACTION_OPEN_DOCUMENT`). O
+   `MainActivity` customizado copia o `content://` escolhido para o cache do app e devolve
+   o caminho local ao Rust por JNI, resolvendo o future assíncrono da UI. Desktop continua
+   usando `rfd`.
+3. Share intents: o manifesto registra `SEND`/`SEND_MULTIPLE` (`text/*`) e `VIEW` para
+   YouTube, Instagram, TikTok, X/Twitter e Reddit. O Activity lê o intent inicial e
+   `onNewIntent`, e o Rust publica `AppEvent::SharedUrl`; a UI alterna para Downloads,
+   preenche a URL e dispara a análise automaticamente. URLs recebidas antes do mount ficam
+   pendentes em `AppServices::initial_shared_url`.
+4. Downloads concluídos ganharam “Abrir” e “Mostrar” usando `plasma_platform::open_path` /
+   `reveal_path`. No Android, arquivos em `getExternalFilesDir` são indexados pelo
+   `MediaScannerConnection` e abertos por `ACTION_VIEW`; “Mostrar” cai para abrir o próprio
+   arquivo porque o Android não tem um reveal equivalente.
+5. O servidor HTTP loopback deixou de ser desktop-only: Android usa
+   `http://127.0.0.1:{porta}` com token de sessão e `Range`/206 para todo o playback e
+   thumbnails. O `AndroidManifest.xml` usa `network_security_config` que permite cleartext
+   **somente** para `127.0.0.1`, com `usesCleartextTraffic=false`.
+6. Thumbnails de vídeo no Android usam `MediaMetadataRetriever` via JNI, com fallback de
+   frames em 1 s/0,25 s/0 s e JPEG em cache. `plasma-media` mantém `ffmpeg` no desktop e a
+   mesma API para `plasma-telegram` e downloads.
+7. `apps/plasma/Dioxus.toml` aponta para o manifesto e o `MainActivity.kt` customizados.
+   O manifesto inclui `extractNativeLibs`, share filters, tema e configuração de rede; o
+   ProGuard mantém o Activity e os métodos nativos no release.
+8. Empacotamento: `scripts/build-dioxus-android.sh` (também `npm run build:ui:android`)
+   roda `dx build --android --target aarch64-linux-android`, copia o `libtdjson.so` do
+   `tdlib-rs` para o `jniLibs/arm64-v8a` gerado e roda o Gradle. Isso corrige a lacuna do
+   `dx`, que liga o `libmain.so` ao TDLib mas não empacota a biblioteca compartilhada.
+   O APK debug `aarch64` foi gerado com Dioxus CLI 0.7.10, NDK 27.1, compile/target SDK 36
+   e validado com `aapt2` (manifesto/rede/share filters); `libmain.so` e `libtdjson.so`
+   estão alinhados em 16 KB (`p_align=0x4000`) e exportam os callbacks JNI.
+9. Assinatura: o keystore existente em `src-tauri/gen/android` é local e não é versionado.
+   O gate usa APK debug assinado automaticamente; releases devem usar o keystore local
+   (Android Studio/Gradle) ou secrets de CI, nunca `Dioxus.toml` com senha. Updater próprio
+   continua em aberto para a Fase 8.
+10. Limitações desta fase: não há device/emulator neste ambiente, então SAF, share,
+    player, thumbnail e abertura de arquivo foram validados por compilação, inspeção do
+    APK/`nm`/`aapt2`, não por execução. A abertura no Android depende do MediaScanner para
+    arquivos externos; arquivos internos (ex.: mídia do Telegram) ainda não têm
+    `FileProvider`. Clipboard, notificações e fullscreen de vídeo permanecem sem validação
+    de device. A janela desktop continua sem render visual neste ambiente (WebKitGTK).
 
 ---
 
@@ -634,7 +682,7 @@ cd apps/plasma && cargo fmt --all --check
 cd apps/plasma && cargo clippy --all-targets -- -D warnings
 cd apps/plasma && cargo test
 cargo check -p plasma-telegram --target aarch64-linux-android
-dx build --platform android --target aarch64   # Fase 7+
+scripts/build-dioxus-android.sh debug   # Fase 7+; requer dx 0.7.10 e NDK
 ```
 
 Testes que valem a pena desde a Fase 0:

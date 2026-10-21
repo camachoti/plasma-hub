@@ -8,6 +8,7 @@ description = "Plasma Hub UI built with Dioxus"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+plasma-platform = { path = "../plasma-platform" }
 plasma-store = { path = "../plasma-store" }
 plasma-telegram = { path = "../plasma-telegram" }
 plasma-download = { path = "../plasma-download" }

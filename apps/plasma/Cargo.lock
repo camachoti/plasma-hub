@@ -3683,6 +3683,7 @@ dependencies = [
  "dioxus",
  "dirs",
  "plasma-core",
+ "plasma-platform",
  "plasma-store",
  "plasma-telegram",
  "plasma-ui",
@@ -3728,6 +3729,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-media"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "plasma-core",
+ "plasma-platform",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "plasma-platform"
+version = "0.1.0"
+dependencies = [
+ "jni 0.21.1",
+ "ndk-context",
+ "plasma-core",
+ "tokio",
+]
+
+[[package]]
 name = "plasma-store"
 version = "0.1.0"
 dependencies = [
@@ -3743,6 +3765,7 @@ version = "0.1.0"
 dependencies = [
  "http",
  "plasma-core",
+ "plasma-media",
  "plasma-store",
  "rand 0.9.5",
  "serde",
@@ -3787,6 +3810,7 @@ dependencies = [
  "plasma-core",
  "plasma-download",
  "plasma-extract",
+ "plasma-platform",
  "plasma-store",
  "plasma-telegram",
  "plasma-twitter",

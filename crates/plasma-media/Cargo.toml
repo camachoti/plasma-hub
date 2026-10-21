@@ -8,6 +8,7 @@ description = "Media cache layout, thumbnails and local streaming"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+plasma-platform = { path = "../plasma-platform" }
 image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

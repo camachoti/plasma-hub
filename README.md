@@ -30,6 +30,23 @@ Android builds require a full JDK, Android SDK, and Android NDK. If Gradle repor
 
 The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it reports `aarch64-linux-android-clang` as missing, install an Android NDK through Android Studio or `sdkmanager`, then make sure `ANDROID_HOME` or `ANDROID_SDK_ROOT` points at the SDK.
 
+### Rust shell (migration)
+
+The Dioxus shell is the migration target and is independent of the Tauri
+frontend until the Phase 8 cutover:
+
+```bash
+npm run dev:ui
+npm run check:ui
+npm run build:ui
+npm run build:ui:android
+```
+
+`build:ui:android` requires Dioxus CLI 0.7.10 (`dx`) and an Android NDK. It
+packages `libtdjson.so` into the generated `jniLibs` before invoking Gradle;
+`dx` alone does not copy that library. The default debug APK is written under
+`apps/plasma/target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/`.
+
 ## Project Map
 
 - `Cargo.toml`: Cargo workspace for the UI-agnostic Rust core and the Tauri adapters. The Dioxus shell in `apps/plasma` is a nested workspace until the Tauri cutover.

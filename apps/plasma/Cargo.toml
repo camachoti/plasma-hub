@@ -8,6 +8,7 @@ description = "Plasma Hub Rust application shell (Dioxus)"
 
 [dependencies]
 plasma-core = { path = "../../crates/plasma-core" }
+plasma-platform = { path = "../../crates/plasma-platform" }
 plasma-store = { path = "../../crates/plasma-store" }
 plasma-telegram = { path = "../../crates/plasma-telegram" }
 plasma-ui = { path = "../../crates/plasma-ui" }

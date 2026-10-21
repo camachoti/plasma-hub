@@ -36,6 +36,8 @@ pub struct AppServices {
     pub twitter: TwitterHandle,
     pub extract: ExtractorHandle,
     pub credentials: Option<TelegramCredentials>,
+    /// URL received from an Android share intent before the UI mounted.
+    pub initial_shared_url: Option<String>,
 }
 
 impl AppServices {
@@ -58,6 +60,7 @@ impl AppServices {
             twitter,
             extract,
             credentials,
+            initial_shared_url: None,
         }
     }
 }
@@ -661,6 +664,9 @@ pub struct UiState {
     pub telegram_tick: Signal<u64>,
 
     pub downloads: Signal<Vec<DownloadRecord>>,
+
+    /// Pending URL delivered by an Android share intent.
+    pub shared_url: Signal<Option<String>>,
 }
 
 impl UiState {

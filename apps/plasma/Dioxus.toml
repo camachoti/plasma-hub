@@ -1,0 +1,19 @@
+[application]
+name = "Plasma Hub"
+android_manifest = "android/AndroidManifest.xml"
+android_main_activity = "android/MainActivity.kt"
+
+[bundle]
+identifier = "com.camacho.plasmahub"
+version = "0.1.0"
+
+[android]
+identifier = "com.camacho.plasmahub"
+min_sdk = 24
+target_sdk = 36
+compile_sdk = 36
+proguard_rules = ["android/proguard-rules.pro"]
+
+[android.application]
+uses_cleartext_traffic = false
+supports_rtl = true

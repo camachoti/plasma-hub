@@ -9,6 +9,7 @@
     "check:ui": "cd apps/plasma && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test",
     "dev:ui": "cd apps/plasma && cargo run",
     "build:ui": "cd apps/plasma && cargo build --release",
+    "build:ui:android": "scripts/build-dioxus-android.sh debug",
     "test": "node --test tests/*.test.mjs",
     "predev": "npm run check:form-controls",
     "prebuild": "npm run check:form-controls",

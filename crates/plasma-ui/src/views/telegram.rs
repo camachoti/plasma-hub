@@ -545,24 +545,21 @@ fn RealTelegram() -> Element {
                                     onclick: {
                                         let services = services.clone();
                                         move |_| {
-                                            let Some(path) = pick_media_file() else {
-                                                #[cfg(target_os = "android")]
-                                                push_toast(
-                                                    ui.toasts,
-                                                    "Seleção de arquivos no Android entra na fase 7.",
-                                                    ToastKind::Info,
+                                            let services = services.clone();
+                                            spawn(async move {
+                                                let Some(path) = pick_media_file().await else {
+                                                    return;
+                                                };
+                                                send_media_file(
+                                                    services,
+                                                    ui,
+                                                    path.to_string_lossy().to_string(),
+                                                    composer,
+                                                    sending,
+                                                    composer_error,
+                                                    reply_to,
                                                 );
-                                                return;
-                                            };
-                                            send_media_file(
-                                                services.clone(),
-                                                ui,
-                                                path.to_string_lossy().to_string(),
-                                                composer,
-                                                sending,
-                                                composer_error,
-                                                reply_to,
-                                            );
+                                            });
                                         }
                                     },
                                     "Anexar"
@@ -1129,23 +1126,25 @@ fn update_chat_preview(mut ui: UiState, chat_id: &str, message: &TdlibMessageInf
     }
 }
 
-#[cfg(not(target_os = "android"))]
-fn pick_media_file() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Escolher mídia para enviar")
-        .add_filter(
-            "Mídia",
-            &[
-                "jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "webm", "mkv", "mp3", "m4a",
-                "ogg", "wav", "pdf", "zip",
-            ],
-        )
-        .pick_file()
-}
+async fn pick_media_file() -> Option<std::path::PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    {
+        rfd::FileDialog::new()
+            .set_title("Escolher mídia para enviar")
+            .add_filter(
+                "Mídia",
+                &[
+                    "jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "webm", "mkv", "mp3", "m4a",
+                    "ogg", "wav", "pdf", "zip",
+                ],
+            )
+            .pick_file()
+    }
 
-#[cfg(target_os = "android")]
-fn pick_media_file() -> Option<std::path::PathBuf> {
-    None
+    #[cfg(target_os = "android")]
+    {
+        plasma_platform::pick_media_file().await
+    }
 }
 
 fn format_bytes(bytes: i64) -> String {

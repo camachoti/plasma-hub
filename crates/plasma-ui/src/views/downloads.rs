@@ -19,6 +19,22 @@ pub fn DownloadsView() -> Element {
     let mut analysis = use_signal(|| None::<MediaInfo>);
     let analyzing = use_signal(|| false);
 
+    let mut shared_url = ui.shared_url;
+    let shared_services = services.clone();
+    use_effect(move || {
+        if let Some(value) = shared_url() {
+            shared_url.set(None);
+            url.set(value.clone());
+            analyze_current(
+                shared_services.clone(),
+                url,
+                analysis,
+                analyzing,
+                analysis_error,
+            );
+        }
+    });
+
     let download_dir = services.downloads.download_dir().display().to_string();
     let items = ui.downloads();
     let active = items.iter().filter(|item| item.is_active()).count();
@@ -360,6 +376,32 @@ fn DownloadRow(item: DownloadRecord) -> Element {
                     }
                 }
                 if item.status == "completed" {
+                    if let Some(path) = item.file_path.clone() {
+                        button {
+                            class: "btn small",
+                            onclick: {
+                                let path = path.clone();
+                                move |_| {
+                                    if let Err(message) = plasma_platform::open_path(&path) {
+                                        push_toast(ui.toasts, message, ToastKind::Error);
+                                    }
+                                }
+                            },
+                            "Abrir"
+                        }
+                        button {
+                            class: "btn small ghost",
+                            onclick: {
+                                let path = path.clone();
+                                move |_| {
+                                    if let Err(message) = plasma_platform::reveal_path(&path) {
+                                        push_toast(ui.toasts, message, ToastKind::Error);
+                                    }
+                                }
+                            },
+                            "Mostrar"
+                        }
+                    }
                     button {
                         class: "btn small ghost",
                         onclick: {
