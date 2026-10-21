@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { registerAppServiceWorker } from "./shared/platform/serviceWorker";
+import { migrateLegacySettings } from "./shared/storage/settingsMigration";
 import "./styles/index.css";
 import "./styles/design-system.css";
 
@@ -36,6 +37,7 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
 }
 
 registerAppServiceWorker();
+void migrateLegacySettings();
 
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Elemento raiz do Plasma Hub não encontrado.");

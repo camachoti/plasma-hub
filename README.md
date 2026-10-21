@@ -32,7 +32,7 @@ The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it re
 
 ## Project Map
 
-- `Cargo.toml`: Cargo workspace for the Rust core and the Tauri app.
+- `Cargo.toml`: Cargo workspace for the UI-agnostic Rust core and the Tauri adapters. The Dioxus shell in `apps/plasma` is a nested workspace until the Tauri cutover.
 - `crates/plasma-core`: shared errors, app paths, and the UI-agnostic `AppEnv`.
 - `crates/plasma-platform`: filesystem and OS helpers.
 - `crates/plasma-store`: SQLite message cache, download history, topic state, settings, and migrations.
@@ -42,7 +42,8 @@ The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it re
 - `crates/plasma-twitter`, `crates/plasma-tiktok`, `crates/plasma-youtube`: native extractors and downloaders.
 - `crates/plasma-duplicates`: duplicate media search.
 - `crates/plasma-instagram`, `crates/plasma-reddit`: migration placeholders.
-- `crates/plasma-ui`, `apps/plasma`: Rust UI migration placeholders.
+- `crates/plasma-ui`: Dioxus shell views, theme, and the virtualized timeline spike.
+- `apps/plasma`: Rust desktop/Android composition root that opens SQLite and launches the Dioxus WebView.
 - `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
 - `src/app`: app shell, navigation, login flow, and bootstrap hooks.
 - `src/features`: product domains such as Telegram, Twitter/X, downloader, and appearance.

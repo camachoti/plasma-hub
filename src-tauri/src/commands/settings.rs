@@ -38,13 +38,16 @@ pub fn settings_snapshot(app: AppHandle) -> Result<BTreeMap<String, String>, Str
 
 /// Imports values read from the legacy webview `localStorage`.
 ///
-/// Existing SQLite values win, so this is safe to call on every start.
+/// When `overwrite` is false (the default), existing SQLite values win, so
+/// repeated imports are safe. The React frontend passes `true` while it is
+/// still the authoritative UI during the migration.
 #[tauri::command]
 pub fn settings_import_legacy(
     app: AppHandle,
     entries: Vec<(String, String)>,
+    overwrite: Option<bool>,
 ) -> Result<usize, String> {
     store(&app)
-        .import_legacy(entries)
+        .import_legacy_with(entries, overwrite.unwrap_or(false))
         .map_err(|error| error.to_string())
 }

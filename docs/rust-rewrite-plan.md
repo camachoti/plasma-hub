@@ -1,12 +1,13 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fase 0 concluída em 2026-10-20.
+> Status: **aprovado**. Fases 0 e 1 concluídas; Fase 2 implementada em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
-> **Execução atual:** fases 0 e 1 concluídas. Workspace criado, backend extraído para
-> crates UI-agnósticos, `src-tauri` reduzido a adaptadores Tauri, store com migrações e
-> `SettingsStore`/`EventBus` prontos. Frontend React segue funcionando sem mudanças.
-> Próxima fase: 2 (shell Dioxus + spike de virtualização).
+> **Execução atual:** fases 0 e 1 concluídas; shell da fase 2 compilando, testado e
+> executando. O workspace de domínio, as migrações SQLite e o `SettingsStore`/`EventBus`
+> estão prontos; o frontend React continua sendo o app padrão e sem mudanças visíveis.
+> Próximo passo: validar o gate visual da fase 2 em um desktop com WebKitGTK compatível e
+> iniciar a fase 3 (TDLib real).
 
 ---
 
@@ -160,6 +161,13 @@ plasma-ui    ←  apps/plasma
 - Nenhum crate de domínio importa `dioxus`, `tao`, `wry` ou `tauri`.
 - Nenhum crate de domínio recebe `AppHandle`/`Window`; recebe `Arc<AppServices>`.
 - `apps/plasma` é o único lugar que conhece janela, tema do SO, ciclo de vida Android.
+
+> **Workspace aninhado (fases 2–7):** o Dioxus 0.7.10 usa `wry 0.53.5`, que fixa
+> `webkit2gtk =2.0.1`; o Tauri 2.12 usa `wry 0.57`, que fixa `=2.0.2`. Como o Cargo não
+> consegue unificar duas versões exatas da mesma biblioteca de sistema, `apps/plasma` tem
+> um workspace próprio (`[workspace]`) e a raiz o exclui de `members`. `crates/plasma-ui`
+> permanece no workspace raiz porque só usa o núcleo do Dioxus (sem renderer/wry). Na fase 8,
+> ao remover o Tauri, `apps/plasma` volta para o workspace raiz e os lockfiles são unificados.
 
 ### Composição em runtime
 
@@ -407,6 +415,28 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
 6. Compatibilidade preservada: mesmo arquivo `plasma-hub.sqlite3`, mesmas tabelas e
    mesmos nomes de chave. Nenhum caminho de dados do usuário mudou.
 
+### Fase 2 — shell implementado (2026-10-20)
+
+1. `apps/plasma` (workspace aninhado) resolve os mesmos diretórios do Tauri
+   (`<data>/com.camacho.plasmahub`, cache e downloads; `PLASMA_HOME` apenas para
+   desenvolvimento), abre o SQLite e lança o Dioxus com janela 1280×820.
+2. `plasma-ui` entrega o shell navegável: rail com Telegram/Downloads/Twitter/Ajustes,
+   login de demonstração com “pular login”, seis paletas, três densidades, command palette,
+   toasts, placeholders das abas e uma tela de diagnóstico com o caminho do banco/schema.
+3. Preferências são lidas e gravadas no `SettingsStore` (`plasma_appearance_palette`,
+   `plasma_appearance_density`, `skip_login`). O shell também consegue importar as chaves
+   globais do `localStorage` da própria WebView.
+4. Spike de virtualização: 5.000 mensagens sintéticas com alturas variáveis, prefix sums,
+   busca binária da janela visível, overscan e apenas ~20–40 linhas montadas no DOM.
+   Testes cobrem layout, limites do range e mensagens longas.
+5. Migração real do frontend antigo: `src/shared/storage/settingsMigration.ts` roda no boot
+   do React/Tauri e espelha as chaves globais no SQLite com `overwrite: true` (o React é a
+   autoridade até o cutover). O shell Rust usa import sem sobrescrever.
+6. Gate visual: `cargo check`, `clippy`, `cargo test` e a abertura da janela + criação do
+   banco foram validados. Neste ambiente a captura da WebView fica em branco também para o
+   `MiniBrowser` do WebKitGTK 2.52 (problema do runtime, não do shell), então a conferência
+   visual deve ser feita em um desktop/runner com WebKitGTK compatível antes de fechar a fase.
+
 ---
 
 ## 10. Riscos e mitigações
@@ -416,6 +446,7 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
 | Virtualização de timeline com altura variável | Alta | Alto | Spike na Fase 2; ancoragem por ID; fallback `dioxus-virtual-scroll`; limite de mensagens em memória |
 | Vídeo no WebView Android (codecs, cleartext, fullscreen) | Média-alta | Alto | Testar cedo em device real; network security config só para loopback; manter restrições atuais de formatos |
 | Dioxus 0.7 → 0.8 (APIs mudam) | Média | Médio | Pin `=0.7.10`; upgrade só após cutover; isolar APIs de janela em `apps/plasma` |
+| WebKitGTK recente + `wry 0.53` (Dioxus 0.7) | Média | Alto | Validar o renderer cedo em desktop/Android; se o WebView não pintar, testar Dioxus 0.8 alpha ou voltar ao plano B sem perder os crates de domínio |
 | UI travando por chamadas bloqueantes (rusqlite/image/TDLib) | Média | Alto | `spawn_blocking`, lint/clippy, timeouts; medir frame time com 10k mensagens |
 | Volume de eventos TDLib (novas mensagens, progresso) | Média | Médio | Coalescing, canais com backpressure, processamento em lote |
 | Perda de dados do usuário (localStorage/SQLite) | Baixa | Alto | Migração one-shot + backup `.bak` antes de migrar; testes com DB real |
@@ -450,7 +481,11 @@ Rust".
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --exclude plasma-hub
+cargo check -p plasma-hub
+cd apps/plasma && cargo fmt --all --check
+cd apps/plasma && cargo clippy --all-targets -- -D warnings
+cd apps/plasma && cargo test
 cargo check -p plasma-telegram --target aarch64-linux-android
 dx build --platform android --target aarch64   # Fase 7+
 ```

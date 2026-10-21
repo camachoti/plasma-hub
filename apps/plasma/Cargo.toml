@@ -4,10 +4,40 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Plasma Hub application shell (Dioxus migration pending)"
+description = "Plasma Hub Rust application shell (Dioxus)"
 
 [dependencies]
 plasma-core = { path = "../../crates/plasma-core" }
+plasma-store = { path = "../../crates/plasma-store" }
+plasma-ui = { path = "../../crates/plasma-ui" }
+dirs = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+dioxus = { workspace = true, features = ["desktop", "launch", "logger"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+dioxus = { workspace = true, features = ["mobile", "launch", "logger"] }
 
 [lints]
 workspace = true
+
+# The Dioxus desktop renderer (wry 0.53) and Tauri 2.12 (wry 0.57) require
+# incompatible webkit2gtk versions, so the new UI has its own workspace until
+# the Phase 8 cutover removes Tauri.
+[workspace]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Camacho"]
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[workspace.dependencies]
+dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks", "document"] }
+dirs = "6"

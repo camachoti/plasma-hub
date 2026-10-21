@@ -8,6 +8,8 @@ description = "Plasma Hub UI built with Dioxus (migration pending)"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+plasma-store = { path = "../plasma-store" }
+dioxus = { workspace = true }
 
 [lints]
 workspace = true

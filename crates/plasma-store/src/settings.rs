@@ -172,21 +172,41 @@ impl SettingsStore {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        self.import_legacy_with(entries, false)
+    }
+
+    /// Imports legacy values, optionally overwriting SQLite.
+    ///
+    /// The React frontend remains authoritative until the Phase 8 cutover, so
+    /// its boot migration uses `overwrite = true`. The Rust shell uses the
+    /// default (missing keys only) once it starts writing settings itself.
+    pub fn import_legacy_with<I>(&self, entries: I, overwrite: bool) -> Result<usize>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
         let mut connection = self.db.connect()?;
         let transaction = connection.transaction().map_err(db::db_error)?;
         let updated_at = db::now_millis();
         let mut imported = 0;
+        let sql = if overwrite {
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#
+        } else {
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO NOTHING
+            "#
+        };
 
         for (key, value) in entries {
             let changed = transaction
-                .execute(
-                    r#"
-                    INSERT INTO settings (key, value, updated_at)
-                    VALUES (?1, ?2, ?3)
-                    ON CONFLICT(key) DO NOTHING
-                    "#,
-                    params![key, value, updated_at],
-                )
+                .execute(sql, params![key, value, updated_at])
                 .map_err(db::db_error)?;
             imported += changed;
         }
@@ -286,6 +306,30 @@ mod tests {
         );
         assert!(store.get_bool(SettingKey::INFO_PANEL_OPEN).expect("info"));
         assert!(store.get_bool(SettingKey::SKIP_LOGIN).expect("skip"));
+    }
+
+    #[test]
+    fn import_can_overwrite_existing_values() {
+        let (_dir, store) = store();
+        store
+            .set(SettingKey::APPEARANCE_PALETTE, "forest")
+            .expect("set");
+
+        let imported = store
+            .import_legacy_with(
+                [("plasma_appearance_palette".to_string(), "ion".to_string())],
+                true,
+            )
+            .expect("overwrite import");
+
+        assert_eq!(imported, 1);
+        assert_eq!(
+            store
+                .get(SettingKey::APPEARANCE_PALETTE)
+                .expect("palette")
+                .as_deref(),
+            Some("ion")
+        );
     }
 
     #[test]

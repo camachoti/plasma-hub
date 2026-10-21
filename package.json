@@ -6,6 +6,9 @@
   "scripts": {
     "check:form-controls": "node scripts/check-form-controls.mjs",
     "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --exclude plasma-hub && cargo check -p plasma-hub",
+    "check:ui": "cd apps/plasma && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test",
+    "dev:ui": "cd apps/plasma && cargo run",
+    "build:ui": "cd apps/plasma && cargo build --release",
     "test": "node --test tests/*.test.mjs",
     "predev": "npm run check:form-controls",
     "prebuild": "npm run check:form-controls",

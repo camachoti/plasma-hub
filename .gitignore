@@ -36,3 +36,4 @@ src-tauri/gen/android/*.keystore
 
 # Rust workspace build output
 /target
+/apps/plasma/target

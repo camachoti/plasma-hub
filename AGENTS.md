@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository is `plasma-hub`, a Tauri 2 application with a React/Vite frontend. The same app shell is intended to work on desktop and Android, with platform-specific behavior isolated behind shared runtime wrappers and Tauri commands.
+This repository is `plasma-hub`, a Tauri 2 application with a React/Vite frontend plus a Rust/Dioxus shell being built for the migration. The same app shell is intended to work on desktop and Android, with platform-specific behavior isolated behind shared runtime wrappers and Tauri commands.
 
 ## Project Layout
 
@@ -17,7 +17,8 @@ The repository is a Cargo workspace plus the current React frontend.
 - `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: native extractors/downloaders.
 - `crates/plasma-duplicates`: duplicate media search.
 - `crates/plasma-instagram`, `plasma-reddit`: migration placeholders.
-- `crates/plasma-ui`, `apps/plasma`: Rust UI migration placeholders.
+- `crates/plasma-ui`: Dioxus shell (views, theme, virtualization spike); renderer-independent.
+- `apps/plasma`: Rust desktop/Android composition root and Dioxus renderer. It has its own nested workspace until the Tauri cutover because Dioxus 0.7 and Tauri 2 pin incompatible `wry`/`webkit2gtk` versions.
 - `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
 - `src-tauri/src/env.rs`: Tauri `AppEnv`/event bridge.
 - `src/app`: app shell, navigation, login flow, bootstrap hooks.
@@ -35,6 +36,9 @@ events. See `docs/rust-rewrite-plan.md`.
 - `npm run build`: run TypeScript checks and build the frontend bundle.
 - `npm run tauri:dev`: run the desktop Tauri app.
 - `npm run tauri:build`: build the desktop Tauri app.
+- `npm run dev:ui`: run the Rust/Dioxus shell.
+- `npm run check:ui`: fmt, clippy, and tests for the Rust shell.
+- `npm run build:ui`: build the Rust shell in release mode.
 - `npm run tauri:android:init`: initialize the Android project.
 - `npm run tauri:android:dev`: run the Android app in development mode.
 - `npm run tauri:android:build`: build the Android app for `aarch64`.
@@ -64,6 +68,7 @@ Use the smallest relevant validation set for the change:
 
 - `npm run build`
 - `npm run check:rust` (fmt + clippy + workspace tests)
+- `npm run check:ui` for anything under `crates/plasma-ui` or `apps/plasma`
 - `cargo check -p plasma-hub`
 - `scripts/check-android-toolchain.sh`
 
