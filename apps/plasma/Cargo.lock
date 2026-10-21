@@ -3512,6 +3512,7 @@ dependencies = [
  "plasma-core",
  "plasma-store",
  "plasma-telegram",
+ "rfd",
  "serde_json",
  "time",
  "tokio",

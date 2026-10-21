@@ -5,9 +5,9 @@ use crate::state::{
     merge_messages, message_cache_key, push_toast, AppServices, ToastKind, UiState,
 };
 use crate::views::spike::VirtualTimeline;
-use crate::views::timeline::{format_timestamp, MessageTimeline};
+use crate::views::timeline::{format_timestamp, MessageAction, MessageThumbnail, MessageTimeline};
 use dioxus::prelude::*;
-use plasma_telegram::{TdlibChatInfo, TdlibForumTopicInfo, TdlibMessageInfo};
+use plasma_telegram::{TdlibChatInfo, TdlibForumTopicInfo, TdlibMessageInfo, TdlibSharedMediaItem};
 
 #[component]
 pub fn TelegramView() -> Element {
@@ -29,6 +29,17 @@ fn RealTelegram() -> Element {
     let mut search_active = use_signal(|| false);
     let loading_older = use_signal(|| false);
     let mut avatar_chat = use_signal(|| None::<String>);
+    let mut composer = use_signal(String::new);
+    let sending = use_signal(|| false);
+    let composer_error = use_signal(|| None::<String>);
+    let mut reply_to = use_signal(|| None::<TdlibMessageInfo>);
+    let mut lightbox = use_signal(|| None::<LightboxState>);
+    let mut shared_open = use_signal(|| false);
+    let mut shared_items = use_signal(Vec::<TdlibSharedMediaItem>::new);
+    let mut shared_loading = use_signal(|| false);
+    let mut shared_error = use_signal(|| None::<String>);
+    let mut forward_state = use_signal(|| None::<ForwardState>);
+    let mut forwarding = use_signal(|| false);
 
     let chat_services = services.clone();
     use_effect(move || {
@@ -47,6 +58,9 @@ fn RealTelegram() -> Element {
                             ui.selected_chat.set(Some(updated));
                         }
                     } else if let Some(first) = dialogs.first().cloned() {
+                        if let Some(chat_id) = parse_chat_id(&first) {
+                            let _ = services.telegram.read_chat(chat_id).await;
+                        }
                         ui.selected_chat.set(Some(first));
                     }
                     ui.chats.set(dialogs);
@@ -130,6 +144,31 @@ fn RealTelegram() -> Element {
         });
     });
 
+    let shared_services = services.clone();
+    use_effect(move || {
+        if !shared_open() {
+            return;
+        }
+        let Some(chat_id) = ui.selected_chat().and_then(|chat| parse_chat_id(&chat)) else {
+            return;
+        };
+        let services = shared_services.clone();
+        shared_loading.set(true);
+        shared_error.set(None);
+        spawn(async move {
+            match services.telegram.shared_media(chat_id, 80).await {
+                Ok(result) if result.success => shared_items.set(result.media),
+                Ok(result) => shared_error.set(
+                    result
+                        .error
+                        .or_else(|| Some("Mídia compartilhada indisponível.".into())),
+                ),
+                Err(error) => shared_error.set(Some(error)),
+            }
+            shared_loading.set(false);
+        });
+    });
+
     let filter = chat_filter().trim().to_lowercase();
     let chats: Vec<TdlibChatInfo> = ui
         .chats()
@@ -142,6 +181,10 @@ fn RealTelegram() -> Element {
         .collect();
     let selected = ui.selected_chat();
     let selected_id = selected.as_ref().map(|chat| chat.id.clone());
+    let timeline_chat_id = selected_id
+        .as_deref()
+        .and_then(|id| id.parse::<i64>().ok())
+        .unwrap_or_default();
     let topic = ui.selected_topic();
     let topics = ui.topics();
     let in_search = search_active();
@@ -150,6 +193,39 @@ fn RealTelegram() -> Element {
     } else {
         ui.messages()
     };
+    let composer_disabled = selected
+        .as_ref()
+        .map(|chat| !chat.can_send_messages)
+        .unwrap_or(true)
+        || topic.as_ref().is_some_and(|topic| topic.is_closed);
+    let media_disabled = selected
+        .as_ref()
+        .map(|chat| !chat.can_send_media)
+        .unwrap_or(true)
+        || topic.as_ref().is_some_and(|topic| topic.is_closed);
+
+    let on_message_action = move |(message, action): (TdlibMessageInfo, MessageAction)| match action
+    {
+        MessageAction::Reply => reply_to.set(Some(message)),
+        MessageAction::OpenMedia => lightbox.set(Some(LightboxState {
+            chat_id: timeline_chat_id,
+            message_id: message.id,
+            is_video: message.is_video,
+            is_photo: message.is_photo,
+            title: message.sender_name,
+        })),
+        MessageAction::Forward => {
+            if timeline_chat_id != 0 {
+                forward_state.set(Some(ForwardState {
+                    source_chat_id: timeline_chat_id,
+                    message,
+                }));
+            }
+        }
+    };
+
+    let forward = forward_state();
+    let lightbox_state = lightbox();
 
     rsx! {
         div { class: "telegram-layout",
@@ -200,9 +276,11 @@ fn RealTelegram() -> Element {
                             key: "{chat.id}",
                             class: if selected_id.as_deref() == Some(chat.id.as_str()) { "chat-row active" } else { "chat-row" },
                             onclick: {
-                                let chat = chat.clone();
+                                let mut selected_chat = chat.clone();
+                                selected_chat.unread_count = 0;
+                                let read_services = services.clone();
                                 move |_| {
-                                    ui.selected_chat.set(Some(chat.clone()));
+                                    ui.selected_chat.set(Some(selected_chat.clone()));
                                     ui.selected_topic.set(None);
                                     ui.avatar.set(None);
                                     ui.messages.set(Vec::new());
@@ -212,6 +290,13 @@ fn RealTelegram() -> Element {
                                     ui.search_loading.set(false);
                                     search_active.set(false);
                                     message_query.set(String::new());
+                                    reply_to.set(None);
+                                    if let Some(chat_id) = parse_chat_id(&selected_chat) {
+                                        let read_services = read_services.clone();
+                                        spawn(async move {
+                                            let _ = read_services.telegram.read_chat(chat_id).await;
+                                        });
+                                    }
                                 }
                             },
                             div { class: "chat-avatar", "{chat.title.chars().next().unwrap_or('?')}" }
@@ -305,12 +390,8 @@ fn RealTelegram() -> Element {
                             }
                             button {
                                 class: "btn small ghost",
-                                onclick: move |_| push_toast(
-                                    ui.toasts,
-                                    "Envio de mensagens e mídia entra na fase 4.",
-                                    ToastKind::Info,
-                                ),
-                                "Nova"
+                                onclick: move |_| shared_open.set(true),
+                                "Mídia"
                             }
                         }
                     }
@@ -319,7 +400,10 @@ fn RealTelegram() -> Element {
                         div { class: "topics-bar",
                             button {
                                 class: if topic.is_none() { "topic-chip active" } else { "topic-chip" },
-                                onclick: move |_| ui.selected_topic.set(None),
+                                onclick: move |_| {
+                                    ui.selected_topic.set(None);
+                                    reply_to.set(None);
+                                },
                                 "Todos"
                             }
                             for item in topics {
@@ -328,7 +412,10 @@ fn RealTelegram() -> Element {
                                     class: if topic.as_ref().map(|current| current.id) == Some(item.id) { "topic-chip active" } else { "topic-chip" },
                                     onclick: {
                                         let item = item.clone();
-                                        move |_| ui.selected_topic.set(Some(item.clone()))
+                                        move |_| {
+                                            ui.selected_topic.set(Some(item.clone()));
+                                            reply_to.set(None);
+                                        }
                                     },
                                     if item.is_closed { "🔒 " }
                                     "{item.title}"
@@ -382,12 +469,123 @@ fn RealTelegram() -> Element {
                                 }
                                 div { class: "timeline-fill",
                                     MessageTimeline {
+                                        chat_id: timeline_chat_id,
                                         messages: display_messages,
                                         empty_label: if in_search { "Nenhum resultado" } else { "Sem mensagens" },
+                                        on_action: on_message_action,
                                     }
                                 }
                             }
                         }
+                    }
+
+                    div { class: "composer",
+                        if let Some(reply) = reply_to() {
+                            div { class: "reply-banner",
+                                div {
+                                    span { class: "hint", "Respondendo a" }
+                                    strong { " {reply.sender_name}" }
+                                    p { "{reply.text}" }
+                                }
+                                button {
+                                    class: "btn small ghost",
+                                    onclick: move |_| reply_to.set(None),
+                                    "Cancelar"
+                                }
+                            }
+                        }
+                        if let Some(error) = composer_error() {
+                            p { class: "error-banner composer-error", "{error}" }
+                        }
+                        if composer_disabled {
+                            p { class: "composer-warning",
+                                if topic.as_ref().is_some_and(|topic| topic.is_closed) {
+                                    "Este tópico está fechado."
+                                } else {
+                                    "Você não pode enviar mensagens nesta conversa."
+                                }
+                            }
+                        }
+                        if media_disabled && !composer_disabled {
+                            p { class: "composer-warning", "Envio de mídia indisponível nesta conversa." }
+                        }
+                        div { class: "composer-row",
+                            textarea {
+                                class: "composer-input",
+                                rows: "2",
+                                placeholder: "Escreva uma mensagem...",
+                                disabled: composer_disabled,
+                                value: "{composer}",
+                                oninput: move |event| composer.set(event.value()),
+                                onkeydown: {
+                                    let services = services.clone();
+                                    move |event| {
+                                        if event.key() == Key::Enter
+                                            && !event.modifiers().shift()
+                                            && !event.is_composing()
+                                        {
+                                            event.prevent_default();
+                                            send_text(
+                                                services.clone(),
+                                                ui,
+                                                composer,
+                                                sending,
+                                                composer_error,
+                                                reply_to,
+                                            );
+                                        }
+                                    }
+                                },
+                            }
+                            div { class: "composer-actions",
+                                button {
+                                    class: "btn small ghost",
+                                    disabled: media_disabled || sending(),
+                                    title: "Anexar mídia",
+                                    onclick: {
+                                        let services = services.clone();
+                                        move |_| {
+                                            let Some(path) = pick_media_file() else {
+                                                #[cfg(target_os = "android")]
+                                                push_toast(
+                                                    ui.toasts,
+                                                    "Seleção de arquivos no Android entra na fase 7.",
+                                                    ToastKind::Info,
+                                                );
+                                                return;
+                                            };
+                                            send_media_file(
+                                                services.clone(),
+                                                ui,
+                                                path.to_string_lossy().to_string(),
+                                                composer,
+                                                sending,
+                                                composer_error,
+                                                reply_to,
+                                            );
+                                        }
+                                    },
+                                    "Anexar"
+                                }
+                                button {
+                                    class: "btn primary",
+                                    disabled: composer_disabled || sending(),
+                                    onclick: {
+                                        let services = services.clone();
+                                        move |_| send_text(
+                                            services.clone(),
+                                            ui,
+                                            composer,
+                                            sending,
+                                            composer_error,
+                                            reply_to,
+                                        )
+                                    },
+                                    if sending() { "Enviando..." } else { "Enviar" }
+                                }
+                            }
+                        }
+                        p { class: "hint composer-hint", "Enter envia · Shift+Enter quebra linha" }
                     }
                 } else {
                     div { class: "empty-state",
@@ -399,7 +597,570 @@ fn RealTelegram() -> Element {
                     }
                 }
             }
+
+            if shared_open() {
+                SharedMediaPanel {
+                    chat_id: timeline_chat_id,
+                    chat_title: selected_id
+                        .as_deref()
+                        .and_then(|id| ui.chats().into_iter().find(|chat| chat.id == id))
+                        .map(|chat| chat.title)
+                        .unwrap_or_else(|| "Mídia".to_string()),
+                    items: shared_items(),
+                    loading: shared_loading(),
+                    error: shared_error(),
+                    on_close: move |_| shared_open.set(false),
+                    on_open: move |item: TdlibSharedMediaItem| {
+                        lightbox.set(Some(LightboxState {
+                            chat_id: timeline_chat_id,
+                            message_id: item.id,
+                            is_video: item.is_video,
+                            is_photo: item.is_photo,
+                            title: item.sender_name,
+                        }));
+                    },
+                }
+            }
+
+            if let Some(state) = lightbox_state {
+                MediaLightbox {
+                    key: "{state.message_id}",
+                    state,
+                    on_close: move |_| lightbox.set(None),
+                }
+            }
+
+            if let Some(state) = forward {
+                ForwardDialog {
+                    state,
+                    chats: ui.chats(),
+                    busy: forwarding(),
+                    on_close: move |_| forward_state.set(None),
+                    on_forward: {
+                        let services = services.clone();
+                        move |target: TdlibChatInfo| {
+                            let Some(state) = forward_state() else { return; };
+                            let Some(target_id) = parse_chat_id(&target) else { return; };
+                            forwarding.set(true);
+                            let services = services.clone();
+                            spawn(async move {
+                                match services
+                                    .telegram
+                                    .forward_message(
+                                        state.source_chat_id,
+                                        state.message.id,
+                                        target_id,
+                                        None,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    Ok(result) if result.success => {
+                                        push_toast(
+                                            ui.toasts,
+                                            format!("Mensagem encaminhada para {}.", target.title),
+                                            ToastKind::Success,
+                                        );
+                                        forward_state.set(None);
+                                    }
+                                    Ok(result) => push_toast(
+                                        ui.toasts,
+                                        result
+                                            .error
+                                            .unwrap_or_else(|| "Não foi possível encaminhar.".to_string()),
+                                        ToastKind::Error,
+                                    ),
+                                    Err(error) => push_toast(ui.toasts, error, ToastKind::Error),
+                                }
+                                forwarding.set(false);
+                            });
+                        }
+                    },
+                }
+            }
         }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct LightboxState {
+    chat_id: i64,
+    message_id: i64,
+    is_video: bool,
+    is_photo: bool,
+    title: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct ForwardState {
+    source_chat_id: i64,
+    message: TdlibMessageInfo,
+}
+
+#[component]
+fn SharedMediaPanel(
+    chat_id: i64,
+    chat_title: String,
+    items: Vec<TdlibSharedMediaItem>,
+    loading: bool,
+    error: Option<String>,
+    on_close: EventHandler<()>,
+    on_open: EventHandler<TdlibSharedMediaItem>,
+) -> Element {
+    rsx! {
+        div { class: "media-panel-backdrop", onclick: move |_| on_close.call(()),
+            section {
+                class: "media-panel",
+                onclick: move |event| event.stop_propagation(),
+                header { class: "media-panel-header",
+                    div {
+                        strong { "Mídia compartilhada" }
+                        span { class: "hint", "{chat_title}" }
+                    }
+                    button {
+                        class: "btn small ghost",
+                        onclick: move |_| on_close.call(()),
+                        "Fechar"
+                    }
+                }
+                if let Some(error) = error {
+                    p { class: "error-banner", "{error}" }
+                }
+                if loading {
+                    div { class: "timeline-loading",
+                        div { class: "spinner" }
+                        span { "Carregando mídia..." }
+                    }
+                } else if items.is_empty() {
+                    div { class: "empty-state",
+                        div { class: "empty-card",
+                            div { class: "empty-icon", "▣" }
+                            h2 { "Nenhuma mídia" }
+                            p { "Esta conversa ainda não tem fotos ou vídeos em cache no TDLib." }
+                        }
+                    }
+                } else {
+                    div { class: "shared-grid",
+                        for item in items {
+                            div {
+                                key: "{item.id}",
+                                class: "shared-item",
+                                onclick: {
+                                    let item = item.clone();
+                                    move |_| on_open.call(item.clone())
+                                },
+                                MessageThumbnail {
+                                    chat_id,
+                                    message_id: item.id,
+                                    is_video: item.is_video,
+                                    on_open: {
+                                        let item = item.clone();
+                                        move |_| on_open.call(item.clone())
+                                    },
+                                }
+                                div { class: "shared-meta",
+                                    strong { "{item.sender_name}" }
+                                    span {
+                                        "{format_timestamp(item.date)}"
+                                        if let Some(size) = item.media_size {
+                                            " · {format_bytes(size)}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
+    let services = use_context::<AppServices>();
+    let toasts = use_context::<UiState>().toasts;
+    let save_services = services.clone();
+    let resource_state = state.clone();
+    let resource = use_resource(move || {
+        let services = services.clone();
+        let state = resource_state.clone();
+        async move {
+            services
+                .telegram
+                .prepare_playback(state.chat_id, state.message_id)
+                .await
+        }
+    });
+    let mut saving = use_signal(|| false);
+    let mut save_error = use_signal(|| None::<String>);
+
+    let (source, mime_type, load_error) = match &*resource.read_unchecked() {
+        Some(Ok(playback)) if playback.success => {
+            (playback.url.clone(), playback.mime_type.clone(), None)
+        }
+        Some(Ok(playback)) => (
+            None,
+            playback.mime_type.clone(),
+            playback
+                .error
+                .clone()
+                .or_else(|| Some("Não foi possível preparar a mídia.".to_string())),
+        ),
+        Some(Err(error)) => (None, None, Some(error.clone())),
+        None => (None, None, None),
+    };
+    let save_error_message = save_error();
+
+    rsx! {
+        div { class: "lightbox-backdrop", onclick: move |_| on_close.call(()),
+            div {
+                class: "lightbox-card",
+                onclick: move |event| event.stop_propagation(),
+                header { class: "lightbox-header",
+                    div {
+                        strong { "{state.title}" }
+                        span { class: "hint", "Mensagem {state.message_id}" }
+                    }
+                    button {
+                        class: "btn small ghost",
+                        onclick: move |_| on_close.call(()),
+                        "Fechar"
+                    }
+                }
+                div { class: "lightbox-stage",
+                    if let Some(error) = load_error {
+                        p { class: "error-banner", "{error}" }
+                    } else if let Some(url) = source {
+                        if state.is_video {
+                            video {
+                                class: "lightbox-media",
+                                src: "{url}",
+                                controls: true,
+                                autoplay: true,
+                                playsinline: true,
+                            }
+                        } else if state.is_photo {
+                            img { class: "lightbox-media", src: "{url}", alt: "" }
+                        } else {
+                            div { class: "lightbox-file",
+                                p { "Este anexo não tem prévia no shell Rust." }
+                                a { class: "btn small primary", href: "{url}", target: "_blank", "Abrir arquivo" }
+                            }
+                        }
+                    } else {
+                        div { class: "timeline-loading",
+                            div { class: "spinner" }
+                            span { "Preparando mídia..." }
+                        }
+                    }
+                    if let Some(error) = save_error_message {
+                        p { class: "error-banner lightbox-save-error", "{error}" }
+                    }
+                }
+                footer { class: "lightbox-footer",
+                    span { class: "hint",
+                        if let Some(mime) = mime_type.as_deref() {
+                            "{mime}"
+                        } else {
+                            ""
+                        }
+                    }
+                    div { class: "topbar-actions",
+                        button {
+                            class: "btn primary",
+                            disabled: saving(),
+                            onclick: {
+                                let services = save_services.clone();
+                                move |_| {
+                                    saving.set(true);
+                                    save_error.set(None);
+                                    let services = services.clone();
+                                    let chat_id = state.chat_id;
+                                    let message_id = state.message_id;
+                                    spawn(async move {
+                                        match services
+                                            .telegram
+                                            .save_media(chat_id, message_id, None)
+                                            .await
+                                        {
+                                            Ok(result) if result.success => push_toast(
+                                                toasts,
+                                                format!(
+                                                    "Mídia salva em {}.",
+                                                    result.file_path.unwrap_or_default()
+                                                ),
+                                                ToastKind::Success,
+                                            ),
+                                            Ok(result) => save_error.set(
+                                                result.error.or_else(|| {
+                                                    Some("Não foi possível salvar a mídia.".into())
+                                                }),
+                                            ),
+                                            Err(error) => save_error.set(Some(error)),
+                                        }
+                                        saving.set(false);
+                                    });
+                                }
+                            },
+                            if saving() { "Salvando..." } else { "Salvar" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForwardDialog(
+    state: ForwardState,
+    chats: Vec<TdlibChatInfo>,
+    busy: bool,
+    on_close: EventHandler<()>,
+    on_forward: EventHandler<TdlibChatInfo>,
+) -> Element {
+    rsx! {
+        div { class: "forward-backdrop", onclick: move |_| on_close.call(()),
+            section {
+                class: "modal-card",
+                onclick: move |event| event.stop_propagation(),
+                header { class: "modal-header",
+                    div {
+                        strong { "Encaminhar mensagem" }
+                        span { class: "hint", "{state.message.sender_name}" }
+                    }
+                    button {
+                        class: "btn small ghost",
+                        onclick: move |_| on_close.call(()),
+                        "Fechar"
+                    }
+                }
+                p { class: "hint", "{state.message.text}" }
+                div { class: "modal-list",
+                    for chat in chats {
+                        button {
+                            key: "{chat.id}",
+                            class: "chat-row",
+                            disabled: busy,
+                            onclick: {
+                                let chat = chat.clone();
+                                move |_| on_forward.call(chat.clone())
+                            },
+                            div { class: "chat-avatar", "{chat.title.chars().next().unwrap_or('?')}" }
+                            div { class: "chat-copy",
+                                span { class: "chat-name", "{chat.title}" }
+                                span { class: "chat-preview", "{chat_kind(&chat)}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn send_text(
+    services: AppServices,
+    mut ui: UiState,
+    mut composer: Signal<String>,
+    mut sending: Signal<bool>,
+    mut error: Signal<Option<String>>,
+    mut reply: Signal<Option<TdlibMessageInfo>>,
+) {
+    if sending() {
+        return;
+    }
+    let Some(chat) = ui.selected_chat() else {
+        error.set(Some("Escolha uma conversa primeiro.".to_string()));
+        return;
+    };
+    let Some(chat_id) = parse_chat_id(&chat) else {
+        error.set(Some("Chat inválido.".to_string()));
+        return;
+    };
+    let text = composer().trim().to_string();
+    if text.is_empty() {
+        error.set(Some("Digite uma mensagem.".to_string()));
+        return;
+    }
+    let topic = ui.selected_topic();
+    let topic_id = topic.as_ref().map(|item| item.id);
+    let topic_kind = topic.as_ref().map(|item| item.kind.clone());
+    let reply_id = reply().map(|message| message.id);
+    let expected_chat = chat.id.clone();
+    let expected_topic = topic.as_ref().map(|item| item.id);
+    let cache_key = message_cache_key(&chat.id, topic.as_ref());
+
+    sending.set(true);
+    error.set(None);
+    spawn(async move {
+        match services
+            .telegram
+            .send_message(chat_id, text, reply_id, topic_id, topic_kind)
+            .await
+        {
+            Ok(result) if result.success => {
+                composer.set(String::new());
+                reply.set(None);
+                if let Some(message) = result.message {
+                    if ui.selected_chat().map(|chat| chat.id) == Some(expected_chat.clone())
+                        && ui.selected_topic().map(|topic| topic.id) == expected_topic
+                    {
+                        let mut messages = ui.messages();
+                        merge_messages(&mut messages, [message.clone()]);
+                        ui.messages.set(messages.clone());
+                        let cache_services = services.clone();
+                        spawn(async move {
+                            let _ = cache_services
+                                .telegram
+                                .cache_messages(cache_key, messages)
+                                .await;
+                        });
+                    }
+                    update_chat_preview(ui, &expected_chat, &message);
+                }
+            }
+            Ok(result) => error.set(
+                result
+                    .error
+                    .or_else(|| Some("Não foi possível enviar.".to_string())),
+            ),
+            Err(send_error) => error.set(Some(send_error)),
+        }
+        sending.set(false);
+    });
+}
+
+fn send_media_file(
+    services: AppServices,
+    mut ui: UiState,
+    file_path: String,
+    mut composer: Signal<String>,
+    mut sending: Signal<bool>,
+    mut error: Signal<Option<String>>,
+    mut reply: Signal<Option<TdlibMessageInfo>>,
+) {
+    if sending() {
+        return;
+    }
+    let Some(chat) = ui.selected_chat() else {
+        error.set(Some("Escolha uma conversa primeiro.".to_string()));
+        return;
+    };
+    let Some(chat_id) = parse_chat_id(&chat) else {
+        error.set(Some("Chat inválido.".to_string()));
+        return;
+    };
+    let caption = composer().trim().to_string();
+    let caption = if caption.is_empty() {
+        None
+    } else {
+        Some(caption)
+    };
+    let topic = ui.selected_topic();
+    let topic_id = topic.as_ref().map(|item| item.id);
+    let topic_kind = topic.as_ref().map(|item| item.kind.clone());
+    let reply_id = reply().map(|message| message.id);
+    let expected_chat = chat.id.clone();
+    let expected_topic = topic.as_ref().map(|item| item.id);
+    let cache_key = message_cache_key(&chat.id, topic.as_ref());
+
+    sending.set(true);
+    error.set(None);
+    spawn(async move {
+        match services
+            .telegram
+            .send_media(chat_id, file_path, caption, reply_id, topic_id, topic_kind)
+            .await
+        {
+            Ok(result) if result.success => {
+                composer.set(String::new());
+                reply.set(None);
+                if let Some(message) = result.message {
+                    if ui.selected_chat().map(|chat| chat.id) == Some(expected_chat.clone())
+                        && ui.selected_topic().map(|topic| topic.id) == expected_topic
+                    {
+                        let mut messages = ui.messages();
+                        merge_messages(&mut messages, [message.clone()]);
+                        ui.messages.set(messages.clone());
+                        let cache_services = services.clone();
+                        spawn(async move {
+                            let _ = cache_services
+                                .telegram
+                                .cache_messages(cache_key, messages)
+                                .await;
+                        });
+                    }
+                    update_chat_preview(ui, &expected_chat, &message);
+                }
+            }
+            Ok(result) => error.set(
+                result
+                    .error
+                    .or_else(|| Some("Não foi possível enviar a mídia.".to_string())),
+            ),
+            Err(send_error) => error.set(Some(send_error)),
+        }
+        sending.set(false);
+    });
+}
+
+fn update_chat_preview(mut ui: UiState, chat_id: &str, message: &TdlibMessageInfo) {
+    let mut chats = ui.chats();
+    if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
+        chat.last_message_text = message.text.clone();
+        chat.last_message_date = message.date;
+        chat.last_message_has_media = message.has_media;
+        chat.last_message_is_video = message.is_video;
+        chat.last_message_is_photo = message.is_photo;
+    }
+    ui.chats.set(chats);
+    if let Some(selected) = ui.selected_chat() {
+        if selected.id == chat_id {
+            let mut selected = selected;
+            selected.last_message_text = message.text.clone();
+            selected.last_message_date = message.date;
+            selected.last_message_has_media = message.has_media;
+            selected.last_message_is_video = message.is_video;
+            selected.last_message_is_photo = message.is_photo;
+            ui.selected_chat.set(Some(selected));
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn pick_media_file() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Escolher mídia para enviar")
+        .add_filter(
+            "Mídia",
+            &[
+                "jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "webm", "mkv", "mp3", "m4a",
+                "ogg", "wav", "pdf", "zip",
+            ],
+        )
+        .pick_file()
+}
+
+#[cfg(target_os = "android")]
+fn pick_media_file() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn format_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = bytes.max(0) as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes / KB)
+    } else {
+        format!("{bytes:.0} B")
     }
 }
 
@@ -759,5 +1520,19 @@ fn PreviewTelegram() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_media_sizes_for_shared_media() {
+        assert_eq!(format_bytes(900), "900 B");
+        assert_eq!(format_bytes(2 * 1024), "2 KB");
+        assert_eq!(format_bytes(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+        assert_eq!(format_bytes(-1), "0 B");
     }
 }

@@ -1,5 +1,6 @@
 //! Variable-height virtual timeline for real Telegram messages.
 
+use crate::state::AppServices;
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use time::OffsetDateTime;
@@ -40,7 +41,11 @@ fn estimate_height(message: &TdlibMessageInfo) -> f64 {
     let lines = ((characters as f64) / 74.0).ceil().max(1.0);
     let mut height = 58.0 + lines * 18.0;
     if message.has_media {
-        height += 24.0;
+        height += if message.is_photo || message.is_video {
+            132.0
+        } else {
+            24.0
+        };
     }
     if message.reply_to_msg_id.is_some() {
         height += 18.0;
@@ -129,8 +134,57 @@ fn media_label(message: &TdlibMessageInfo) -> Option<String> {
     Some(format!("{kind}{duration}{size}"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageAction {
+    Reply,
+    OpenMedia,
+    Forward,
+}
+
 #[component]
-pub fn MessageTimeline(messages: Vec<TdlibMessageInfo>, empty_label: String) -> Element {
+pub(crate) fn MessageThumbnail(
+    chat_id: i64,
+    message_id: i64,
+    is_video: bool,
+    on_open: EventHandler<()>,
+) -> Element {
+    let services = use_context::<AppServices>();
+    let resource = use_resource(move || {
+        let services = services.clone();
+        async move {
+            services
+                .telegram
+                .thumbnail_data_url(chat_id, message_id)
+                .await
+        }
+    });
+
+    rsx! {
+        button {
+            r#type: "button",
+            class: "message-thumb",
+            title: "Abrir mídia",
+            onclick: move |_| on_open.call(()),
+            match &*resource.read_unchecked() {
+                Some(Ok(Some(url))) => rsx! { img { src: "{url}", alt: "" } },
+                Some(Ok(None)) => rsx! { span { class: "thumb-placeholder", "▣" } },
+                Some(Err(error)) => rsx! { span { class: "thumb-placeholder", title: "{error}", "!" } },
+                None => rsx! { span { class: "thumb-placeholder", "…" } },
+            }
+            if is_video {
+                span { class: "thumb-play", "▶" }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn MessageTimeline(
+    chat_id: i64,
+    messages: Vec<TdlibMessageInfo>,
+    empty_label: String,
+    on_action: EventHandler<(TdlibMessageInfo, MessageAction)>,
+) -> Element {
     let layout = build_layout(&messages);
     let mut scroll_top = use_signal(|| 0.0);
     let mut viewport_height = use_signal(|| DEFAULT_VIEWPORT);
@@ -227,6 +281,17 @@ pub fn MessageTimeline(messages: Vec<TdlibMessageInfo>, empty_label: String) -> 
                                     if !message.text.trim().is_empty() {
                                         p { class: "message-text", "{message.text}" }
                                     }
+                                    if message.has_media && (message.is_photo || message.is_video) {
+                                        MessageThumbnail {
+                                            chat_id,
+                                            message_id: message.id,
+                                            is_video: message.is_video,
+                                            on_open: {
+                                                let message = message.clone();
+                                                move |_| on_action.call((message.clone(), MessageAction::OpenMedia))
+                                            },
+                                        }
+                                    }
                                     if let Some(media) = media_label(&message) {
                                         div { class: "message-media",
                                             span { "▣" }
@@ -235,6 +300,35 @@ pub fn MessageTimeline(messages: Vec<TdlibMessageInfo>, empty_label: String) -> 
                                                 span { class: "pill", "miniatura" }
                                             }
                                         }
+                                    }
+                                }
+                                div { class: "message-actions",
+                                    button {
+                                        class: "msg-action",
+                                        title: "Responder",
+                                        onclick: {
+                                            let message = message.clone();
+                                            move |_| on_action.call((message.clone(), MessageAction::Reply))
+                                        },
+                                        "Responder"
+                                    }
+                                    if message.has_media {
+                                        button {
+                                            class: "msg-action",
+                                            onclick: {
+                                                let message = message.clone();
+                                                move |_| on_action.call((message.clone(), MessageAction::OpenMedia))
+                                            },
+                                            "Abrir"
+                                        }
+                                    }
+                                    button {
+                                        class: "msg-action",
+                                        onclick: {
+                                            let message = message.clone();
+                                            move |_| on_action.call((message.clone(), MessageAction::Forward))
+                                        },
+                                        "Encaminhar"
                                     }
                                 }
                             }
@@ -315,5 +409,16 @@ mod tests {
         base.has_media = true;
         base.reply_to_msg_id = Some(0);
         assert!(estimate_height(&base) > base_height);
+    }
+
+    #[test]
+    fn thumbnails_reserve_more_room_and_deleted_rows_collapse() {
+        let mut message = message(1, 1, "foto");
+        message.has_media = true;
+        let media_height = estimate_height(&message);
+        message.is_photo = true;
+        assert!(estimate_height(&message) > media_height);
+        message.is_deleted = true;
+        assert!(estimate_height(&message) < 80.0);
     }
 }

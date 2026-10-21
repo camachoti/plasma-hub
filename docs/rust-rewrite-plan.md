@@ -1,6 +1,6 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2 e 3 implementadas em 2026-10-20.
+> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3 e 4 implementadas em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
 > **Execução atual:** fases 0–2 concluídas; fase 3 (TDLib real) implementada e compilando.
@@ -463,6 +463,40 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
 8. Gate de leitura real: a sessão autenticada e a conferência visual continuam pendentes
    neste ambiente (WebKitGTK 2.52 pinta a janela em branco até no `MiniBrowser`). A lógica
    de backend foi exercitada pelo smoke; falta validar chats/tópicos/mídia em conta real.
+
+### Fase 4 — Telegram escrita/mídia implementado (2026-10-20)
+
+1. `TelegramHandle` expõe leitura de chat, capabilities, envio de texto, envio de mídia,
+   forward, shared media, thumbnail, preparação de playback e salvamento de mídia. As
+   chamadas reutilizam as funções TDLib já usadas pelo Tauri e continuam no runtime Tokio
+   dedicado; a UI só recebe DTOs.
+2. Composer real com resposta (`reply_to_id`), tópico atual, `Enter` para enviar,
+   `Shift+Enter` para quebrar linha, estado de envio/erro, bloqueio por capabilities e
+   atualização otimista da timeline e do preview da conversa. O texto e o cache SQLite são
+   gravados com a mesma chave `chatId`/`chatId::forum:topicId` usada pelo React.
+3. Anexos usam o seletor nativo `rfd` no desktop e enviam pelo caminho local via
+   `tdlib_send_media`, com legenda opcional e o mesmo estado de resposta/tópico. No Android
+   o seletor nativo fica para a Fase 7.
+4. Forward: qualquer mensagem da timeline abre um seletor de conversas e chama
+   `tdlib_forward_message`; o resultado é confirmado por toast e a lista é atualizada pelo
+   EventBus.
+5. Mídia: thumbnails sob demanda na timeline, painel de mídia compartilhada com grid,
+   lightbox para foto/vídeo/arquivo, player via servidor HTTP loopback com token, abertura
+   de anexos sem prévia e salvamento em disco. O botão “Mídia” abre o painel do chat atual.
+6. Mensagens apagadas continuam marcadas no cache e na timeline; a gravação do marcador
+   acontece antes do reload disparado pelo evento, evitando que a página de rede sobrescreva
+   o estado local.
+7. CSS novo cobre composer, respostas, thumbnails, ações de mensagem, painel de mídia,
+   lightbox, forward e estados de erro/carregamento.
+8. Testes: store cobre marcação de apagadas em chaves de chat e tópico; a timeline cobre
+   altura de thumbnails e colapso de mensagens apagadas; helpers de formatação de mídia têm
+   teste unitário. Validação executada: fmt, clippy, testes do workspace e do app aninhado,
+   `cargo check -p plasma-hub`, `npm run build` e `npm test`.
+9. Limitações desta fase: mass download, estatísticas/limpeza do cache de mídia e busca de
+   duplicados ainda não têm tela no shell Rust; ficam para as Fases 5/6. Playback e seletor
+   de arquivos no Android ficam para a Fase 7. A conta real de escrita e a conferência
+   visual continuam pendentes pelo mesmo bloqueio de WebKitGTK; os caminhos de backend são
+   os mesmos já usados pelo app Tauri.
 
 ---
 

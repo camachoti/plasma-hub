@@ -76,66 +76,66 @@ pub struct TdlibUserInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibDownloadResult {
-    success: bool,
-    skipped: bool,
-    file_path: Option<String>,
-    file_name: Option<String>,
-    size: i64,
-    mime_type: Option<String>,
-    error: Option<String>,
+    pub success: bool,
+    pub skipped: bool,
+    pub file_path: Option<String>,
+    pub file_name: Option<String>,
+    pub size: i64,
+    pub mime_type: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMediaAssetMeta {
-    success: bool,
-    state: String,
-    chat_id: i64,
-    message_id: i64,
-    total_bytes: Option<i64>,
-    downloaded_bytes: Option<i64>,
-    mime_type: Option<String>,
-    file_name: Option<String>,
-    native_file_path: Option<String>,
-    thumbnail_path: Option<String>,
-    completed_at: Option<i64>,
-    updated_at: i64,
-    error: Option<String>,
+    pub success: bool,
+    pub state: String,
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub total_bytes: Option<i64>,
+    pub downloaded_bytes: Option<i64>,
+    pub mime_type: Option<String>,
+    pub file_name: Option<String>,
+    pub native_file_path: Option<String>,
+    pub thumbnail_path: Option<String>,
+    pub completed_at: Option<i64>,
+    pub updated_at: i64,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePlaybackSource {
-    success: bool,
-    kind: String,
-    url: Option<String>,
-    file_path: Option<String>,
-    mime_type: Option<String>,
-    cache_state: String,
-    total_bytes: Option<i64>,
-    downloaded_bytes: Option<i64>,
-    file_name: Option<String>,
-    error: Option<String>,
+    pub success: bool,
+    pub kind: String,
+    pub url: Option<String>,
+    pub file_path: Option<String>,
+    pub mime_type: Option<String>,
+    pub cache_state: String,
+    pub total_bytes: Option<i64>,
+    pub downloaded_bytes: Option<i64>,
+    pub file_name: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSavedMedia {
-    success: bool,
-    file_path: Option<String>,
-    file_name: Option<String>,
-    size: Option<i64>,
-    skipped: bool,
-    error: Option<String>,
+    pub success: bool,
+    pub file_path: Option<String>,
+    pub file_name: Option<String>,
+    pub size: Option<i64>,
+    pub skipped: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMediaCacheStats {
-    success: bool,
-    total_size: i64,
-    media_count: usize,
-    error: Option<String>,
+    pub success: bool,
+    pub total_size: i64,
+    pub media_count: usize,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -152,9 +152,9 @@ struct NativeMediaProgress {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibThumbnailResult {
-    success: bool,
-    file_path: Option<String>,
-    error: Option<String>,
+    pub success: bool,
+    pub file_path: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -238,42 +238,42 @@ pub struct TdlibSearchMessagesResult {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibSharedMediaItem {
-    id: i64,
-    date: i32,
-    sender_id: String,
-    sender_name: String,
-    has_media: bool,
-    is_photo: bool,
-    is_video: bool,
-    grouped_id: Option<String>,
-    media_size: Option<i64>,
+    pub id: i64,
+    pub date: i32,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub has_media: bool,
+    pub is_photo: bool,
+    pub is_video: bool,
+    pub grouped_id: Option<String>,
+    pub media_size: Option<i64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibSharedMediaResult {
-    success: bool,
-    media: Vec<TdlibSharedMediaItem>,
-    error: Option<String>,
+    pub success: bool,
+    pub media: Vec<TdlibSharedMediaItem>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibSendResult {
-    success: bool,
-    message: Option<TdlibMessageInfo>,
-    error: Option<String>,
+    pub success: bool,
+    pub message: Option<TdlibMessageInfo>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibForwardResult {
-    success: bool,
-    messages: Vec<TdlibMessageInfo>,
-    error: Option<String>,
+    pub success: bool,
+    pub messages: Vec<TdlibMessageInfo>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -310,25 +310,25 @@ pub struct TdlibChatCapabilitiesResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMassDownloadRequest {
-    chat_id: i64,
-    folder_path: String,
-    topic_id: Option<i64>,
-    topic_kind: Option<String>,
-    split_by_user: bool,
-    split_by_album: bool,
-    album_split_mode: Option<String>,
+    pub chat_id: i64,
+    pub folder_path: String,
+    pub topic_id: Option<i64>,
+    pub topic_kind: Option<String>,
+    pub split_by_user: bool,
+    pub split_by_album: bool,
+    pub album_split_mode: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct TdlibMassDownloadResult {
-    success: bool,
-    downloaded_count: usize,
-    skipped_count: usize,
-    failed_count: usize,
-    total: usize,
-    aborted: bool,
-    error: Option<String>,
-    tracking_error: Option<String>,
+    pub success: bool,
+    pub downloaded_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub total: usize,
+    pub aborted: bool,
+    pub error: Option<String>,
+    pub tracking_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

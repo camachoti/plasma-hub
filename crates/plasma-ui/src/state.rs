@@ -6,9 +6,10 @@ use dioxus::prelude::*;
 use plasma_core::{AppEnv, EventBus};
 use plasma_store::{MessageCacheGetResult, MessageCacheMeta, SettingsStore};
 use plasma_telegram::{
-    TdlibChatInfo, TdlibChatsResult, TdlibCommandResult, TdlibForumTopicInfo,
-    TdlibForumTopicsResult, TdlibManager, TdlibMessageInfo, TdlibMessagesResult,
-    TdlibSearchMessagesResult, TdlibStatus, TdlibUserInfo,
+    NativePlaybackSource, NativeSavedMedia, TdlibChatCapabilitiesResult, TdlibChatInfo,
+    TdlibChatsResult, TdlibCommandResult, TdlibForumTopicInfo, TdlibForumTopicsResult,
+    TdlibForwardResult, TdlibManager, TdlibMessageInfo, TdlibMessagesResult,
+    TdlibSearchMessagesResult, TdlibSendResult, TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -194,6 +195,158 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    pub async fn read_chat(&self, chat_id: i64) -> Result<(), String> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_read_chat(&manager, chat_id).await });
+        self.join(handle).await?
+    }
+
+    pub async fn capabilities(&self, chat_id: i64) -> Result<TdlibChatCapabilitiesResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_get_chat_capabilities(&manager, chat_id).await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn send_message(
+        &self,
+        chat_id: i64,
+        text: String,
+        reply_to_id: Option<i64>,
+        topic_id: Option<i64>,
+        topic_kind: Option<String>,
+    ) -> Result<TdlibSendResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_send_message(
+                &manager,
+                chat_id,
+                text,
+                reply_to_id,
+                topic_id,
+                topic_kind,
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn send_media(
+        &self,
+        chat_id: i64,
+        file_path: String,
+        caption: Option<String>,
+        reply_to_id: Option<i64>,
+        topic_id: Option<i64>,
+        topic_kind: Option<String>,
+    ) -> Result<TdlibSendResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_send_media(
+                &manager,
+                chat_id,
+                file_path,
+                caption,
+                reply_to_id,
+                topic_id,
+                topic_kind,
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn forward_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        to_chat_id: i64,
+        topic_id: Option<i64>,
+        topic_kind: Option<String>,
+    ) -> Result<TdlibForwardResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_forward_message(
+                &manager, chat_id, message_id, to_chat_id, topic_id, topic_kind,
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn shared_media(
+        &self,
+        chat_id: i64,
+        limit: i32,
+    ) -> Result<TdlibSharedMediaResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_get_shared_media(&manager, chat_id, Some(limit)).await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn thumbnail_data_url(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<Option<String>, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_download_message_thumbnail(&env, &manager, chat_id, message_id)
+                .await
+        });
+        let result = self.join(handle).await??;
+        if !result.success {
+            return Ok(None);
+        }
+        let Some(path) = result.file_path else {
+            return Ok(None);
+        };
+        read_path_data_url(PathBuf::from(path)).await.map(Some)
+    }
+
+    pub async fn prepare_playback(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<NativePlaybackSource, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::telegram_media_prepare_playback(
+                &env, &manager, chat_id, message_id, None,
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn save_media(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        destination_path: Option<String>,
+    ) -> Result<NativeSavedMedia, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::telegram_media_save(
+                &env,
+                &manager,
+                chat_id,
+                message_id,
+                destination_path,
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
     pub async fn download_avatar(&self, chat_id: i64) -> Result<Option<String>, String> {
         let env = self.env.clone();
         let manager = self.manager.clone();
@@ -208,14 +361,7 @@ impl TelegramHandle {
             return Ok(None);
         };
 
-        let path = PathBuf::from(path);
-        let mime = avatar_mime(&path);
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
-            .await
-            .map_err(|error| format!("Leitura do avatar falhou: {error}"))?
-            .map_err(|error| format!("Leitura do avatar falhou: {error}"))?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(Some(format!("data:{mime};base64,{encoded}")))
+        read_path_data_url(PathBuf::from(path)).await.map(Some)
     }
 
     pub async fn cached_messages(
@@ -281,6 +427,16 @@ impl TelegramHandle {
         self.join(handle).await??;
         Ok(())
     }
+}
+
+async fn read_path_data_url(path: PathBuf) -> Result<String, String> {
+    let mime = avatar_mime(&path);
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?
+        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 fn avatar_mime(path: &std::path::Path) -> &'static str {

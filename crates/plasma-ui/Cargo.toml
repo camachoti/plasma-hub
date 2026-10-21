@@ -16,5 +16,8 @@ tokio = { workspace = true }
 base64 = { workspace = true }
 time = { version = "0.3", features = ["local-offset"] }
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
 [lints]
 workspace = true
