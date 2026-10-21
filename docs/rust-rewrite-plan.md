@@ -1,13 +1,14 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0 e 1 concluídas; Fase 2 implementada em 2026-10-20.
+> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2 e 3 implementadas em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
-> **Execução atual:** fases 0 e 1 concluídas; shell da fase 2 compilando, testado e
-> executando. O workspace de domínio, as migrações SQLite e o `SettingsStore`/`EventBus`
-> estão prontos; o frontend React continua sendo o app padrão e sem mudanças visíveis.
-> Próximo passo: validar o gate visual da fase 2 em um desktop com WebKitGTK compatível e
-> iniciar a fase 3 (TDLib real).
+> **Execução atual:** fases 0–2 concluídas; fase 3 (TDLib real) implementada e compilando.
+> O workspace de domínio, as migrações SQLite e o `SettingsStore`/`EventBus` estão prontos;
+> o frontend React continua sendo o app padrão e sem mudanças visíveis. O gate visual das
+> fases 2/3 segue pendente de um desktop com WebKitGTK compatível; o gate de leitura real
+> precisa de uma sessão TDLib autenticada.
+> Próximo passo: validar o gate visual/leitura real e iniciar a fase 4 (escrita e mídia).
 
 ---
 
@@ -436,6 +437,32 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    banco foram validados. Neste ambiente a captura da WebView fica em branco também para o
    `MiniBrowser` do WebKitGTK 2.52 (problema do runtime, não do shell), então a conferência
    visual deve ser feita em um desktop/runner com WebKitGTK compatível antes de fechar a fase.
+
+### Fase 3 — Telegram leitura implementado (2026-10-20)
+
+1. `plasma-ui::state::TelegramHandle` embrulha `plasma-telegram` e despacha cada chamada
+   para um runtime Tokio dedicado, sem bloquear o executor do Dioxus. O shell abre o mesmo
+   TDLib/SQLite do app Tauri; `PLASMA_HOME` continua sendo apenas override de desenvolvimento.
+2. `apps/plasma/build.rs` embute `VITE_API_ID`/`VITE_API_HASH` (ou
+   `PLASMA_TELEGRAM_API_*`) sem versionar segredos. O binário também recebe rpath para o
+   `libtdjson` baixado pelo `tdlib-rs`, permitindo `cargo run` direto.
+3. Login real: telefone, código, senha de duas etapas, estados de erro, reconexão e
+   “continuar sem conta” como prévia. A senha e o código nunca são persistidos.
+4. Chat list real com filtro local, atualização manual e por evento, tópicos de fórum,
+   avatares do chat selecionado (data URL), timeline virtualizada de altura variável,
+   carregamento de mensagens antigas e busca de mensagens no chat/tópico.
+5. Cache SQLite compatível com o React: chaves `chatId` e `chatId::forum:topicId`; leitura
+   imediata do cache, merge por ID, ordenação por data, gravação do histórico mesclado e
+   marcador persistente de mensagens apagadas em todas as páginas do chat.
+6. EventBus: o emissor do shell traduz `tdlib-auth-state`, `tdlib-new-message` e
+   `tdlib-messages-deleted` para `AppEvent`, mantendo lista/timeline reativas sem polling.
+   O servidor HTTP loopback de mídia também é iniciado no shell Rust.
+7. Diagnóstico headless: `PLASMA_HOME=/tmp/... cargo run -- --telegram-smoke` inicializa o
+   TDLib e imprime estado/contagem de chats sem abrir a WebView. Validado até
+   `wait_phone_number` com as credenciais do `.env`.
+8. Gate de leitura real: a sessão autenticada e a conferência visual continuam pendentes
+   neste ambiente (WebKitGTK 2.52 pinta a janela em branco até no `MiniBrowser`). A lógica
+   de backend foi exercitada pelo smoke; falta validar chats/tópicos/mídia em conta real.
 
 ---
 

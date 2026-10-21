@@ -309,6 +309,118 @@ h1, h2, h3, p { margin: 0; }
 .mock-message p { color: var(--text-2); font-size: 13px; }
 .mock-message.own { background: var(--accent-soft); border-color: var(--accent-glow); margin-left: 64px; }
 
+/* Real Telegram reading */
+.chat-list-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-list-empty { padding: 22px 14px; text-align: center; }
+.chat-search-row { display: flex; gap: 6px; margin-top: 9px; }
+.chat-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: 12px;
+}
+.chat-search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chat-search-input::placeholder { color: var(--text-3); }
+.chat-header-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.chat-header-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid; place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 750;
+  flex: 0 0 36px;
+}
+.chat-header-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.header-search { width: min(220px, 24vw); }
+.topics-bar {
+  display: flex; gap: 6px; align-items: center;
+  padding: 8px 14px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-1);
+}
+.topic-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+.topic-chip:hover { background: var(--bg-hover); color: var(--text-0); }
+.topic-chip.active { background: var(--accent); border-color: transparent; color: var(--accent-text); }
+.topic-unread {
+  min-width: 16px; height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  display: grid; place-items: center;
+  background: color-mix(in oklch, var(--accent-text) 18%, transparent);
+  font-size: 10px;
+}
+.timeline-shell { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.timeline-toolbar, .timeline-search-label {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-1);
+}
+.timeline-fill { flex: 1; min-height: 0; }
+.timeline-loading {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.timeline-error { margin: 10px 14px 0; }
+.error-banner {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in oklch, var(--danger) 35%, transparent);
+  background: color-mix(in oklch, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+.message-scroll { height: 100%; overflow-y: auto; overflow-x: hidden; position: relative; }
+.message-canvas { position: relative; width: 100%; }
+.message-row {
+  position: absolute; left: 0; right: 0;
+  display: flex; gap: 10px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  overflow: hidden;
+  contain: layout paint;
+}
+.message-row .avatar { width: 32px; height: 32px; font-size: 12px; }
+.message-bubble {
+  min-width: 0; flex: 1;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+.message-row.own .message-bubble { background: var(--accent-soft); border-color: var(--accent-glow); }
+.message-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.message-meta strong { font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-meta span { font-size: 10px; color: var(--text-3); font-family: var(--font-mono); flex: 0 0 auto; }
+.message-text { color: var(--text-1); font-size: 13px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+.message-reply { display: inline-block; color: var(--text-3); font-size: 11px; margin-top: 2px; }
+.message-media { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--text-2); font-size: 11px; }
+.message-media .pill { padding: 1px 6px; font-size: 9px; }
+.message-row.deleted .avatar { opacity: 0.45; }
+.message-deleted { color: var(--text-3); font-style: italic; }
+
 /* Virtual timeline spike */
 .spike { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .spike-header {
@@ -376,6 +488,42 @@ h1, h2, h3, p { margin: 0; }
 .login-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
 .login-actions .btn { min-width: 130px; }
 .login-divider { width: 100%; height: 1px; background: var(--line-soft); margin: 4px 0; }
+.login-status { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.login-status strong { font-size: 15px; }
+.login-status.error strong { color: var(--danger, #f87171); }
+.login-input {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-0);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+.login-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.login-input::placeholder { color: var(--text-3); }
+.login-error {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, #ef4444 12%, transparent);
+  border: 1px solid color-mix(in oklch, #ef4444 35%, transparent);
+  color: #fca5a5;
+  font-size: 12px;
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Palettes */
 .palette-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }

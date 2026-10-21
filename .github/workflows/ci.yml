@@ -30,7 +30,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libssl-dev
+          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libssl-dev libc++1 libc++abi1 libunwind-18
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Clippy
@@ -52,7 +52,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libssl-dev
+          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libssl-dev libc++1 libc++abi1 libunwind-18
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Clippy

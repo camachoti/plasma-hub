@@ -16,16 +16,16 @@ const MAX_DOWNLOAD_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageCacheMeta {
-    last_fetched_at: Option<i64>,
+    pub last_fetched_at: Option<i64>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageCacheGetResult {
-    success: bool,
-    messages: Vec<Value>,
-    meta: MessageCacheMeta,
-    error: Option<String>,
+    pub success: bool,
+    pub messages: Vec<Value>,
+    pub meta: MessageCacheMeta,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -312,6 +312,74 @@ pub fn telegram_message_cache_save(
     })
 }
 
+/// Marks messages as deleted in every cached page of a chat, including forum
+/// topic keys. TDLib stops returning deleted messages, so the marker has to be
+/// persisted separately to keep the local timeline stable across restarts.
+pub fn telegram_message_cache_mark_deleted(
+    app: &AppEnv,
+    chat_id: &str,
+    message_ids: &[i64],
+) -> Result<usize> {
+    use std::collections::HashSet;
+
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let ids: HashSet<i64> = message_ids.iter().copied().collect();
+    let mut connection = db::connect(app)?;
+    let transaction = connection.transaction().map_err(db_error)?;
+    let pattern = format!("{chat_id}::%");
+
+    let mut updates = Vec::new();
+    {
+        let mut statement = transaction
+            .prepare(
+                "SELECT cache_key, message_id, raw_json FROM telegram_messages                  WHERE cache_key = ?1 OR cache_key LIKE ?2",
+            )
+            .map_err(db_error)?;
+        let mut rows = statement
+            .query(params![chat_id, pattern])
+            .map_err(db_error)?;
+        while let Some(row) = rows.next().map_err(db_error)? {
+            let cache_key: String = row.get(0).map_err(db_error)?;
+            let message_id: i64 = row.get(1).map_err(db_error)?;
+            if !ids.contains(&message_id) {
+                continue;
+            }
+            let raw: String = row.get(2).map_err(db_error)?;
+            let Ok(mut value) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if value
+                .get("isDeleted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(object) = value.as_object_mut() else {
+                continue;
+            };
+            object.insert("isDeleted".to_string(), Value::Bool(true));
+            updates.push((cache_key, message_id, serde_json::to_string(&value)?));
+        }
+    }
+
+    let updated_at = now_millis();
+    for (cache_key, message_id, raw) in &updates {
+        transaction
+            .execute(
+                "UPDATE telegram_messages SET raw_json = ?1, updated_at = ?2                  WHERE cache_key = ?3 AND message_id = ?4",
+                params![raw, updated_at, cache_key, message_id],
+            )
+            .map_err(db_error)?;
+    }
+
+    transaction.commit().map_err(db_error)?;
+    Ok(updates.len())
+}
+
 pub fn telegram_message_cache_shared_media(
     app: &AppEnv,
     cache_key: String,
@@ -363,6 +431,47 @@ pub fn telegram_message_cache_shared_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_messages_are_marked_in_chat_and_topic_pages() {
+        use plasma_core::AppPaths;
+
+        let root =
+            std::env::temp_dir().join(format!("plasma-store-deleted-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = AppPaths::new(
+            root.join("data"),
+            root.join("local"),
+            root.join("cache"),
+            Some(root.join("downloads")),
+        )
+        .unwrap();
+        let env = AppEnv::headless(paths);
+
+        let message = serde_json::json!({
+            "id": 7,
+            "date": 10,
+            "hasMedia": false,
+            "isDeleted": false,
+        });
+        telegram_message_cache_save(&env, "123".to_string(), vec![message.clone()], None).unwrap();
+        telegram_message_cache_save(&env, "123::forum:5".to_string(), vec![message], None).unwrap();
+
+        assert_eq!(
+            telegram_message_cache_mark_deleted(&env, "123", &[7]).unwrap(),
+            2
+        );
+        for key in ["123", "123::forum:5"] {
+            let page = telegram_message_cache_get(&env, key.to_string()).unwrap();
+            assert_eq!(page.messages[0]["isDeleted"], true);
+        }
+        assert_eq!(
+            telegram_message_cache_mark_deleted(&env, "123", &[7]).unwrap(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(env.paths().data_dir().parent().unwrap());
+    }
 
     #[test]
     fn schema_persists_one_download_history_snapshot() {

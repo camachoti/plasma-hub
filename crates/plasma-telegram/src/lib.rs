@@ -55,22 +55,22 @@ pub struct TdlibManager {
 
 #[derive(Clone, Serialize)]
 pub struct TdlibStatus {
-    success: bool,
-    ready: bool,
-    state: String,
-    error: Option<String>,
+    pub success: bool,
+    pub ready: bool,
+    pub state: String,
+    pub error: Option<String>,
 }
 
 pub type TdlibCommandResult = Result<TdlibStatus, String>;
 
 #[derive(Serialize)]
 pub struct TdlibUserInfo {
-    success: bool,
-    id: Option<i64>,
-    first_name: Option<String>,
-    last_name: Option<String>,
-    phone_number: Option<String>,
-    error: Option<String>,
+    pub success: bool,
+    pub id: Option<i64>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub phone_number: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -160,82 +160,82 @@ pub struct TdlibThumbnailResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibAvatarResult {
-    success: bool,
-    file_path: Option<String>,
-    error: Option<String>,
+    pub success: bool,
+    pub file_path: Option<String>,
+    pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibChatInfo {
-    id: String,
-    title: String,
-    date: i32,
-    unread_count: i32,
-    is_group: bool,
-    is_channel: bool,
-    is_member: bool,
-    can_send_messages: bool,
-    can_send_media: bool,
-    has_topics: bool,
-    last_message_text: String,
-    last_message_date: i32,
-    last_message_has_media: bool,
-    last_message_is_video: bool,
-    last_message_is_photo: bool,
+    pub id: String,
+    pub title: String,
+    pub date: i32,
+    pub unread_count: i32,
+    pub is_group: bool,
+    pub is_channel: bool,
+    pub is_member: bool,
+    pub can_send_messages: bool,
+    pub can_send_media: bool,
+    pub has_topics: bool,
+    pub last_message_text: String,
+    pub last_message_date: i32,
+    pub last_message_has_media: bool,
+    pub last_message_is_video: bool,
+    pub last_message_is_photo: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibChatsResult {
-    success: bool,
-    dialogs: Vec<TdlibChatInfo>,
-    has_more: bool,
-    error: Option<String>,
+    pub success: bool,
+    pub dialogs: Vec<TdlibChatInfo>,
+    pub has_more: bool,
+    pub error: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMessageInfo {
-    id: i64,
-    message: String,
-    date: i32,
-    out: bool,
-    sender_id: String,
-    sender_name: String,
-    reply_to_msg_id: Option<i64>,
-    topic_id: Option<i64>,
-    topic_kind: Option<String>,
-    media: bool,
-    text: String,
-    has_media: bool,
-    is_photo: bool,
-    is_video: bool,
-    grouped_id: Option<String>,
-    video_duration: Option<i32>,
-    media_size: Option<i64>,
-    thumbnail_path: Option<String>,
-    is_deleted: bool,
+    pub id: i64,
+    pub message: String,
+    pub date: i32,
+    pub out: bool,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub reply_to_msg_id: Option<i64>,
+    pub topic_id: Option<i64>,
+    pub topic_kind: Option<String>,
+    pub media: bool,
+    pub text: String,
+    pub has_media: bool,
+    pub is_photo: bool,
+    pub is_video: bool,
+    pub grouped_id: Option<String>,
+    pub video_duration: Option<i32>,
+    pub media_size: Option<i64>,
+    pub thumbnail_path: Option<String>,
+    pub is_deleted: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMessagesResult {
-    success: bool,
-    messages: Vec<TdlibMessageInfo>,
-    has_more: bool,
-    oldest_message_id: Option<i64>,
-    error: Option<String>,
+    pub success: bool,
+    pub messages: Vec<TdlibMessageInfo>,
+    pub has_more: bool,
+    pub oldest_message_id: Option<i64>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibSearchMessagesResult {
-    success: bool,
-    messages: Vec<TdlibMessageInfo>,
-    total_count: i32,
-    next_from_message_id: Option<i64>,
-    error: Option<String>,
+    pub success: bool,
+    pub messages: Vec<TdlibMessageInfo>,
+    pub total_count: i32,
+    pub next_from_message_id: Option<i64>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -276,35 +276,35 @@ pub struct TdlibForwardResult {
     error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibForumTopicInfo {
-    id: i64,
-    kind: String,
-    title: String,
-    is_closed: bool,
-    is_pinned: bool,
-    unread_count: i32,
+    pub id: i64,
+    pub kind: String,
+    pub title: String,
+    pub is_closed: bool,
+    pub is_pinned: bool,
+    pub unread_count: i32,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibForumTopicsResult {
-    success: bool,
-    is_forum: bool,
-    topics: Vec<TdlibForumTopicInfo>,
-    error: Option<String>,
+    pub success: bool,
+    pub is_forum: bool,
+    pub topics: Vec<TdlibForumTopicInfo>,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibChatCapabilitiesResult {
-    success: bool,
-    chat_id: i64,
-    is_member: bool,
-    can_send_messages: bool,
-    can_send_media: bool,
-    error: Option<String>,
+    pub success: bool,
+    pub chat_id: i64,
+    pub is_member: bool,
+    pub can_send_messages: bool,
+    pub can_send_media: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]

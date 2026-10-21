@@ -39,6 +39,7 @@ thiserror = "2"
 tracing = "0.1"
 dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks", "document"] }
 dirs = "6"
+base64 = "0.22"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
