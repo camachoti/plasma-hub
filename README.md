@@ -35,7 +35,7 @@ The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it re
 - `Cargo.toml`: Cargo workspace for the Rust core and the Tauri app.
 - `crates/plasma-core`: shared errors, app paths, and the UI-agnostic `AppEnv`.
 - `crates/plasma-platform`: filesystem and OS helpers.
-- `crates/plasma-store`: SQLite message cache, download history, and topic state.
+- `crates/plasma-store`: SQLite message cache, download history, topic state, settings, and migrations.
 - `crates/plasma-download`: cancellation, streamed HTTPS downloads, and file sinks.
 - `crates/plasma-media`: media cache helpers and video thumbnails.
 - `crates/plasma-telegram`: TDLib integration and the loopback media server.

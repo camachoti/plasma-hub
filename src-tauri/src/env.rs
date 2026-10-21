@@ -48,3 +48,8 @@ pub fn build_env<R: Runtime>(app: &AppHandle<R>) -> Result<AppEnv, String> {
 pub fn env<R: Runtime>(app: &AppHandle<R>) -> AppEnv {
     app.state::<AppEnv>().inner().clone()
 }
+
+/// Converts a domain result into the `String` error expected by Tauri/JS.
+pub fn tauri_result<T>(result: plasma_core::Result<T>) -> Result<T, String> {
+    result.map_err(|error| error.to_string())
+}

@@ -10,7 +10,7 @@ The repository is a Cargo workspace plus the current React frontend.
 
 - `crates/plasma-core`: shared errors, app paths, event sink (`AppEnv`).
 - `crates/plasma-platform`: filesystem and OS helpers.
-- `crates/plasma-store`: SQLite message cache, download history, topic state.
+- `crates/plasma-store`: SQLite message cache, download history, topic state, settings, and schema migrations.
 - `crates/plasma-download`: cancellation, streamed HTTPS downloads, file sinks.
 - `crates/plasma-media`: media cache helpers and video thumbnails.
 - `crates/plasma-telegram`: TDLib integration and the local media HTTP server.

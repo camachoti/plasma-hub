@@ -1,8 +1,14 @@
-use plasma_core::AppEnv;
+pub mod db;
+pub mod settings;
+
+pub use db::Db;
+pub use settings::{SettingKey, SettingsStore};
+
+use db::{db_error, now_millis};
+use plasma_core::{AppEnv, Error, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
 
 const MAX_DOWNLOAD_HISTORY_ITEMS: usize = 300;
 const MAX_DOWNLOAD_HISTORY_BYTES: usize = 2 * 1024 * 1024;
@@ -47,80 +53,14 @@ pub struct TopicDownloadState {
     downloaded_at: i64,
 }
 
-fn db_path(app: &AppEnv) -> Result<PathBuf, String> {
-    let dir = app.paths().data_dir();
-    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-    Ok(dir.join("plasma-hub.sqlite3"))
-}
-
-fn connect(app: &AppEnv) -> Result<Connection, String> {
-    let connection = Connection::open(db_path(app)?).map_err(|error| error.to_string())?;
-    connection
-        .pragma_update(None, "journal_mode", "WAL")
-        .map_err(|error| error.to_string())?;
-    connection
-        .pragma_update(None, "foreign_keys", "ON")
-        .map_err(|error| error.to_string())?;
-    ensure_schema(&connection)?;
-    Ok(connection)
-}
-
-fn ensure_schema(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS telegram_message_pages (
-                cache_key TEXT PRIMARY KEY,
-                last_fetched_at INTEGER,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS telegram_messages (
-                cache_key TEXT NOT NULL,
-                message_id INTEGER NOT NULL,
-                date INTEGER,
-                has_media INTEGER NOT NULL DEFAULT 0,
-                is_video INTEGER NOT NULL DEFAULT 0,
-                sender_id TEXT,
-                sender_name TEXT,
-                raw_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (cache_key, message_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_telegram_messages_cache_date
-                ON telegram_messages(cache_key, date);
-
-            CREATE INDEX IF NOT EXISTS idx_telegram_messages_cache_media
-                ON telegram_messages(cache_key, has_media, is_video, date);
-
-            CREATE TABLE IF NOT EXISTS download_history (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                raw_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS topic_download_state (
-                chat_id TEXT NOT NULL,
-                topic_id TEXT NOT NULL,
-                topic_kind TEXT NOT NULL,
-                last_message_id INTEGER NOT NULL,
-                downloaded_at INTEGER NOT NULL,
-                PRIMARY KEY (chat_id, topic_id, topic_kind)
-            );
-            "#,
-        )
-        .map_err(|error| error.to_string())
-}
-
 pub fn record_topic_mass_download(
     app: &AppEnv,
     chat_id: i64,
     topic_id: i64,
     topic_kind: &str,
     last_message_id: i64,
-) -> Result<(), String> {
-    let connection = connect(app)?;
+) -> Result<()> {
+    let connection = db::connect(app)?;
     connection.execute(
         "INSERT INTO topic_download_state (chat_id, topic_id, topic_kind, last_message_id, downloaded_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -128,21 +68,19 @@ pub fn record_topic_mass_download(
            last_message_id = MAX(topic_download_state.last_message_id, excluded.last_message_id),
            downloaded_at = excluded.downloaded_at",
         params![chat_id.to_string(), topic_id.to_string(), topic_kind, last_message_id, now_millis()],
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(db_error)?;
     Ok(())
 }
 
-pub fn topic_download_state_get(
-    app: &AppEnv,
-    chat_id: String,
-) -> Result<Vec<TopicDownloadState>, String> {
-    let connection = connect(app)?;
+pub fn topic_download_state_get(app: &AppEnv, chat_id: String) -> Result<Vec<TopicDownloadState>> {
+    let connection = db::connect(app)?;
     let mut statement = connection
         .prepare(
             "SELECT topic_id, topic_kind, last_message_id, downloaded_at
          FROM topic_download_state WHERE chat_id = ?1",
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
     let rows = statement
         .query_map(params![chat_id], |row| {
             Ok(TopicDownloadState {
@@ -152,13 +90,13 @@ pub fn topic_download_state_get(
                 downloaded_at: row.get(3)?,
             })
         })
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
 }
 
-pub fn download_history_get(app: &AppEnv) -> Result<Option<String>, String> {
-    let connection = connect(app)?;
+pub fn download_history_get(app: &AppEnv) -> Result<Option<String>> {
+    let connection = db::connect(app)?;
     match connection.query_row(
         "SELECT raw_json FROM download_history WHERE singleton = 1",
         [],
@@ -166,21 +104,25 @@ pub fn download_history_get(app: &AppEnv) -> Result<Option<String>, String> {
     ) {
         Ok(history) => Ok(Some(history)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(db_error(error)),
     }
 }
 
-pub fn download_history_save(app: &AppEnv, history_json: String) -> Result<(), String> {
+pub fn download_history_save(app: &AppEnv, history_json: String) -> Result<()> {
     if history_json.len() > MAX_DOWNLOAD_HISTORY_BYTES {
-        return Err("Histórico de downloads excede o limite permitido.".to_string());
+        return Err(Error::msg(
+            "Histórico de downloads excede o limite permitido.",
+        ));
     }
     let items = serde_json::from_str::<Vec<Value>>(&history_json)
-        .map_err(|_| "Histórico de downloads inválido.".to_string())?;
+        .map_err(|_| Error::msg("Histórico de downloads inválido."))?;
     if items.len() > MAX_DOWNLOAD_HISTORY_ITEMS {
-        return Err("Histórico de downloads excede o limite de itens.".to_string());
+        return Err(Error::msg(
+            "Histórico de downloads excede o limite de itens.",
+        ));
     }
 
-    let connection = connect(app)?;
+    let connection = db::connect(app)?;
     connection
         .execute(
             r#"
@@ -192,15 +134,8 @@ pub fn download_history_save(app: &AppEnv, history_json: String) -> Result<(), S
             "#,
             params![history_json, now_millis()],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
     Ok(())
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or_default()
 }
 
 fn value_i64(value: &Value, key: &str) -> Option<i64> {
@@ -230,7 +165,7 @@ fn value_string(value: &Value, key: &str) -> Option<String> {
     })
 }
 
-fn read_meta(connection: &Connection, cache_key: &str) -> Result<MessageCacheMeta, String> {
+fn read_meta(connection: &Connection, cache_key: &str) -> Result<MessageCacheMeta> {
     let result = connection.query_row(
         "SELECT last_fetched_at FROM telegram_message_pages WHERE cache_key = ?1",
         params![cache_key],
@@ -244,28 +179,28 @@ fn read_meta(connection: &Connection, cache_key: &str) -> Result<MessageCacheMet
     match result {
         Ok(meta) => Ok(meta),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(MessageCacheMeta::default()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(db_error(error)),
     }
 }
 
 pub fn telegram_message_cache_get(
     app: &AppEnv,
     cache_key: String,
-) -> Result<MessageCacheGetResult, String> {
-    let connection = connect(app)?;
+) -> Result<MessageCacheGetResult> {
+    let connection = db::connect(app)?;
     let meta = read_meta(&connection, &cache_key)?;
     let mut statement = connection
         .prepare(
             "SELECT raw_json FROM telegram_messages WHERE cache_key = ?1 ORDER BY message_id ASC",
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
     let rows = statement
         .query_map(params![cache_key], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
 
     let mut messages = Vec::new();
     for row in rows {
-        let raw = row.map_err(|error| error.to_string())?;
+        let raw = row.map_err(db_error)?;
         if let Ok(value) = serde_json::from_str::<Value>(&raw) {
             messages.push(value);
         }
@@ -279,11 +214,8 @@ pub fn telegram_message_cache_get(
     })
 }
 
-pub fn telegram_message_cache_meta(
-    app: &AppEnv,
-    cache_key: String,
-) -> Result<MessageCacheMeta, String> {
-    let connection = connect(app)?;
+pub fn telegram_message_cache_meta(app: &AppEnv, cache_key: String) -> Result<MessageCacheMeta> {
+    let connection = db::connect(app)?;
     read_meta(&connection, &cache_key)
 }
 
@@ -292,11 +224,9 @@ pub fn telegram_message_cache_save(
     cache_key: String,
     messages: Vec<Value>,
     meta: Option<MessageCacheMeta>,
-) -> Result<MessageCacheSaveResult, String> {
-    let mut connection = connect(app)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
+) -> Result<MessageCacheSaveResult> {
+    let mut connection = db::connect(app)?;
+    let transaction = connection.transaction().map_err(db_error)?;
     let updated_at = now_millis();
 
     transaction
@@ -304,7 +234,7 @@ pub fn telegram_message_cache_save(
             "DELETE FROM telegram_messages WHERE cache_key = ?1",
             params![cache_key],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
 
     {
         let mut statement = transaction
@@ -324,13 +254,13 @@ pub fn telegram_message_cache_save(
                     updated_at = excluded.updated_at
                 "#,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(db_error)?;
 
         for message in &messages {
             let Some(message_id) = value_i64(message, "id") else {
                 continue;
             };
-            let raw_json = serde_json::to_string(message).map_err(|error| error.to_string())?;
+            let raw_json = serde_json::to_string(message)?;
             statement
                 .execute(params![
                     cache_key,
@@ -343,7 +273,7 @@ pub fn telegram_message_cache_save(
                     raw_json,
                     updated_at,
                 ])
-                .map_err(|error| error.to_string())?;
+                .map_err(db_error)?;
         }
     }
 
@@ -359,7 +289,7 @@ pub fn telegram_message_cache_save(
                 "#,
                 params![cache_key, meta.last_fetched_at, updated_at],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(db_error)?;
     } else {
         transaction
             .execute(
@@ -370,10 +300,10 @@ pub fn telegram_message_cache_save(
                 "#,
                 params![cache_key, updated_at],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(db_error)?;
     }
 
-    transaction.commit().map_err(|error| error.to_string())?;
+    transaction.commit().map_err(db_error)?;
 
     Ok(MessageCacheSaveResult {
         success: true,
@@ -386,8 +316,8 @@ pub fn telegram_message_cache_shared_media(
     app: &AppEnv,
     cache_key: String,
     limit: i64,
-) -> Result<SharedMediaCacheResult, String> {
-    let connection = connect(app)?;
+) -> Result<SharedMediaCacheResult> {
+    let connection = db::connect(app)?;
     let mut statement = connection
         .prepare(
             r#"
@@ -398,16 +328,16 @@ pub fn telegram_message_cache_shared_media(
             LIMIT ?2
             "#,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
     let rows = statement
         .query_map(params![cache_key, limit.max(1)], |row| {
             row.get::<_, String>(0)
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(db_error)?;
 
     let mut media = Vec::new();
     for row in rows {
-        let raw = row.map_err(|error| error.to_string())?;
+        let raw = row.map_err(db_error)?;
         let Ok(message) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
@@ -436,8 +366,8 @@ mod tests {
 
     #[test]
     fn schema_persists_one_download_history_snapshot() {
-        let connection = Connection::open_in_memory().unwrap();
-        ensure_schema(&connection).unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
+        db::migrate(&mut connection).unwrap();
         let first = r#"[{"id":"first"}]"#;
         let second = r#"[{"id":"second"}]"#;
 

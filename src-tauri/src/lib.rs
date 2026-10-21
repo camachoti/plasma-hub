@@ -40,6 +40,7 @@ pub fn run() {
         .setup(|app| {
             let env = env::build_env(app.handle())?;
             app.manage(env.clone());
+            app.manage(plasma_store::SettingsStore::open(&env)?);
             app.manage(TdlibManager::default());
             plasma_telegram::start_plasma_media_http_server(env)?;
 
@@ -66,6 +67,11 @@ pub fn run() {
             commands::cache::download_history_get,
             commands::cache::download_history_save,
             commands::cache::topic_download_state_get,
+            commands::settings::settings_get,
+            commands::settings::settings_set,
+            commands::settings::settings_remove,
+            commands::settings::settings_snapshot,
+            commands::settings::settings_import_legacy,
             commands::telegram::tdlib_init,
             commands::telegram::tdlib_status,
             commands::telegram::tdlib_set_phone,

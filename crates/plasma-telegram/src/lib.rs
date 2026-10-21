@@ -4498,6 +4498,7 @@ pub async fn tdlib_start_mass_download(
                 last_scanned_message_id,
             )
             .err()
+            .map(|error| error.to_string())
         })
     } else {
         None

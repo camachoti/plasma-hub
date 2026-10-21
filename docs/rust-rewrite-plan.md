@@ -3,9 +3,10 @@
 > Status: **aprovado**. Fase 0 concluída em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
-> **Execução atual:** workspace criado, backend extraído para crates UI-agnósticos,
-> `src-tauri` reduzido a adaptadores Tauri. Frontend React segue funcionando sem mudanças.
-> Próxima fase: 1 (core/store/platform) e 2 (shell Dioxus).
+> **Execução atual:** fases 0 e 1 concluídas. Workspace criado, backend extraído para
+> crates UI-agnósticos, `src-tauri` reduzido a adaptadores Tauri, store com migrações e
+> `SettingsStore`/`EventBus` prontos. Frontend React segue funcionando sem mudanças.
+> Próxima fase: 2 (shell Dioxus + spike de virtualização).
 
 ---
 
@@ -384,6 +385,27 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    aarch64-linux-android` dos crates nativos.
 6. Nenhuma mudança visível para o usuário; o frontend React e o schema SQLite
    (`plasma-hub.sqlite3`), cookies e pastas de mídia continuam iguais.
+
+### Fase 1 — concluída (2026-10-20)
+
+1. `plasma-store::db` centraliza a abertura do SQLite, pragmas (`WAL`, `foreign_keys`,
+   `busy_timeout`) e migrações por `PRAGMA user_version`:
+   - schema 1: tabelas existentes (`telegram_message_pages`, `telegram_messages`,
+     `download_history`, `topic_download_state`), com `IF NOT EXISTS` para bancos antigos;
+   - schema 2: tabela `settings (key, value, updated_at)`.
+2. `SettingsStore` com API tipada (`SettingKey`), booleanos, JSON, snapshot e
+   `import_legacy` idempotente para a migração one-shot do `localStorage`.
+   As chaves usam exatamente os nomes atuais (`skip_login`, `plasma_appearance_palette`,
+   `plasma_appearance_density`, etc.).
+3. `Db`/`SettingsStore` são gerenciados no setup do Tauri; comandos `settings_get`,
+   `settings_set`, `settings_remove`, `settings_snapshot` e `settings_import_legacy`
+   ficam disponíveis para a ponte React durante a migração.
+4. `plasma-core::EventBus` (`tokio::sync::broadcast`) e `AppEvent` definem o canal que a
+   UI Rust vai consumir; o `EventEmitter`/eventos Tauri atuais continuam intactos.
+5. Testes: criação do schema, upgrade de banco v0 sem perder linhas, idempotência,
+   rejeição de schema futuro, round-trip de settings, snapshot ordenado e import legado.
+6. Compatibilidade preservada: mesmo arquivo `plasma-hub.sqlite3`, mesmas tabelas e
+   mesmos nomes de chave. Nenhum caminho de dados do usuário mudou.
 
 ---
 
