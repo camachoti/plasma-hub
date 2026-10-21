@@ -12,6 +12,7 @@ The repository is a Cargo workspace plus the current React frontend.
 - `crates/plasma-platform`: filesystem and OS helpers.
 - `crates/plasma-store`: SQLite message cache, download history, topic state, settings, and schema migrations.
 - `crates/plasma-download`: cancellation, streamed HTTPS downloads, file sinks.
+- `crates/plasma-extract`: unified platform analysis/download dispatch (YouTube, TikTok, Instagram, Reddit, Twitter, direct web).
 - `crates/plasma-media`: media cache helpers and video thumbnails.
 - `crates/plasma-telegram`: TDLib integration and the local media HTTP server.
 - `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: native extractors/downloaders.

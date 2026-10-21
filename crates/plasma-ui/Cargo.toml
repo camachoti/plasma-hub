@@ -12,6 +12,7 @@ plasma-store = { path = "../plasma-store" }
 plasma-telegram = { path = "../plasma-telegram" }
 plasma-download = { path = "../plasma-download" }
 plasma-twitter = { path = "../plasma-twitter" }
+plasma-extract = { path = "../plasma-extract" }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

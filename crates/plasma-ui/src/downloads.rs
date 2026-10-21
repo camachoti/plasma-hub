@@ -41,6 +41,12 @@ pub struct DownloadRecord {
     #[serde(default)]
     pub source_page_url: Option<String>,
     #[serde(default)]
+    pub source_mode: Option<String>,
+    #[serde(default)]
+    pub source_format_id: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
     pub platform: Option<String>,
     #[serde(default)]
     pub source_label: Option<String>,

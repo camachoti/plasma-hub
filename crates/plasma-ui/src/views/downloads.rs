@@ -1,10 +1,12 @@
-//! Downloads queue and persisted history for the Rust shell.
+//! Downloads queue, unified URL analysis and persisted history.
 
 use crate::downloads::{
     new_download_id, push_download, sanitize_filename, update_download, DownloadRecord,
 };
 use crate::state::{push_toast, AppServices, ToastKind, UiState};
 use dioxus::prelude::*;
+use plasma_extract::{FormatOption, MediaInfo};
+use std::path::Path;
 
 #[component]
 pub fn DownloadsView() -> Element {
@@ -12,7 +14,10 @@ pub fn DownloadsView() -> Element {
     let mut ui = use_context::<UiState>();
     let mut url = use_signal(String::new);
     let mut file_name = use_signal(String::new);
-    let error = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);
+    let mut analysis_error = use_signal(|| None::<String>);
+    let mut analysis = use_signal(|| None::<MediaInfo>);
+    let analyzing = use_signal(|| false);
 
     let download_dir = services.downloads.download_dir().display().to_string();
     let items = ui.downloads();
@@ -21,8 +26,17 @@ pub fn DownloadsView() -> Element {
         .iter()
         .filter(|item| item.status == "completed")
         .count();
+    let current_analysis = analysis();
 
-    let on_enter = {
+    let analyze_enter = {
+        let services = services.clone();
+        move |event: KeyboardEvent| {
+            if event.key() == Key::Enter {
+                analyze_current(services.clone(), url, analysis, analyzing, analysis_error);
+            }
+        }
+    };
+    let direct_enter = {
         let services = services.clone();
         move |event: KeyboardEvent| {
             if event.key() == Key::Enter {
@@ -30,7 +44,6 @@ pub fn DownloadsView() -> Element {
             }
         }
     };
-    let on_enter_second = on_enter.clone();
 
     rsx! {
         section { class: "downloads-view",
@@ -39,8 +52,8 @@ pub fn DownloadsView() -> Element {
                     div {
                         h1 { "Downloads" }
                         p { class: "muted",
-                            "Fila nativa com retomada, cancelamento e histórico no SQLite. \
-                             O histórico é o mesmo arquivo JSON usado pelo app React."
+                            "Analisador nativo para YouTube, TikTok, Instagram, Reddit e X, \
+                             downloads diretos por HTTPS, retomada e histórico no SQLite."
                         }
                     }
                     div { class: "downloads-stats",
@@ -50,44 +63,82 @@ pub fn DownloadsView() -> Element {
                 }
 
                 section { class: "download-card",
-                    h2 { "Baixar URL" }
+                    h2 { "Analisar link" }
                     p { class: "hint",
-                        "Cole um link direto de mídia (MP4, imagem, áudio ou arquivo). \
-                         Use a aba X/Twitter para analisar posts e perfis."
+                        "Cole uma URL de post/vídeo. A plataforma é detectada automaticamente \
+                         e os formatos disponíveis aparecem abaixo. Para um arquivo direto, \
+                         use “Baixar URL”."
                     }
                     div { class: "download-form",
                         input {
                             class: "download-input",
                             r#type: "url",
-                            placeholder: "https://exemplo.com/video.mp4",
+                            placeholder: "https://youtube.com/watch?v=... ou link direto",
                             value: "{url}",
-                            oninput: move |event| url.set(event.value()),
-                            onkeydown: on_enter,
+                            oninput: move |event| {
+                                url.set(event.value());
+                                analysis.set(None);
+                                analysis_error.set(None);
+                                error.set(None);
+                            },
+                            onkeydown: analyze_enter,
                         }
                         input {
                             class: "download-input download-name",
                             r#type: "text",
-                            placeholder: "nome opcional (video.mp4)",
+                            placeholder: "nome opcional (baixar direto)",
                             value: "{file_name}",
                             oninput: move |event| file_name.set(event.value()),
-                            onkeydown: on_enter_second,
+                            onkeydown: direct_enter,
                         }
-                        button {
-                            class: "btn primary",
-                            onclick: {
-                                let services = services.clone();
-                                move |_| submit_url(services.clone(), ui, url, file_name, error)
-                            },
-                            "Baixar"
+                        div { class: "download-form-actions",
+                            button {
+                                class: "btn primary",
+                                disabled: analyzing(),
+                                onclick: {
+                                    let services = services.clone();
+                                    move |_| analyze_current(
+                                        services.clone(),
+                                        url,
+                                        analysis,
+                                        analyzing,
+                                        analysis_error,
+                                    )
+                                },
+                                if analyzing() { "Analisando..." } else { "Analisar" }
+                            }
+                            button {
+                                class: "btn small ghost",
+                                onclick: {
+                                    let services = services.clone();
+                                    move |_| submit_url(services.clone(), ui, url, file_name, error)
+                                },
+                                "Baixar URL"
+                            }
                         }
                     }
                     if let Some(message) = error() {
+                        p { class: "error-banner", "{message}" }
+                    }
+                    if let Some(message) = analysis_error() {
                         p { class: "error-banner", "{message}" }
                     }
                     p { class: "download-destination",
                         strong { "Pasta: " }
                         code { "{download_dir}" }
                     }
+                }
+
+                if let Some(info) = current_analysis {
+                    div { class: "analysis-heading",
+                        h2 { "Resultado da análise" }
+                        button {
+                            class: "btn small ghost",
+                            onclick: move |_| analysis.set(None),
+                            "Limpar"
+                        }
+                    }
+                    AnalysisCard { info }
                 }
 
                 section { class: "download-card downloads-list-card",
@@ -115,7 +166,7 @@ pub fn DownloadsView() -> Element {
                     if items.is_empty() {
                         div { class: "downloads-empty",
                             div { class: "empty-icon", "↓" }
-                            p { "Nenhum download ainda. Cole uma URL acima para começar." }
+                            p { "Nenhum download ainda. Analise um link ou cole uma URL direta." }
                         }
                     } else {
                         div { class: "downloads-list",
@@ -134,12 +185,111 @@ pub fn DownloadsView() -> Element {
 }
 
 #[component]
+fn AnalysisCard(info: MediaInfo) -> Element {
+    let services = use_context::<AppServices>();
+    let ui = use_context::<UiState>();
+    let mut formats = info.formats.video.clone();
+    formats.extend(info.formats.audio.clone());
+    let thumbnail = info.thumbnail_url.clone();
+    let platform = platform_label(Some(info.platform.as_str()));
+    let has_formats = !formats.is_empty();
+
+    rsx! {
+        article { class: "twitter-result analysis-result",
+            div { class: "twitter-result-head",
+                if let Some(thumbnail) = thumbnail {
+                    img { class: "twitter-thumb", src: "{thumbnail}", alt: "" }
+                } else {
+                    div {
+                        class: "twitter-thumb fallback",
+                        style: "--thumb-hue: {info.thumb_hue}; --thumb-hue2: {info.thumb_hue2};",
+                    }
+                }
+                div { class: "twitter-result-copy",
+                    h2 { "{info.title}" }
+                    p { class: "muted",
+                        span { class: "pill", "{platform}" }
+                        span { " {info.author}" }
+                        if let Some(full) = info.author_full.as_ref() {
+                            span { " · {full}" }
+                        }
+                        if !info.duration.trim().is_empty() {
+                            span { " · {info.duration}" }
+                        }
+                        if let Some(views) = info.views.as_ref() {
+                            span { " · {views} visualizações" }
+                        }
+                        if let Some(likes) = info.likes.as_ref() {
+                            span { " · {likes} curtidas" }
+                        }
+                    }
+                    a {
+                        class: "twitter-original",
+                        href: "{info.original_url}",
+                        target: "_blank",
+                        "Abrir original"
+                    }
+                }
+            }
+            if !has_formats {
+                p { class: "hint", "Nenhum formato de mídia foi encontrado." }
+            } else {
+                div { class: "twitter-formats",
+                    for option in formats {
+                        {
+                            let is_audio = info.formats.audio.iter().any(|audio| audio.id == option.id);
+                            let services_for_click = services.clone();
+                            let info_for_click = info.clone();
+                            let option_for_click = option.clone();
+                            rsx! {
+                                div { class: "twitter-format", key: "{option.id}",
+                                    div { class: "twitter-format-copy",
+                                        strong {
+                                            "{option.label}"
+                                            if option.best.unwrap_or(false) {
+                                                span { class: "pill", "melhor" }
+                                            }
+                                            if !is_audio
+                                                && !option.has_audio
+                                                && !is_image_option(&option)
+                                            {
+                                                span { class: "pill warn", "sem áudio" }
+                                            }
+                                        }
+                                        span { "{option.sub}" }
+                                    }
+                                    span { class: "muted", "{option.size}" }
+                                    button {
+                                        class: "btn small primary",
+                                        onclick: move |_| {
+                                            download_media(
+                                                services_for_click.clone(),
+                                                ui,
+                                                &info_for_click,
+                                                &option_for_click,
+                                                is_audio,
+                                            );
+                                        },
+                                        "Baixar"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn DownloadRow(item: DownloadRecord) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
     let id = item.id.clone();
-    let can_retry =
-        item.can_retry.unwrap_or(false) || matches!(item.status.as_str(), "failed" | "canceled");
+    let can_retry = matches!(item.platform.as_deref(), None | Some("web"))
+        && (item.can_retry.unwrap_or(false)
+            || matches!(item.status.as_str(), "failed" | "canceled"));
     let can_cancel = item.is_active();
     let cancel_services = services.clone();
     let retry_services = services.clone();
@@ -232,6 +382,96 @@ fn DownloadRow(item: DownloadRecord) -> Element {
     }
 }
 
+fn analyze_current(
+    services: AppServices,
+    url: Signal<String>,
+    mut analysis: Signal<Option<MediaInfo>>,
+    mut analyzing: Signal<bool>,
+    mut error: Signal<Option<String>>,
+) {
+    let raw_url = url().trim().to_string();
+    if raw_url.is_empty() {
+        error.set(Some("Informe uma URL para analisar.".to_string()));
+        return;
+    }
+    if !raw_url.starts_with("https://") {
+        error.set(Some("Use uma URL HTTPS.".to_string()));
+        return;
+    }
+    analyzing.set(true);
+    error.set(None);
+    analysis.set(None);
+    spawn(async move {
+        match services.extract.analyze(raw_url).await {
+            Ok(info) => analysis.set(Some(info)),
+            Err(message) => error.set(Some(message)),
+        }
+        analyzing.set(false);
+    });
+}
+
+fn download_media(
+    services: AppServices,
+    ui: UiState,
+    info: &MediaInfo,
+    option: &FormatOption,
+    is_audio: bool,
+) {
+    if option.url.is_none() && info.platform != "youtube" {
+        push_toast(
+            ui.toasts,
+            "Este formato não tem URL direta para download.",
+            ToastKind::Error,
+        );
+        return;
+    }
+    let extension = media_extension(option, is_audio);
+    let title = sanitize_filename(&info.title.chars().take(60).collect::<String>());
+    let label = sanitize_filename(&option.label.chars().take(40).collect::<String>());
+    let name = format!("{title}-{label}.{extension}");
+    let destination = services.downloads.destination_for(&name);
+    let file_name = Path::new(&destination)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&name)
+        .to_string();
+    let id = format!("{}-{}", info.platform, new_download_id());
+    let mut record = DownloadRecord::new_url(
+        id.clone(),
+        file_name.clone(),
+        destination,
+        option
+            .url
+            .clone()
+            .unwrap_or_else(|| info.original_url.clone()),
+    );
+    record.platform = Some(info.platform.clone());
+    record.source_page_url = Some(info.original_url.clone());
+    record.source_mode = Some(if is_audio { "audio" } else { "video" }.to_string());
+    record.source_format_id = Some(option.id.clone());
+    record.source_label = Some(info.author.clone());
+    record.thumbnail_url = info.thumbnail_url.clone();
+    let original_url = info.original_url.clone();
+    let format_id = option.id.clone();
+    let direct_url = option.url.clone();
+    let has_audio = option.has_audio;
+    push_download(services.clone(), ui, record);
+    spawn(async move {
+        let result = services
+            .extract
+            .download(
+                id.clone(),
+                original_url,
+                format_id,
+                direct_url,
+                file_name,
+                has_audio,
+            )
+            .await;
+        finish_url_download(services, ui, id, result);
+    });
+}
+
 fn submit_url(
     services: AppServices,
     ui: UiState,
@@ -295,7 +535,7 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     record.can_cancel = Some(true);
     record.can_retry = Some(false);
     push_download(services.clone(), ui, record);
-    dioxus::prelude::spawn(async move {
+    spawn(async move {
         let result = services
             .downloads
             .download_url(id.clone(), url, file_path, None)
@@ -309,7 +549,7 @@ fn start_record(services: AppServices, ui: UiState, record: DownloadRecord) {
     let url = record.source_url.clone().unwrap_or_default();
     let file_path = record.file_path.clone().unwrap_or_default();
     push_download(services.clone(), ui, record);
-    dioxus::prelude::spawn(async move {
+    spawn(async move {
         let result = services
             .downloads
             .download_url(id.clone(), url, file_path, None)
@@ -393,6 +633,73 @@ fn filename_from_url(url: &str) -> String {
     sanitize_filename(candidate)
 }
 
+fn media_extension(option: &FormatOption, is_audio: bool) -> String {
+    if let Some(url) = option.url.as_deref() {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        if let Some(extension) = Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+        {
+            if matches!(
+                extension.as_str(),
+                "jpg"
+                    | "jpeg"
+                    | "png"
+                    | "webp"
+                    | "gif"
+                    | "mp4"
+                    | "mov"
+                    | "m4a"
+                    | "mp3"
+                    | "webm"
+                    | "opus"
+                    | "aac"
+            ) {
+                return if extension == "jpeg" {
+                    "jpg".to_string()
+                } else {
+                    extension
+                };
+            }
+        }
+    }
+    let sub = option.sub.to_ascii_lowercase();
+    if is_audio {
+        if sub.contains("webm") || sub.contains("opus") {
+            "webm".to_string()
+        } else if sub.contains("mp3") {
+            "mp3".to_string()
+        } else if sub.contains("aac") || sub.contains("m4a") || sub.contains("mp4") {
+            "m4a".to_string()
+        } else {
+            "mp4".to_string()
+        }
+    } else if sub.contains("webm") {
+        "webm".to_string()
+    } else if sub.contains("jpg")
+        || sub.contains("jpeg")
+        || sub.contains("imagem")
+        || sub.contains("image")
+    {
+        "jpg".to_string()
+    } else if sub.contains("png") {
+        "png".to_string()
+    } else {
+        "mp4".to_string()
+    }
+}
+
+fn is_image_option(option: &FormatOption) -> bool {
+    let sub = option.sub.to_ascii_lowercase();
+    sub.contains("imagem")
+        || sub.contains("image")
+        || sub.contains("jpg")
+        || sub.contains("jpeg")
+        || sub.contains("png")
+        || sub.contains("gif")
+}
+
 fn status_label(status: &str) -> &'static str {
     match status {
         "downloading" => "Baixando",
@@ -449,5 +756,14 @@ mod tests {
         assert_eq!(platform_label(Some("twitter")), "X/Twitter");
         assert_eq!(platform_label(None), "Web");
         assert_eq!(status_label("failed"), "Falhou");
+    }
+
+    #[test]
+    fn picks_extensions_from_url_or_format() {
+        let mut option = FormatOption::new("1", "Video", "video/mp4");
+        option.url = Some("https://cdn.example.com/video.webm?x=1".to_string());
+        assert_eq!(media_extension(&option, false), "webm");
+        option.url = None;
+        assert_eq!(media_extension(&option, true), "m4a");
     }
 }

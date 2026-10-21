@@ -1,6 +1,6 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3, 4 e 5 implementadas em 2026-10-20.
+> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3, 4, 5 e 6 implementadas em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
 > **Execução atual:** fases 0–2 concluídas; fase 3 (TDLib real) implementada e compilando.
@@ -534,6 +534,55 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    de Telegram entram na Fase 6. A validação visual e os downloads reais de Twitter com
    conta/cookies continuam pendentes neste ambiente (WebKitGTK em branco); os endpoints
    nativos são os mesmos usados pelo app Tauri.
+
+### Fase 6 — extratores nativos das plataformas implementados (2026-10-20)
+
+1. Novo crate de domínio `plasma-extract` unifica `MediaInfo`, `MediaFormats`,
+   `FormatOption` e `Platform` para as seis opções do antigo downloader React:
+   X/Twitter, YouTube, TikTok, Instagram, Reddit e web. A detecção normaliza
+   `x.com`/`twitter.com`, variantes de YouTube/`youtu.be`, subdomínios de TikTok,
+   Instagram, Reddit/`redd.it` e cai em `web` para links diretos.
+2. YouTube é analisado pela própria página (`ytInitialPlayerResponse`), com parser de
+   objeto JSON balanceado (não por busca de `;</script>`), formatos muxed/adaptive,
+   `itag` numérico como ID de download, tamanho por `filesize`/`contentLength`, duração,
+   views e thumbnail. No Android, formatos só-vídeo são omitidos; no desktop são
+   exibidos com o marcador “sem áudio” e o download combina `+bestaudio` quando o
+   usuário escolhe um deles.
+3. TikTok reutiliza o analisador nativo (yt-dlp no desktop) e o fallback TikWM, agora
+   público e compilado também no Android. Os DTOs de TikTok foram expostos e derivam
+   `Clone`/`PartialEq` para conversão e props Dioxus. O download no Android usa a URL
+   direta do TikWM com o baixador HTTPS compartilhado; no desktop continua no downloader
+   nativo.
+4. Instagram foi portado para Rust com GraphQL (`shortcode_media`, carrossel, vídeo,
+   imagem, autor, duração e métricas) e fallback pelo HTML do embed. O embed usa
+   user-agent móvel e decodifica JSON-em-JSON (URLs `https:\\/\\/...`, `\\uXXXX`). Reddit
+   usa o JSON público de comentários, vídeo `DASH`, áudio derivado, imagem/link e
+   thumbnail. Ambos baixam pela `plasma_download` com `Referer`/user-agent apropriados e
+   entram no mesmo histórico.
+5. X/Twitter foi convertido para o modelo unificado sem duplicar a lógica de análise.
+   O download de Twitter e dos demais formatos é despachado por `DownloadSpec`, que
+   escolhe o downloader nativo correto ou o download HTTPS direto.
+6. `ExtractorHandle` no shell usa o runtime Tokio compartilhado, carrega os cookies
+   salvos do Twitter quando necessário e expõe `analyze`/`download` para a UI. A tela
+   Downloads ganhou o formulário “Analisar link”, cartão de resultado com thumbnail,
+   autor, métricas, formatos e botões de download, mantendo o formulário de URL HTTPS
+   direta. O histórico agora persiste `thumbnailUrl`, `sourceMode` e `sourceFormatId`.
+7. O emissor do shell traduz `youtube-download-progress/done/error` e
+   `tiktok-download-progress/done/error` para os mesmos eventos de download usados pelo
+   Twitter e pelos arquivos diretos.
+8. Testes cobrem detecção de plataforma, IDs de YouTube/Instagram/Reddit, parser de JSON
+   embutido, decodificação de URLs escapadas, sanitização/formatação e extensões de mídia.
+   Validação de rede executada para análise real de YouTube (título, thumbnail e formatos)
+   e de um reel público do Instagram (vídeo, thumbnail, autor e legendas). Reddit
+   respondeu HTTP 403 neste IP e TikTok não foi exercitado; downloads completos continuam
+   dependentes de rede/conta.
+9. Limitações: Instagram pode exigir login/GraphQL atualizado e não há tela de cookies
+   dedicada; Reddit pode responder 403 em IPs bloqueados; YouTube não trata vídeos com
+   idade/região restrita; retry de downloads de plataforma é feito reanalisando o link
+   (não pelo botão genérico); mass download de Telegram, cache de mídia e duplicados
+   continuam pendentes. O código Android foi validado com `cargo check`/`clippy
+   --target aarch64-linux-android` usando NDK 27.1; execução de UI, SAF, players e
+   downloads Android continuam pendentes para a Fase 7.
 
 ---
 

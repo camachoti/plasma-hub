@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/plasma-core",
     "crates/plasma-download",
+    "crates/plasma-extract",
     "crates/plasma-duplicates",
     "crates/plasma-instagram",
     "crates/plasma-media",

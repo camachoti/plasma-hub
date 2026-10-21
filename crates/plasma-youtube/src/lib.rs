@@ -595,7 +595,7 @@ pub async fn download_youtube_native(
             } else {
                 50.0
             };
-            let _ = app_handle.emit(
+            app_handle.emit(
                 "youtube-download-progress",
                 DownloadProgressEvent {
                     id: id.clone(),
@@ -604,7 +604,7 @@ pub async fn download_youtube_native(
             );
         }
 
-        let _ = app_handle.emit(
+        app_handle.emit(
             "youtube-download-done",
             DownloadDoneEvent { id: id.clone() },
         );
@@ -616,7 +616,7 @@ pub async fn download_youtube_native(
         if is_cancellation_error(error) {
             return result;
         }
-        let _ = app_handle.emit(
+        app_handle.emit(
             "youtube-download-error",
             DownloadErrorEvent {
                 id: id.clone(),

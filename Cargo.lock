@@ -3538,6 +3538,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-extract"
+version = "0.1.0"
+dependencies = [
+ "plasma-core",
+ "plasma-download",
+ "plasma-tiktok",
+ "plasma-twitter",
+ "plasma-youtube",
+ "regex",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "plasma-hub"
 version = "0.1.0"
 dependencies = [
@@ -3657,6 +3672,7 @@ dependencies = [
  "dioxus",
  "plasma-core",
  "plasma-download",
+ "plasma-extract",
  "plasma-store",
  "plasma-telegram",
  "plasma-twitter",

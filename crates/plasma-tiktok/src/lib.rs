@@ -18,41 +18,40 @@ use plasma_download::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
 #[cfg(not(target_os = "android"))]
 use plasma_youtube::ensure_ytdlp;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TikTokMediaInfo {
-    platform: String,
-    title: String,
-    author: String,
-    author_full: Option<String>,
-    duration: String,
-    views: Option<String>,
-    likes: Option<String>,
-    thumb_hue: u16,
-    thumb_hue2: u16,
-    thumbnail_url: Option<String>,
-    original_url: String,
-    formats: TikTokFormats,
+    pub platform: String,
+    pub title: String,
+    pub author: String,
+    pub author_full: Option<String>,
+    pub duration: String,
+    pub views: Option<String>,
+    pub likes: Option<String>,
+    pub thumb_hue: u16,
+    pub thumb_hue2: u16,
+    pub thumbnail_url: Option<String>,
+    pub original_url: String,
+    pub formats: TikTokFormats,
 }
 
-#[derive(Debug, Serialize)]
-struct TikTokFormats {
-    video: Vec<TikTokFormatOption>,
-    audio: Vec<TikTokFormatOption>,
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TikTokFormats {
+    pub video: Vec<TikTokFormatOption>,
+    pub audio: Vec<TikTokFormatOption>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TikTokFormatOption {
-    id: String,
-    label: String,
-    sub: String,
-    size: String,
-    best: bool,
-    url: Option<String>,
+pub struct TikTokFormatOption {
+    pub id: String,
+    pub label: String,
+    pub sub: String,
+    pub size: String,
+    pub best: bool,
+    pub url: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Debug, Deserialize)]
 struct TikWmResponse {
     code: i64,
@@ -60,7 +59,6 @@ struct TikWmResponse {
     data: Option<TikWmData>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Debug, Deserialize)]
 struct TikWmData {
     id: String,
@@ -75,31 +73,32 @@ struct TikWmData {
     author: Option<TikWmAuthor>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Debug, Deserialize)]
 struct TikWmAuthor {
     unique_id: String,
     nickname: String,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct TikTokDownloadProgressEvent {
     id: String,
     progress: f64,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct TikTokDownloadErrorEvent {
     id: String,
     error: String,
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Serialize)]
 struct TikTokDownloadDoneEvent {
     id: String,
 }
 
-#[cfg(not(target_os = "android"))]
 fn format_duration(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     let hours = total / 3600;
@@ -112,7 +111,6 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn format_count(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f64 / 1_000_000.0)
@@ -123,7 +121,6 @@ fn format_count(value: u64) -> String {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn format_size(bytes: u64) -> String {
     if bytes == 0 {
         return "—".to_string();
@@ -136,8 +133,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-#[cfg(not(target_os = "android"))]
-async fn analyze_tiktok_with_tikwm(url: &str) -> Result<TikTokMediaInfo, String> {
+pub async fn analyze_tiktok_with_tikwm(url: &str) -> Result<TikTokMediaInfo, String> {
     eprintln!("[tiktok_native] analyzing with TikWM fallback");
     let client = reqwest::Client::builder()
         .user_agent(

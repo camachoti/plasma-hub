@@ -6,6 +6,7 @@ use crate::twitter::TwitterHandle;
 use base64::Engine as _;
 use dioxus::prelude::*;
 use plasma_core::{AppEnv, EventBus};
+use plasma_extract::{DownloadSpec, MediaInfo, Platform};
 use plasma_store::{MessageCacheGetResult, MessageCacheMeta, SettingsStore};
 use plasma_telegram::{
     NativePlaybackSource, NativeSavedMedia, TdlibChatCapabilitiesResult, TdlibChatInfo,
@@ -33,6 +34,7 @@ pub struct AppServices {
     pub telegram: TelegramHandle,
     pub downloads: DownloadHandle,
     pub twitter: TwitterHandle,
+    pub extract: ExtractorHandle,
     pub credentials: Option<TelegramCredentials>,
 }
 
@@ -46,6 +48,7 @@ impl AppServices {
     ) -> Self {
         let downloads = DownloadHandle::new(env.clone(), telegram.runtime_handle());
         let twitter = TwitterHandle::new(env.clone(), telegram.runtime_handle());
+        let extract = ExtractorHandle::new(env.clone(), telegram.runtime_handle(), twitter.clone());
         Self {
             env,
             settings,
@@ -53,8 +56,82 @@ impl AppServices {
             telegram,
             downloads,
             twitter,
+            extract,
             credentials,
         }
+    }
+}
+
+/// Async facade over the native platform extractors.
+#[derive(Clone)]
+pub struct ExtractorHandle {
+    env: AppEnv,
+    runtime: tokio::runtime::Handle,
+    twitter: TwitterHandle,
+}
+
+impl ExtractorHandle {
+    pub fn new(env: AppEnv, runtime: tokio::runtime::Handle, twitter: TwitterHandle) -> Self {
+        Self {
+            env,
+            runtime,
+            twitter,
+        }
+    }
+
+    pub async fn analyze(&self, url: String) -> Result<MediaInfo, String> {
+        let cookies = self.cookies_for(&url).await;
+        let env = self.env.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::analyze_url(&env, &url, cookies).await });
+        self.join(handle).await?
+    }
+
+    pub async fn download(
+        &self,
+        id: String,
+        original_url: String,
+        format_id: String,
+        direct_url: Option<String>,
+        file_name: String,
+        has_audio: bool,
+    ) -> Result<(), String> {
+        let cookies = self.cookies_for(&original_url).await;
+        let env = self.env.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_extract::download_format(
+                &env,
+                DownloadSpec {
+                    id,
+                    original_url,
+                    format_id,
+                    direct_url,
+                    file_name,
+                    has_audio,
+                    cookies,
+                },
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    async fn cookies_for(&self, url: &str) -> Option<String> {
+        if Platform::detect(url) != Platform::Twitter {
+            return None;
+        }
+        self.twitter
+            .load_cookies()
+            .await
+            .ok()
+            .filter(|cookies| !cookies.trim().is_empty())
+    }
+
+    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, String> {
+        handle
+            .await
+            .map_err(|error| format!("Tarefa do extrator falhou: {error}"))
     }
 }
 

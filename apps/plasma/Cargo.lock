@@ -3713,6 +3713,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-extract"
+version = "0.1.0"
+dependencies = [
+ "plasma-core",
+ "plasma-download",
+ "plasma-tiktok",
+ "plasma-twitter",
+ "plasma-youtube",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "plasma-store"
 version = "0.1.0"
 dependencies = [
@@ -3737,6 +3752,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-tiktok"
+version = "0.1.0"
+dependencies = [
+ "plasma-core",
+ "plasma-download",
+ "plasma-youtube",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "plasma-twitter"
 version = "0.1.0"
 dependencies = [
@@ -3757,6 +3786,7 @@ dependencies = [
  "dioxus",
  "plasma-core",
  "plasma-download",
+ "plasma-extract",
  "plasma-store",
  "plasma-telegram",
  "plasma-twitter",
@@ -3764,6 +3794,19 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "tokio",
+]
+
+[[package]]
+name = "plasma-youtube"
+version = "0.1.0"
+dependencies = [
+ "plasma-core",
+ "plasma-download",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

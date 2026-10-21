@@ -398,6 +398,7 @@ fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
                                 &username,
                                 &media_urls,
                                 &original_url,
+                                profile.avatar_url.clone(),
                                 cookies_for_download.clone(),
                             );
                         },
@@ -466,6 +467,9 @@ fn download_tweet_format(
     record.platform = Some("twitter".to_string());
     record.source_page_url = Some(tweet.original_url.clone());
     record.source_label = Some(format!("@{}", tweet.author));
+    record.source_mode = Some("video".to_string());
+    record.source_format_id = Some(option.id.clone());
+    record.thumbnail_url = tweet.thumbnail_url.clone();
     push_download(services.clone(), ui, record);
     let cookies = if cookies.trim().is_empty() {
         None
@@ -487,6 +491,7 @@ fn download_profile(
     username: &str,
     media_urls: &[String],
     source_page_url: &str,
+    avatar_url: Option<String>,
     cookies: String,
 ) {
     if media_urls.is_empty() {
@@ -511,6 +516,7 @@ fn download_profile(
         file_size: None,
         source_url: Some(source_page_url.to_string()),
         source_page_url: Some(source_page_url.to_string()),
+        thumbnail_url: avatar_url,
         platform: Some("twitter".to_string()),
         source_label: Some(format!("@{username}")),
         batch_id: Some(id.clone()),

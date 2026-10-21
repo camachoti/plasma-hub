@@ -262,7 +262,9 @@ impl EventEmitter for BusEmitter {
                     percent,
                 });
             }
-            "twitter-download-progress" => {
+            "twitter-download-progress"
+            | "youtube-download-progress"
+            | "tiktok-download-progress" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
                     return;
                 };
@@ -278,20 +280,20 @@ impl EventEmitter for BusEmitter {
                     percent: Some(progress),
                 });
             }
-            "twitter-download-done" => {
+            "twitter-download-done" | "youtube-download-done" | "tiktok-download-done" => {
                 if let Some(id) = payload.get("id").and_then(Value::as_str) {
                     self.bus
                         .publish(AppEvent::DownloadDone { id: id.to_string() });
                 }
             }
-            "twitter-download-error" => {
+            "twitter-download-error" | "youtube-download-error" | "tiktok-download-error" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
                     return;
                 };
                 let error = payload
                     .get("error")
                     .and_then(Value::as_str)
-                    .unwrap_or("Falha no download do Twitter.")
+                    .unwrap_or("Falha no download da plataforma.")
                     .to_string();
                 self.bus.publish(AppEvent::DownloadError {
                     id: id.to_string(),

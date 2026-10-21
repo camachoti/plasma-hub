@@ -1,0 +1,17 @@
+[package]
+name = "plasma-extract"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+plasma-download = { path = "../plasma-download" }
+plasma-tiktok = { path = "../plasma-tiktok" }
+plasma-twitter = { path = "../plasma-twitter" }
+plasma-youtube = { path = "../plasma-youtube" }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
