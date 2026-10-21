@@ -800,6 +800,169 @@ h1, h2, h3, p { margin: 0; }
 .kv dt { color: var(--text-3); }
 .kv dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; font-family: var(--font-mono); }
 
+
+/* Downloads */
+.downloads-view, .twitter-view { height: 100%; overflow-y: auto; padding: 24px; }
+.downloads-inner, .twitter-inner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.downloads-heading, .twitter-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.downloads-heading h1, .twitter-heading h1 { font-size: 24px; letter-spacing: -0.04em; }
+.downloads-heading p, .twitter-heading p { max-width: 620px; margin-top: 4px; }
+.downloads-stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.download-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.download-card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3); }
+.download-form { display: grid; grid-template-columns: minmax(0, 1fr) 220px auto; gap: 8px; }
+.download-input {
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: 13px;
+}
+.download-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); outline: 0; }
+.download-input::placeholder { color: var(--text-3); }
+.download-name { font-family: var(--font-mono); font-size: 12px; }
+.download-destination { font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
+.download-destination code { color: var(--text-2); font-family: var(--font-mono); }
+.downloads-list-card { min-height: 280px; }
+.download-list-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.downloads-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 44px 12px; text-align: center; }
+.downloads-empty p { color: var(--text-2); font-size: 13px; }
+.downloads-list { display: flex; flex-direction: column; gap: 8px; }
+.download-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.download-row.failed { border-color: color-mix(in oklch, var(--danger) 35%, transparent); }
+.download-row.completed { border-color: color-mix(in oklch, var(--good) 24%, transparent); }
+.download-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.download-row-title { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.download-row-title strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.download-percent { color: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.download-status { font-size: 11px; color: var(--text-3); }
+.download-status.completed { color: var(--good); }
+.download-status.failed { color: var(--danger); }
+.download-status.canceled { color: var(--warn); }
+.download-progress {
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+.download-progress::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: var(--progress, 0%);
+  background: linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 60%, white));
+  transition: width .18s ease;
+}
+.download-row-meta { display: flex; gap: 10px; min-width: 0; color: var(--text-3); font-size: 10px; flex-wrap: wrap; }
+.download-source, .download-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.download-path { font-family: var(--font-mono); }
+.download-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* X / Twitter */
+.twitter-search-card { gap: 10px; }
+.twitter-search-row { display: flex; gap: 8px; }
+.twitter-search-row .download-input { flex: 1; }
+.twitter-cookies { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.twitter-cookies summary { cursor: pointer; color: var(--text-2); font-size: 12px; font-weight: 600; }
+.twitter-cookies-input {
+  width: 100%;
+  min-height: 78px;
+  margin: 8px 0;
+  padding: 9px 10px;
+  resize: vertical;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: 0;
+}
+.twitter-cookies-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.twitter-result {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.twitter-result-head { display: flex; gap: 14px; align-items: flex-start; }
+.twitter-thumb {
+  width: 150px;
+  height: 94px;
+  flex: 0 0 auto;
+  border-radius: var(--radius);
+  object-fit: cover;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.twitter-thumb.avatar { width: 74px; height: 74px; border-radius: 50%; }
+.twitter-thumb.fallback {
+  background: linear-gradient(135deg, hsl(var(--thumb-hue, 90) 55% 28%), hsl(var(--thumb-hue2, 210) 60% 16%));
+}
+.twitter-result-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.twitter-result-copy h2 { font-size: 18px; letter-spacing: -0.02em; }
+.twitter-original { color: var(--accent); font-size: 11px; text-decoration: underline; align-self: flex-start; }
+.twitter-result-actions { margin-left: auto; }
+.twitter-formats { display: flex; flex-direction: column; gap: 6px; }
+.twitter-format {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.twitter-format-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.twitter-format-copy strong { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.twitter-format-copy span { font-size: 10px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.twitter-format > .muted { font-size: 11px; white-space: nowrap; }
+.twitter-media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+}
+.twitter-media-item {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.twitter-media-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.twitter-empty { min-height: 280px; }
+
+@media (max-width: 880px) {
+  .downloads-view, .twitter-view { padding: 16px; }
+  .download-form { grid-template-columns: 1fr; }
+  .twitter-result-head { flex-wrap: wrap; }
+  .twitter-thumb { width: 100%; height: 160px; }
+  .twitter-result-actions { margin-left: 0; }
+}
+
 /* Command palette */
 .modal-backdrop {
   position: fixed; inset: 0;

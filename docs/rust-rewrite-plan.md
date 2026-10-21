@@ -1,6 +1,6 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3 e 4 implementadas em 2026-10-20.
+> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3, 4 e 5 implementadas em 2026-10-20.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
 > **Execução atual:** fases 0–2 concluídas; fase 3 (TDLib real) implementada e compilando.
@@ -497,6 +497,43 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    de arquivos no Android ficam para a Fase 7. A conta real de escrita e a conferência
    visual continuam pendentes pelo mesmo bloqueio de WebKitGTK; os caminhos de backend são
    os mesmos já usados pelo app Tauri.
+
+### Fase 5 — downloads e Twitter implementados (2026-10-20)
+
+1. `plasma-ui::downloads` introduz `DownloadRecord` e `DownloadHandle`. O record usa
+   `camelCase`, preserva campos desconhecidos do histórico React via `#[serde(flatten)]`
+   e reutiliza a tabela `download_history` do SQLite. Registros que ficaram
+   `downloading` ao fechar o app viram `failed` com mensagem de interrupção, igual ao
+   `DownloadService` React.
+2. O shell restaura o histórico no boot, mescla com downloads ativos e persiste a fila em
+   cada início/terminal. As gravações são serializadas por um `tokio::sync::Mutex` para
+   evitar snapshots fora de ordem. O `EventBus` recebe progresso, conclusão e erro dos
+   downloads nativos e do Twitter; `DownloadProgress` aceita percentual opcional para
+   produtores que não informam bytes.
+3. Tela Downloads: formulário HTTPS com nome opcional, pasta de destino, fila em memória,
+   barra de progresso, cancelamento, retry (com retomada via arquivo parcial), remoção de
+   itens e limpeza de finalizados. O histórico mostra plataforma, tamanho, origem, destino
+   e erros. O limite persistido continua sendo 300 itens, como no React.
+4. `plasma-ui::twitter` embrulha o analisador e o downloader nativos no runtime Tokio. A
+   tela X/Twitter detecta automaticamente post versus perfil (URL, `@handle` ou handle),
+   lista variantes de vídeo/áudio com tamanho e marca a melhor, baixa uma variante escolhida
+   ou todas as mídias de um perfil, mostra avatar/thumbnail e mantém os cookies opcionais
+   no mesmo arquivo usado pelo app Tauri (`load_twitter_cookies`/`save_twitter_cookies`).
+5. Downloads do Twitter entram na mesma fila/histórico com `platform: "twitter"`,
+   `sourcePageUrl`, lote e progresso. O perfil usa a pasta `@usuario`, igual ao backend
+   nativo. Retry genérico fica desabilitado para itens do Twitter porque a análise precisa
+   de cookies/contexto; o usuário reanalisa na aba X/Twitter.
+6. CSS novo cobre a tela de downloads, formulário, progresso, estados, cookies, resultados
+   de post, lista de formatos e grid de mídias do perfil, com ajuste responsivo.
+7. Testes novos cobrem sanitização de nomes, derivação de nome pela URL, preservação de
+   campos extras do histórico, extensões de mídia, slug de status e detecção de perfil.
+   Validação: fmt, clippy `-D warnings`, testes do workspace e do app aninhado,
+   `cargo check -p plasma-hub`, `npm run build` e `npm test`.
+8. Limitações: a fila não impõe limite de downloads concorrentes; o formulário genérico só
+   aceita URLs HTTPS diretas. Extração de YouTube/TikTok/Instagram/Reddit e mass download
+   de Telegram entram na Fase 6. A validação visual e os downloads reais de Twitter com
+   conta/cookies continuam pendentes neste ambiente (WebKitGTK em branco); os endpoints
+   nativos são os mesmos usados pelo app Tauri.
 
 ---
 

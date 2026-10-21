@@ -17,58 +17,58 @@ use plasma_download::{is_cancellation_error, DownloadCancellation, DOWNLOAD_CANC
 
 const TWITTER_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMediaInfo {
-    platform: String,
-    title: String,
-    author: String,
-    author_full: Option<String>,
-    duration: String,
-    thumb_hue: u16,
-    thumb_hue2: u16,
-    thumbnail_url: Option<String>,
-    original_url: String,
-    formats: NativeFormats,
+    pub platform: String,
+    pub title: String,
+    pub author: String,
+    pub author_full: Option<String>,
+    pub duration: String,
+    pub thumb_hue: u16,
+    pub thumb_hue2: u16,
+    pub thumbnail_url: Option<String>,
+    pub original_url: String,
+    pub formats: NativeFormats,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NativeFormats {
-    video: Vec<NativeFormatOption>,
-    audio: Vec<NativeFormatOption>,
+    pub video: Vec<NativeFormatOption>,
+    pub audio: Vec<NativeFormatOption>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeFormatOption {
-    id: String,
-    label: String,
-    sub: String,
-    size: String,
-    best: Option<bool>,
-    url: Option<String>,
+    pub id: String,
+    pub label: String,
+    pub sub: String,
+    pub size: String,
+    pub best: Option<bool>,
+    pub url: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeProfileInfo {
-    platform: String,
-    username: String,
-    display_name: Option<String>,
-    avatar_url: Option<String>,
-    thumbnail_url: Option<String>,
-    media_count: usize,
-    media_urls: Vec<String>,
-    media_items: Vec<NativeProfileMediaItem>,
-    original_url: String,
+    pub platform: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub thumbnail_url: Option<String>,
+    pub media_count: usize,
+    pub media_urls: Vec<String>,
+    pub media_items: Vec<NativeProfileMediaItem>,
+    pub original_url: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeProfileMediaItem {
-    url: String,
-    thumbnail_url: Option<String>,
-    is_video: bool,
+    pub url: String,
+    pub thumbnail_url: Option<String>,
+    pub is_video: bool,
 }
 
 #[derive(Debug, Default)]

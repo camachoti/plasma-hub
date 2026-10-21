@@ -40,6 +40,8 @@ pub enum AppEvent {
         id: String,
         downloaded_bytes: u64,
         total_bytes: u64,
+        /// Optional percentage when the producer only knows progress.
+        percent: Option<f64>,
     },
     DownloadDone {
         id: String,
@@ -163,6 +165,7 @@ mod tests {
                 id: format!("job-{id}"),
                 downloaded_bytes: id,
                 total_bytes: 10,
+                percent: None,
             });
         }
 

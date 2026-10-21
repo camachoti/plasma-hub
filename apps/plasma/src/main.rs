@@ -242,6 +242,62 @@ impl EventEmitter for BusEmitter {
                     state,
                 });
             }
+            "native-file-download-progress" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else {
+                    return;
+                };
+                let downloaded = payload
+                    .get("downloadedBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let total = payload
+                    .get("totalBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let percent = payload.get("percent").and_then(Value::as_f64);
+                self.bus.publish(AppEvent::DownloadProgress {
+                    id: id.to_string(),
+                    downloaded_bytes: downloaded,
+                    total_bytes: total,
+                    percent,
+                });
+            }
+            "twitter-download-progress" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else {
+                    return;
+                };
+                let progress = payload
+                    .get("progress")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default()
+                    .clamp(0.0, 100.0);
+                self.bus.publish(AppEvent::DownloadProgress {
+                    id: id.to_string(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    percent: Some(progress),
+                });
+            }
+            "twitter-download-done" => {
+                if let Some(id) = payload.get("id").and_then(Value::as_str) {
+                    self.bus
+                        .publish(AppEvent::DownloadDone { id: id.to_string() });
+                }
+            }
+            "twitter-download-error" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else {
+                    return;
+                };
+                let error = payload
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Falha no download do Twitter.")
+                    .to_string();
+                self.bus.publish(AppEvent::DownloadError {
+                    id: id.to_string(),
+                    error,
+                });
+            }
             _ => {}
         }
     }

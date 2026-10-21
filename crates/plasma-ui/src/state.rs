@@ -1,6 +1,8 @@
 //! Shared UI state and services.
 
+use crate::downloads::{DownloadHandle, DownloadRecord};
 use crate::theme::{Density, Palette};
+use crate::twitter::TwitterHandle;
 use base64::Engine as _;
 use dioxus::prelude::*;
 use plasma_core::{AppEnv, EventBus};
@@ -29,6 +31,8 @@ pub struct AppServices {
     pub settings: SettingsStore,
     pub events: EventBus,
     pub telegram: TelegramHandle,
+    pub downloads: DownloadHandle,
+    pub twitter: TwitterHandle,
     pub credentials: Option<TelegramCredentials>,
 }
 
@@ -40,11 +44,15 @@ impl AppServices {
         telegram: TelegramHandle,
         credentials: Option<TelegramCredentials>,
     ) -> Self {
+        let downloads = DownloadHandle::new(env.clone(), telegram.runtime_handle());
+        let twitter = TwitterHandle::new(env.clone(), telegram.runtime_handle());
         Self {
             env,
             settings,
             events,
             telegram,
+            downloads,
+            twitter,
             credentials,
         }
     }
@@ -68,6 +76,10 @@ impl TelegramHandle {
             env,
             runtime,
         }
+    }
+
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.clone()
     }
 
     async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, String> {
@@ -570,6 +582,8 @@ pub struct UiState {
     pub search_error: Signal<Option<String>>,
 
     pub telegram_tick: Signal<u64>,
+
+    pub downloads: Signal<Vec<DownloadRecord>>,
 }
 
 impl UiState {
@@ -671,6 +685,10 @@ impl UiState {
 
     pub fn search_error(self) -> Option<String> {
         (self.search_error)()
+    }
+
+    pub fn downloads(self) -> Vec<DownloadRecord> {
+        (self.downloads)()
     }
 
     pub fn telegram_tick(self) -> u64 {

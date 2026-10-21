@@ -4,11 +4,17 @@
 //! Telegram live in the UI-agnostic crates and reach this layer through
 //! [`state::AppServices`] and [`plasma_core::EventBus`].
 
+pub mod downloads;
 pub mod state;
 pub mod theme;
+pub mod twitter;
 pub mod views;
 
 use dioxus::prelude::*;
+use downloads::{
+    apply_download_done, apply_download_error, apply_download_progress, persist_downloads,
+    DownloadRecord,
+};
 use plasma_core::AppEvent;
 use plasma_store::SettingKey;
 use plasma_telegram::{TdlibChatInfo, TdlibForumTopicInfo, TdlibMessageInfo};
@@ -68,6 +74,7 @@ pub fn App() -> Element {
     let search_error = use_signal(|| None::<String>);
 
     let telegram_tick = use_signal(|| 0u64);
+    let downloads = use_signal(Vec::<DownloadRecord>::new);
 
     let mut ui = use_context_provider(|| UiState {
         tab,
@@ -97,6 +104,26 @@ pub fn App() -> Element {
         search_loading,
         search_error,
         telegram_tick,
+        downloads,
+    });
+
+    // Restore the persisted download history once. The React frontend uses the
+    // same SQLite row, so downloads started by either shell remain visible.
+    let history_services = services.clone();
+    use_future(move || {
+        let history_services = history_services.clone();
+        async move {
+            if let Ok(items) = history_services.downloads.load_history().await {
+                let mut existing = ui.downloads();
+                for item in items {
+                    if !existing.iter().any(|entry| entry.id == item.id) {
+                        existing.push(item);
+                    }
+                }
+                existing.sort_by_key(|item| item.created_at.unwrap_or_default());
+                ui.downloads.set(existing);
+            }
+        }
     });
 
     // Bootstrap TDLib once. The login view reflects `auth_state` while this
@@ -171,6 +198,22 @@ pub fn App() -> Element {
                                 .await;
                             bump_telegram_tick(ui);
                         });
+                    }
+                    Ok(AppEvent::DownloadProgress {
+                        id,
+                        downloaded_bytes,
+                        total_bytes,
+                        percent,
+                    }) => {
+                        apply_download_progress(ui, &id, downloaded_bytes, total_bytes, percent);
+                    }
+                    Ok(AppEvent::DownloadDone { id }) => {
+                        apply_download_done(ui, &id);
+                        persist_downloads(event_services.clone(), ui);
+                    }
+                    Ok(AppEvent::DownloadError { id, error }) => {
+                        apply_download_error(ui, &id, error);
+                        persist_downloads(event_services.clone(), ui);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
