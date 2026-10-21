@@ -1,0 +1,13 @@
+[package]
+name = "plasma-platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Filesystem, dialogs and OS integration helpers"
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+
+[lints]
+workspace = true

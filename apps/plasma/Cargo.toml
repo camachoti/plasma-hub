@@ -1,0 +1,13 @@
+[package]
+name = "plasma"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Plasma Hub application shell (Dioxus migration pending)"
+
+[dependencies]
+plasma-core = { path = "../../crates/plasma-core" }
+
+[lints]
+workspace = true

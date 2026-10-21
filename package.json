@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check:form-controls": "node scripts/check-form-controls.mjs",
+    "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --exclude plasma-hub && cargo check -p plasma-hub",
     "test": "node --test tests/*.test.mjs",
     "predev": "npm run check:form-controls",
     "prebuild": "npm run check:form-controls",

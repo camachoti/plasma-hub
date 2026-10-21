@@ -1,0 +1,13 @@
+[package]
+name = "plasma-reddit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Reddit extraction (migration pending)"
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+
+[lints]
+workspace = true

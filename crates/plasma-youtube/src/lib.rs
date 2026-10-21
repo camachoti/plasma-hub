@@ -1,3 +1,4 @@
+use plasma_core::AppEnv;
 use regex::Regex;
 use serde::Serialize;
 #[cfg(not(target_os = "android"))]
@@ -6,15 +7,14 @@ use std::fs;
 use std::process::Stdio;
 #[cfg(target_os = "android")]
 use std::{fs, io::Write, path::PathBuf};
-use tauri::{Emitter, Manager};
 #[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(not(target_os = "android"))]
 use tokio::process::Command;
 
 #[cfg(target_os = "android")]
-use super::download_control::is_cancellation_error;
-use super::download_control::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
+use plasma_download::is_cancellation_error;
+use plasma_download::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
 
 #[derive(Clone, Serialize)]
 struct DownloadProgressEvent {
@@ -34,17 +34,11 @@ struct DownloadDoneEvent {
 }
 
 #[cfg(target_os = "android")]
-fn youtube_download_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn youtube_download_dir(app_handle: &AppEnv) -> Result<PathBuf, String> {
     app_handle
-        .path()
+        .paths()
         .download_dir()
-        .or_else(|_| {
-            app_handle
-                .path()
-                .app_data_dir()
-                .map(|dir| dir.join("downloads"))
-        })
-        .map_err(|e| e.to_string())
+        .or_else(|_| Ok(app_handle.paths().data_dir().join("downloads")))
 }
 
 #[cfg(target_os = "android")]
@@ -357,11 +351,8 @@ async fn get_youtube_direct_stream_url(url: &str, format_id: &str) -> Result<Str
 }
 
 #[cfg(not(target_os = "android"))]
-pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let app_dir = app_handle
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?;
+pub async fn ensure_ytdlp(app_handle: &AppEnv) -> Result<std::path::PathBuf, String> {
+    let app_dir = app_handle.paths().local_data_dir().to_path_buf();
     fs::create_dir_all(&app_dir).unwrap_or(());
 
     #[cfg(target_os = "windows")]
@@ -411,14 +402,13 @@ pub async fn ensure_ytdlp(app_handle: &tauri::AppHandle) -> Result<std::path::Pa
     Ok(binary_path)
 }
 
-#[tauri::command]
 #[cfg(not(target_os = "android"))]
 pub async fn get_youtube_stream_url(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     url: String,
     format_id: String,
 ) -> Result<String, String> {
-    let binary_path = ensure_ytdlp(&app_handle).await?;
+    let binary_path = ensure_ytdlp(app_handle).await?;
 
     let format_arg = if format_id == "video" || format_id == "audio" {
         "best"
@@ -457,27 +447,25 @@ pub async fn get_youtube_stream_url(
     Ok(first_url)
 }
 
-#[tauri::command]
 #[cfg(target_os = "android")]
 pub async fn get_youtube_stream_url(
-    _app_handle: tauri::AppHandle,
+    _app_handle: &AppEnv,
     url: String,
     format_id: String,
 ) -> Result<String, String> {
     get_youtube_direct_stream_url(&url, &format_id).await
 }
 
-#[tauri::command]
 #[cfg(not(target_os = "android"))]
 pub async fn download_youtube_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     id: String,
     url: String,
     format_id: String,
     filename: String,
 ) -> Result<(), String> {
     let cancellation = DownloadCancellation::register(id.clone());
-    let binary_path = ensure_ytdlp(&app_handle).await?;
+    let binary_path = ensure_ytdlp(app_handle).await?;
 
     let format_arg = if format_id == "video" || format_id == "audio" {
         "best"
@@ -485,10 +473,7 @@ pub async fn download_youtube_native(
         &format_id
     };
 
-    let download_dir = app_handle
-        .path()
-        .download_dir()
-        .map_err(|e| e.to_string())?;
+    let download_dir = app_handle.paths().download_dir()?;
     let output_path = download_dir.join(&filename);
 
     let mut child = Command::new(&binary_path)
@@ -507,14 +492,14 @@ pub async fn download_youtube_native(
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout).lines();
     let re = Regex::new(r"\[download\]\s+([\d\.]+)%").unwrap();
-    let app_clone = app_handle.clone();
+    let app_clone = (*app_handle).clone();
     let id_clone = id.clone();
 
     tokio::spawn(async move {
         while let Ok(Some(line)) = reader.next_line().await {
             if let Some(caps) = re.captures(&line) {
                 if let Ok(pct) = caps[1].parse::<f64>() {
-                    let _ = app_clone.emit(
+                    app_clone.emit(
                         "youtube-download-progress",
                         DownloadProgressEvent {
                             id: id_clone.clone(),
@@ -542,13 +527,13 @@ pub async fn download_youtube_native(
     };
 
     if status.success() {
-        let _ = app_handle.emit(
+        app_handle.emit(
             "youtube-download-done",
             DownloadDoneEvent { id: id.clone() },
         );
         Ok(())
     } else {
-        let _ = app_handle.emit(
+        app_handle.emit(
             "youtube-download-error",
             DownloadErrorEvent {
                 id,
@@ -559,10 +544,9 @@ pub async fn download_youtube_native(
     }
 }
 
-#[tauri::command]
 #[cfg(target_os = "android")]
 pub async fn download_youtube_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     id: String,
     url: String,
     format_id: String,
@@ -574,7 +558,7 @@ pub async fn download_youtube_native(
             result = get_youtube_direct_stream_url(&url, &format_id) => result?,
             _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
         };
-        let download_dir = youtube_download_dir(&app_handle)?;
+        let download_dir = youtube_download_dir(app_handle)?;
         fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
         let output_path = download_dir.join(filename);
 

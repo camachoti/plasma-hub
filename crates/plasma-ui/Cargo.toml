@@ -1,0 +1,13 @@
+[package]
+name = "plasma-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Plasma Hub UI built with Dioxus (migration pending)"
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+
+[lints]
+workspace = true

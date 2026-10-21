@@ -1,0 +1,12 @@
+[package]
+name = "plasma-testkit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Test fixtures and helpers shared by the Plasma Hub crates"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,8 +1,8 @@
+use plasma_core::AppEnv;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
 
 const MAX_DOWNLOAD_HISTORY_ITEMS: usize = 300;
 const MAX_DOWNLOAD_HISTORY_BYTES: usize = 2 * 1024 * 1024;
@@ -47,16 +47,13 @@ pub struct TopicDownloadState {
     downloaded_at: i64,
 }
 
-fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+fn db_path(app: &AppEnv) -> Result<PathBuf, String> {
+    let dir = app.paths().data_dir();
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     Ok(dir.join("plasma-hub.sqlite3"))
 }
 
-fn connect(app: &AppHandle) -> Result<Connection, String> {
+fn connect(app: &AppEnv) -> Result<Connection, String> {
     let connection = Connection::open(db_path(app)?).map_err(|error| error.to_string())?;
     connection
         .pragma_update(None, "journal_mode", "WAL")
@@ -117,7 +114,7 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
 }
 
 pub fn record_topic_mass_download(
-    app: &AppHandle,
+    app: &AppEnv,
     chat_id: i64,
     topic_id: i64,
     topic_kind: &str,
@@ -135,12 +132,11 @@ pub fn record_topic_mass_download(
     Ok(())
 }
 
-#[tauri::command]
 pub fn topic_download_state_get(
-    app: AppHandle,
+    app: &AppEnv,
     chat_id: String,
 ) -> Result<Vec<TopicDownloadState>, String> {
-    let connection = connect(&app)?;
+    let connection = connect(app)?;
     let mut statement = connection
         .prepare(
             "SELECT topic_id, topic_kind, last_message_id, downloaded_at
@@ -161,9 +157,8 @@ pub fn topic_download_state_get(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-pub fn download_history_get(app: AppHandle) -> Result<Option<String>, String> {
-    let connection = connect(&app)?;
+pub fn download_history_get(app: &AppEnv) -> Result<Option<String>, String> {
+    let connection = connect(app)?;
     match connection.query_row(
         "SELECT raw_json FROM download_history WHERE singleton = 1",
         [],
@@ -175,8 +170,7 @@ pub fn download_history_get(app: AppHandle) -> Result<Option<String>, String> {
     }
 }
 
-#[tauri::command]
-pub fn download_history_save(app: AppHandle, history_json: String) -> Result<(), String> {
+pub fn download_history_save(app: &AppEnv, history_json: String) -> Result<(), String> {
     if history_json.len() > MAX_DOWNLOAD_HISTORY_BYTES {
         return Err("Histórico de downloads excede o limite permitido.".to_string());
     }
@@ -186,7 +180,7 @@ pub fn download_history_save(app: AppHandle, history_json: String) -> Result<(),
         return Err("Histórico de downloads excede o limite de itens.".to_string());
     }
 
-    let connection = connect(&app)?;
+    let connection = connect(app)?;
     connection
         .execute(
             r#"
@@ -254,12 +248,11 @@ fn read_meta(connection: &Connection, cache_key: &str) -> Result<MessageCacheMet
     }
 }
 
-#[tauri::command]
 pub fn telegram_message_cache_get(
-    app: AppHandle,
+    app: &AppEnv,
     cache_key: String,
 ) -> Result<MessageCacheGetResult, String> {
-    let connection = connect(&app)?;
+    let connection = connect(app)?;
     let meta = read_meta(&connection, &cache_key)?;
     let mut statement = connection
         .prepare(
@@ -286,23 +279,21 @@ pub fn telegram_message_cache_get(
     })
 }
 
-#[tauri::command]
 pub fn telegram_message_cache_meta(
-    app: AppHandle,
+    app: &AppEnv,
     cache_key: String,
 ) -> Result<MessageCacheMeta, String> {
-    let connection = connect(&app)?;
+    let connection = connect(app)?;
     read_meta(&connection, &cache_key)
 }
 
-#[tauri::command]
 pub fn telegram_message_cache_save(
-    app: AppHandle,
+    app: &AppEnv,
     cache_key: String,
     messages: Vec<Value>,
     meta: Option<MessageCacheMeta>,
 ) -> Result<MessageCacheSaveResult, String> {
-    let mut connection = connect(&app)?;
+    let mut connection = connect(app)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -391,13 +382,12 @@ pub fn telegram_message_cache_save(
     })
 }
 
-#[tauri::command]
 pub fn telegram_message_cache_shared_media(
-    app: AppHandle,
+    app: &AppEnv,
     cache_key: String,
     limit: i64,
 ) -> Result<SharedMediaCacheResult, String> {
-    let connection = connect(&app)?;
+    let connection = connect(app)?;
     let mut statement = connection
         .prepare(
             r#"

@@ -1,3 +1,4 @@
+use plasma_core::AppEnv;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -8,12 +9,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(debug_assertions)]
 use std::time::Instant;
-use tauri::{
-    http, AppHandle, Emitter, Manager, Runtime, State, UriSchemeContext, UriSchemeResponder,
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tdlib_rs::{
     enums::{
         AuthorizationState, ChatList, ChatMemberStatus, ChatType, ConnectionState, InputFile,
@@ -63,7 +61,7 @@ pub struct TdlibStatus {
     error: Option<String>,
 }
 
-type TdlibCommandResult = Result<TdlibStatus, String>;
+pub type TdlibCommandResult = Result<TdlibStatus, String>;
 
 #[derive(Serialize)]
 pub struct TdlibUserInfo {
@@ -466,8 +464,8 @@ fn existing_faststart_playback_file(media_dir: &Path, mime_type: Option<&str>) -
     None
 }
 
-fn ensure_native_playback_file<R: Runtime>(
-    app: &AppHandle<R>,
+fn ensure_native_playback_file(
+    app: &AppEnv,
     meta: &NativeMediaAssetMeta,
 ) -> Result<(String, Option<String>), String> {
     let Some(source_path) = meta.native_file_path.as_ref() else {
@@ -545,7 +543,7 @@ fn parse_range_header(range_header: &str, len: u64) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
-fn media_protocol_response(
+pub fn media_protocol_response(
     status: http::StatusCode,
     body: impl Into<Cow<'static, [u8]>>,
     content_type: Option<&str>,
@@ -565,7 +563,7 @@ fn media_protocol_response(
     })
 }
 
-fn media_protocol_error(
+pub fn media_protocol_error(
     status: http::StatusCode,
     message: &str,
 ) -> http::Response<Cow<'static, [u8]>> {
@@ -576,8 +574,8 @@ fn media_protocol_error(
     )
 }
 
-fn get_plasma_media_response<R: Runtime>(
-    app: &AppHandle<R>,
+pub fn get_plasma_media_response(
+    app: &AppEnv,
     request: http::Request<Vec<u8>>,
 ) -> Result<http::Response<Cow<'static, [u8]>>, String> {
     let Some((chat_id, message_id)) = parse_plasma_media_path(request.uri().path()) else {
@@ -682,21 +680,6 @@ fn get_plasma_media_response<R: Runtime>(
         .map_err(|error| error.to_string())
 }
 
-pub fn plasma_media_protocol<R: Runtime>(
-    ctx: UriSchemeContext<'_, R>,
-    request: http::Request<Vec<u8>>,
-    responder: UriSchemeResponder,
-) {
-    let app = ctx.app_handle().clone();
-    std::thread::spawn(move || {
-        let response = get_plasma_media_response(&app, request).unwrap_or_else(|error| {
-            println!("[plasma-media] internal error={}", error);
-            media_protocol_error(http::StatusCode::INTERNAL_SERVER_ERROR, &error)
-        });
-        responder.respond(response);
-    });
-}
-
 fn sanitize_filename(value: &str) -> String {
     let name: String = value
         .chars()
@@ -752,35 +735,25 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
-fn native_media_dir<R: Runtime>(
-    app: &AppHandle<R>,
-    chat_id: i64,
-    message_id: i64,
-) -> Result<PathBuf, String> {
+fn native_media_dir(app: &AppEnv, chat_id: i64, message_id: i64) -> Result<PathBuf, String> {
     Ok(app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?
+        .paths()
+        .cache_dir()
         .join("plasma-media")
         .join("telegram")
         .join(chat_id.to_string())
         .join(message_id.to_string()))
 }
 
-fn native_media_root_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+fn native_media_root_dir(app: &AppEnv) -> Result<PathBuf, String> {
     Ok(app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?
+        .paths()
+        .cache_dir()
         .join("plasma-media")
         .join("telegram"))
 }
 
-fn native_media_meta_path(
-    app: &AppHandle<impl Runtime>,
-    chat_id: i64,
-    message_id: i64,
-) -> Result<PathBuf, String> {
+fn native_media_meta_path(app: &AppEnv, chat_id: i64, message_id: i64) -> Result<PathBuf, String> {
     Ok(native_media_dir(app, chat_id, message_id)?.join("meta.json"))
 }
 
@@ -803,7 +776,7 @@ fn empty_native_media_meta(chat_id: i64, message_id: i64) -> NativeMediaAssetMet
 }
 
 fn read_native_media_meta(
-    app: &AppHandle<impl Runtime>,
+    app: &AppEnv,
     chat_id: i64,
     message_id: i64,
 ) -> Result<NativeMediaAssetMeta, String> {
@@ -816,10 +789,7 @@ fn read_native_media_meta(
     serde_json::from_str(&raw).map_err(|error| error.to_string())
 }
 
-fn write_native_media_meta(
-    app: &AppHandle<impl Runtime>,
-    meta: &NativeMediaAssetMeta,
-) -> Result<(), String> {
+fn write_native_media_meta(app: &AppEnv, meta: &NativeMediaAssetMeta) -> Result<(), String> {
     let meta_path = native_media_meta_path(app, meta.chat_id, meta.message_id)?;
     if let Some(parent) = meta_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -835,7 +805,7 @@ fn write_native_media_meta(
 }
 
 fn complete_native_media_meta(
-    app: &AppHandle<impl Runtime>,
+    app: &AppEnv,
     chat_id: i64,
     message_id: i64,
 ) -> Result<Option<NativeMediaAssetMeta>, String> {
@@ -922,7 +892,7 @@ fn cleanup_stale_native_partials_in_dir(path: &Path, max_age: Duration) -> usize
     removed
 }
 
-fn cleanup_stale_native_partials(app: &AppHandle) -> usize {
+fn cleanup_stale_native_partials(app: &AppEnv) -> usize {
     let Ok(root) = native_media_root_dir(app) else {
         return 0;
     };
@@ -956,7 +926,7 @@ fn native_media_meta_from_path(path: &Path) -> Option<NativeMediaAssetMeta> {
 }
 
 fn collect_native_media_items(
-    app: &AppHandle,
+    app: &AppEnv,
 ) -> Result<Vec<(PathBuf, NativeMediaAssetMeta, i64)>, String> {
     let root = native_media_root_dir(app)?;
     if !root.exists() {
@@ -993,7 +963,7 @@ fn collect_native_media_items(
     Ok(items)
 }
 
-fn native_media_cache_stats(app: &AppHandle) -> NativeMediaCacheStats {
+fn native_media_cache_stats(app: &AppEnv) -> NativeMediaCacheStats {
     let _ = cleanup_stale_native_partials(app);
     match collect_native_media_items(app) {
         Ok(items) => NativeMediaCacheStats {
@@ -1012,7 +982,7 @@ fn native_media_cache_stats(app: &AppHandle) -> NativeMediaCacheStats {
 }
 
 fn evict_native_media_cache(
-    app: &AppHandle,
+    app: &AppEnv,
     max_cache_size: i64,
 ) -> Result<NativeMediaCacheStats, String> {
     let _ = cleanup_stale_native_partials(app);
@@ -1735,7 +1705,7 @@ fn tdlib_user_to_contact_chat(user: tdlib_rs::types::User) -> TdlibChatInfo {
 }
 
 fn emit_mass_progress(
-    app: &AppHandle,
+    app: &AppEnv,
     chat_id: i64,
     total: usize,
     downloaded: f64,
@@ -1743,7 +1713,7 @@ fn emit_mass_progress(
     is_scanning: bool,
     items: &[TdlibDownloadItem],
 ) {
-    let _ = app.emit(
+    app.emit(
         "tdlib-download-progress",
         TdlibDownloadProgress {
             chat_id,
@@ -1756,8 +1726,8 @@ fn emit_mass_progress(
     );
 }
 
-fn emit_new_message(app: &AppHandle, chat_id: i64, message: TdlibMessageInfo) {
-    let _ = app.emit(
+fn emit_new_message(app: &AppEnv, chat_id: i64, message: TdlibMessageInfo) {
+    app.emit(
         "tdlib-new-message",
         TdlibNewMessageEvent {
             chat_id,
@@ -1768,8 +1738,8 @@ fn emit_new_message(app: &AppHandle, chat_id: i64, message: TdlibMessageInfo) {
     );
 }
 
-fn emit_deleted_messages(app: &AppHandle, chat_id: i64, message_ids: Vec<i64>) {
-    let _ = app.emit(
+fn emit_deleted_messages(app: &AppEnv, chat_id: i64, message_ids: Vec<i64>) {
+    app.emit(
         "tdlib-messages-deleted",
         TdlibDeletedMessagesEvent {
             chat_id,
@@ -1778,13 +1748,13 @@ fn emit_deleted_messages(app: &AppHandle, chat_id: i64, message_ids: Vec<i64>) {
     );
 }
 
-async fn set_state(inner: &Arc<Mutex<TdlibInner>>, app: &AppHandle, state: AuthorizationState) {
+async fn set_state(inner: &Arc<Mutex<TdlibInner>>, app: &AppEnv, state: AuthorizationState) {
     let label = state_label(&state).to_string();
     {
         let mut guard = inner.lock().await;
         guard.auth_state = label.clone();
     }
-    let _ = app.emit("tdlib-auth-state", &label);
+    app.emit("tdlib-auth-state", &label);
 }
 
 fn connection_state_label(state: &ConnectionState) -> &'static str {
@@ -1797,7 +1767,7 @@ fn connection_state_label(state: &ConnectionState) -> &'static str {
     }
 }
 
-async fn client_id_or_status(state: &State<'_, TdlibManager>) -> Result<i32, TdlibStatus> {
+async fn client_id_or_status(state: &TdlibManager) -> Result<i32, TdlibStatus> {
     let client_id = {
         let guard = state.inner.lock().await;
         guard.client_id
@@ -1811,7 +1781,7 @@ async fn client_id_or_status(state: &State<'_, TdlibManager>) -> Result<i32, Tdl
     })
 }
 
-async fn ready_client_id(state: &State<'_, TdlibManager>) -> Result<i32, TdlibStatus> {
+async fn ready_client_id(state: &TdlibManager) -> Result<i32, TdlibStatus> {
     let client_id = client_id_or_status(state).await?;
     match functions::get_authorization_state(client_id).await {
         Ok(AuthorizationState::Ready) => Ok(client_id),
@@ -1825,13 +1795,13 @@ async fn ready_client_id(state: &State<'_, TdlibManager>) -> Result<i32, TdlibSt
     }
 }
 
-fn start_receiver(app: AppHandle, manager: &TdlibManager) {
+fn start_receiver(app: AppEnv, manager: &TdlibManager) {
     if manager.receiver_started.swap(true, Ordering::AcqRel) {
         return;
     }
 
     let inner = manager.inner.clone();
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         loop {
             let result = tokio::task::spawn_blocking(tdlib_rs::receive).await;
             match result {
@@ -1839,7 +1809,7 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                     set_state(&inner, &app, update.authorization_state).await;
                 }
                 Ok(Some((Update::ConnectionState(update), _client_id))) => {
-                    let _ = app.emit(
+                    app.emit(
                         "tdlib-connection-state",
                         connection_state_label(&update.state),
                     );
@@ -1856,7 +1826,7 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                         emit_new_message(&app, chat_id, message);
                     } else {
                         let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
+                        tokio::spawn(async move {
                             let sender_name = tokio::time::timeout(
                                 Duration::from_millis(800),
                                 resolve_sender_name(client_id, &sender_id),
@@ -1893,7 +1863,7 @@ fn start_receiver(app: AppHandle, manager: &TdlibManager) {
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
                 Err(error) => {
-                    let _ = app.emit("tdlib-error", format!("TDLib receiver failed: {error}"));
+                    app.emit("tdlib-error", format!("TDLib receiver failed: {error}"));
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
             }
@@ -2139,7 +2109,7 @@ fn generate_video_thumbnail_to_cache(source_path: &str, destination: &Path) -> O
 }
 
 async fn download_avatar_to_cache(
-    app: &AppHandle,
+    app: &AppEnv,
     client_id: i32,
     chat_id: i64,
     photo: Option<File>,
@@ -2150,9 +2120,8 @@ async fn download_avatar_to_cache(
     }
 
     let avatar_dir = app
-        .path()
-        .app_cache_dir()
-        .ok()?
+        .paths()
+        .cache_dir()
         .join("plasma-media")
         .join("telegram-avatars");
     if std::fs::create_dir_all(&avatar_dir).is_err() {
@@ -2199,7 +2168,7 @@ async fn resolve_message_media(
 }
 
 fn emit_native_media_progress(
-    app: &AppHandle,
+    app: &AppEnv,
     chat_id: i64,
     message_id: i64,
     stage: &str,
@@ -2208,7 +2177,7 @@ fn emit_native_media_progress(
 ) {
     let downloaded_bytes = total_bytes
         .map(|total| ((total.max(0) as f64) * (f64::from(progress) / 100.0)).round() as i64);
-    let _ = app.emit(
+    app.emit(
         "telegram-media-progress",
         NativeMediaProgress {
             chat_id,
@@ -2258,27 +2227,16 @@ async fn configure_if_needed(inner: &Arc<Mutex<TdlibInner>>) -> Result<(), tdlib
     Ok(())
 }
 
-#[tauri::command]
 pub async fn tdlib_init(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     api_id: i32,
     api_hash: String,
 ) -> TdlibCommandResult {
-    start_receiver(app.clone(), &state);
+    start_receiver(app.clone(), state);
     let _init_guard = state.init_lock.lock().await;
 
-    let app_data_dir = match app.path().app_data_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            return Ok(TdlibStatus {
-                success: false,
-                ready: false,
-                state: "error".to_string(),
-                error: Some(error.to_string()),
-            });
-        }
-    };
+    let app_data_dir = app.paths().data_dir().to_path_buf();
 
     let database_directory = app_data_dir.join("tdlib").join("database");
     let files_directory = app_data_dir.join("tdlib").join("files");
@@ -2332,8 +2290,7 @@ pub async fn tdlib_init(
     tdlib_status(state).await
 }
 
-#[tauri::command]
-pub async fn tdlib_status(state: State<'_, TdlibManager>) -> TdlibCommandResult {
+pub async fn tdlib_status(state: &TdlibManager) -> TdlibCommandResult {
     let client_id = {
         let guard = state.inner.lock().await;
         guard.client_id
@@ -2376,11 +2333,7 @@ pub async fn tdlib_status(state: State<'_, TdlibManager>) -> TdlibCommandResult 
     }
 }
 
-#[tauri::command]
-pub async fn tdlib_set_phone(
-    state: State<'_, TdlibManager>,
-    phone_number: String,
-) -> TdlibCommandResult {
+pub async fn tdlib_set_phone(state: &TdlibManager, phone_number: String) -> TdlibCommandResult {
     let client_id = {
         let guard = state.inner.lock().await;
         guard.client_id
@@ -2401,8 +2354,7 @@ pub async fn tdlib_set_phone(
     }
 }
 
-#[tauri::command]
-pub async fn tdlib_check_code(state: State<'_, TdlibManager>, code: String) -> TdlibCommandResult {
+pub async fn tdlib_check_code(state: &TdlibManager, code: String) -> TdlibCommandResult {
     let client_id = {
         let guard = state.inner.lock().await;
         guard.client_id
@@ -2423,11 +2375,7 @@ pub async fn tdlib_check_code(state: State<'_, TdlibManager>, code: String) -> T
     }
 }
 
-#[tauri::command]
-pub async fn tdlib_check_password(
-    state: State<'_, TdlibManager>,
-    password: String,
-) -> TdlibCommandResult {
+pub async fn tdlib_check_password(state: &TdlibManager, password: String) -> TdlibCommandResult {
     let client_id = {
         let guard = state.inner.lock().await;
         guard.client_id
@@ -2448,9 +2396,8 @@ pub async fn tdlib_check_password(
     }
 }
 
-#[tauri::command]
-pub async fn tdlib_get_me(state: State<'_, TdlibManager>) -> Result<TdlibUserInfo, String> {
-    let client_id = match ready_client_id(&state).await {
+pub async fn tdlib_get_me(state: &TdlibManager) -> Result<TdlibUserInfo, String> {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibUserInfo {
@@ -2484,14 +2431,13 @@ pub async fn tdlib_get_me(state: State<'_, TdlibManager>) -> Result<TdlibUserInf
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_get_chats(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     limit: Option<i32>,
 ) -> Result<TdlibChatsResult, String> {
     #[cfg(debug_assertions)]
     let started_at = Instant::now();
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibChatsResult {
@@ -2579,8 +2525,7 @@ pub async fn tdlib_get_chats(
                     contact_dialogs.push(tdlib_user_to_contact_chat(user));
                 }
             }
-            contact_dialogs
-                .sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+            contact_dialogs.sort_by_key(|left| left.title.to_lowercase());
             dialogs.extend(contact_dialogs);
         }
     }
@@ -2604,9 +2549,8 @@ pub async fn tdlib_get_chats(
     })
 }
 
-#[tauri::command]
-pub async fn tdlib_read_chat(state: State<'_, TdlibManager>, chat_id: i64) -> Result<(), String> {
-    let client_id = ready_client_id(&state)
+pub async fn tdlib_read_chat(state: &TdlibManager, chat_id: i64) -> Result<(), String> {
+    let client_id = ready_client_id(state)
         .await
         .map_err(|status| status.error.unwrap_or(status.state))?;
     let tdlib_rs::enums::Chat::Chat(chat) = functions::get_chat(chat_id, client_id)
@@ -2628,9 +2572,8 @@ pub async fn tdlib_read_chat(state: State<'_, TdlibManager>, chat_id: i64) -> Re
     Ok(())
 }
 
-#[tauri::command]
-pub async fn tdlib_read_all_chats(state: State<'_, TdlibManager>) -> Result<(), String> {
-    let client_id = ready_client_id(&state)
+pub async fn tdlib_read_all_chats(state: &TdlibManager) -> Result<(), String> {
+    let client_id = ready_client_id(state)
         .await
         .map_err(|status| status.error.unwrap_or(status.state))?;
     functions::read_chat_list(ChatList::Main, client_id)
@@ -2642,9 +2585,8 @@ pub async fn tdlib_read_all_chats(state: State<'_, TdlibManager>) -> Result<(), 
     Ok(())
 }
 
-#[tauri::command]
 pub async fn tdlib_get_messages(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     limit: Option<i32>,
     offset_id: Option<i64>,
@@ -2652,7 +2594,7 @@ pub async fn tdlib_get_messages(
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibMessagesResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibMessagesResult {
@@ -2668,10 +2610,11 @@ pub async fn tdlib_get_messages(
     let history_offset = offset.unwrap_or(0).clamp(-99, 0);
     let requested_limit = limit.unwrap_or(50).clamp((-history_offset).max(1), 100);
     let mut from_message_id = offset_id.map(tdlib_message_id_from_app_id).unwrap_or(0);
-    let forum_topic_id = if topic_id.is_some() && topic_kind.as_deref() != Some("thread") {
-        Some(i32::try_from(topic_id.unwrap()).map_err(|_| "ID de tópico inválido")?)
-    } else {
-        None
+    let forum_topic_id = match topic_id {
+        Some(topic_id) if topic_kind.as_deref() != Some("thread") => {
+            Some(i32::try_from(topic_id).map_err(|_| "ID de tópico inválido")?)
+        }
+        _ => None,
     };
     let mut seen_message_ids = HashSet::new();
     // A página anterior já contém a âncora usada para buscar mensagens antigas.
@@ -2803,9 +2746,8 @@ pub async fn tdlib_get_messages(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_search_chat_messages(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     query: String,
     limit: Option<i32>,
@@ -2813,7 +2755,7 @@ pub async fn tdlib_search_chat_messages(
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibSearchMessagesResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibSearchMessagesResult {
@@ -2897,12 +2839,11 @@ pub async fn tdlib_search_chat_messages(
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_get_chat_capabilities(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
 ) -> Result<TdlibChatCapabilitiesResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibChatCapabilitiesResult {
@@ -2966,13 +2907,12 @@ pub async fn tdlib_get_chat_capabilities(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_get_shared_media(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     limit: Option<i32>,
 ) -> Result<TdlibSharedMediaResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibSharedMediaResult {
@@ -3049,14 +2989,13 @@ pub async fn tdlib_get_shared_media(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_search_user_media(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     user_id: String,
     limit: Option<i32>,
 ) -> Result<TdlibSharedMediaResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibSharedMediaResult {
@@ -3141,16 +3080,15 @@ pub async fn tdlib_search_user_media(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_send_message(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     text: String,
     reply_to_id: Option<i64>,
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibSendResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibSendResult {
@@ -3199,9 +3137,8 @@ pub async fn tdlib_send_message(
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_send_media(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     file_path: String,
     caption: Option<String>,
@@ -3209,7 +3146,7 @@ pub async fn tdlib_send_media(
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibSendResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibSendResult {
@@ -3252,16 +3189,15 @@ pub async fn tdlib_send_media(
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_forward_message(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
     to_chat_id: i64,
     topic_id: Option<i64>,
     topic_kind: Option<String>,
 ) -> Result<TdlibForwardResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibForwardResult {
@@ -3302,13 +3238,12 @@ pub async fn tdlib_forward_message(
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_get_forum_topics(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     limit: Option<i32>,
 ) -> Result<TdlibForumTopicsResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibForumTopicsResult {
@@ -3428,15 +3363,14 @@ pub async fn tdlib_get_forum_topics(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_topic_has_new_media(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     topic_id: i64,
     topic_kind: Option<String>,
     after_message_id: i64,
 ) -> Result<bool, String> {
-    let client_id = ready_client_id(&state)
+    let client_id = ready_client_id(state)
         .await
         .map_err(|status| status.error.unwrap_or(status.state))?;
     let baseline_id = tdlib_message_id_from_app_id(after_message_id);
@@ -3493,15 +3427,15 @@ pub async fn tdlib_topic_has_new_media(
 }
 
 async fn telegram_media_ensure_cached_inner(
-    app: AppHandle,
+    app: &AppEnv,
     manager: &TdlibManager,
     client_id: i32,
     chat_id: i64,
     message_id: i64,
     priority: Option<String>,
 ) -> NativeMediaAssetMeta {
-    let _ = cleanup_stale_native_partials(&app);
-    if let Ok(Some(meta)) = complete_native_media_meta(&app, chat_id, message_id) {
+    let _ = cleanup_stale_native_partials(app);
+    if let Ok(Some(meta)) = complete_native_media_meta(app, chat_id, message_id) {
         return meta;
     }
 
@@ -3510,7 +3444,7 @@ async fn telegram_media_ensure_cached_inner(
     let abort_flag = native_media_abort_flag(manager, chat_id, message_id).await;
     abort_flag.store(false, Ordering::SeqCst);
 
-    if let Ok(Some(meta)) = complete_native_media_meta(&app, chat_id, message_id) {
+    if let Ok(Some(meta)) = complete_native_media_meta(app, chat_id, message_id) {
         return meta;
     }
 
@@ -3520,8 +3454,8 @@ async fn telegram_media_ensure_cached_inner(
             let mut meta = empty_native_media_meta(chat_id, message_id);
             meta.state = "failed".to_string();
             meta.error = Some(error);
-            let _ = write_native_media_meta(&app, &meta);
-            let _ = app.emit("telegram-media-error", &meta);
+            let _ = write_native_media_meta(app, &meta);
+            app.emit("telegram-media-error", &meta);
             return meta;
         }
     };
@@ -3529,13 +3463,13 @@ async fn telegram_media_ensure_cached_inner(
     let file_name = media.file_name.clone();
     let mime_type = media.mime_type.clone();
     let total_bytes = Some(effective_file_size(&media.file));
-    let media_dir = match native_media_dir(&app, chat_id, message_id) {
+    let media_dir = match native_media_dir(app, chat_id, message_id) {
         Ok(dir) => dir,
         Err(error) => {
             let mut meta = empty_native_media_meta(chat_id, message_id);
             meta.state = "failed".to_string();
             meta.error = Some(error);
-            let _ = app.emit("telegram-media-error", &meta);
+            app.emit("telegram-media-error", &meta);
             return meta;
         }
     };
@@ -3544,7 +3478,7 @@ async fn telegram_media_ensure_cached_inner(
         let mut meta = empty_native_media_meta(chat_id, message_id);
         meta.state = "failed".to_string();
         meta.error = Some(error.to_string());
-        let _ = app.emit("telegram-media-error", &meta);
+        app.emit("telegram-media-error", &meta);
         return meta;
     }
 
@@ -3567,8 +3501,8 @@ async fn telegram_media_ensure_cached_inner(
         updated_at: now_millis(),
         error: None,
     };
-    let _ = write_native_media_meta(&app, &meta);
-    emit_native_media_progress(&app, chat_id, message_id, "downloading", 0, total_bytes);
+    let _ = write_native_media_meta(app, &meta);
+    emit_native_media_progress(app, chat_id, message_id, "downloading", 0, total_bytes);
 
     let priority_label = priority.unwrap_or_else(|| "user".to_string());
     let download_result = download_media_file_to_path(
@@ -3583,7 +3517,7 @@ async fn telegram_media_ensure_cached_inner(
             } else {
                 "downloading"
             };
-            emit_native_media_progress(&app, chat_id, message_id, stage, percent, total_bytes);
+            emit_native_media_progress(app, chat_id, message_id, stage, percent, total_bytes);
         },
         || abort_flag.load(Ordering::SeqCst) || manager.download_aborted.load(Ordering::SeqCst),
     )
@@ -3598,9 +3532,9 @@ async fn telegram_media_ensure_cached_inner(
             meta.completed_at = Some(now_millis());
             meta.updated_at = now_millis();
             meta.error = None;
-            let _ = write_native_media_meta(&app, &meta);
-            emit_native_media_progress(&app, chat_id, message_id, "ready", 100, Some(size));
-            let _ = app.emit("telegram-media-ready", &meta);
+            let _ = write_native_media_meta(app, &meta);
+            emit_native_media_progress(app, chat_id, message_id, "ready", 100, Some(size));
+            app.emit("telegram-media-ready", &meta);
             meta
         }
         Err(error) => {
@@ -3613,34 +3547,32 @@ async fn telegram_media_ensure_cached_inner(
                 meta.error = Some(error);
             }
             meta.updated_at = now_millis();
-            let _ = write_native_media_meta(&app, &meta);
+            let _ = write_native_media_meta(app, &meta);
             if meta.state == "failed" {
-                let _ = app.emit("telegram-media-error", &meta);
+                app.emit("telegram-media-error", &meta);
             }
             meta
         }
     }
 }
 
-#[tauri::command]
 pub async fn telegram_media_get_meta(
-    app: AppHandle,
+    app: &AppEnv,
     chat_id: i64,
     message_id: i64,
 ) -> Result<NativeMediaAssetMeta, String> {
-    read_native_media_meta(&app, chat_id, message_id)
+    read_native_media_meta(app, chat_id, message_id)
 }
 
-#[tauri::command]
 pub async fn telegram_media_ensure_cached(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
     priority: Option<String>,
 ) -> Result<NativeMediaAssetMeta, String> {
     state.download_aborted.store(false, Ordering::SeqCst);
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             let mut meta = empty_native_media_meta(chat_id, message_id);
@@ -3651,21 +3583,20 @@ pub async fn telegram_media_ensure_cached(
     };
 
     Ok(
-        telegram_media_ensure_cached_inner(app, &state, client_id, chat_id, message_id, priority)
+        telegram_media_ensure_cached_inner(app, state, client_id, chat_id, message_id, priority)
             .await,
     )
 }
 
-#[tauri::command]
 pub async fn telegram_media_prepare_playback(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
     mode: Option<String>,
 ) -> Result<NativePlaybackSource, String> {
-    if let Ok(Some(meta)) = complete_native_media_meta(&app, chat_id, message_id) {
-        let (playback_path, playback_mime_type) = ensure_native_playback_file(&app, &meta)?;
+    if let Ok(Some(meta)) = complete_native_media_meta(app, chat_id, message_id) {
+        let (playback_path, playback_mime_type) = ensure_native_playback_file(app, &meta)?;
         return Ok(NativePlaybackSource {
             success: true,
             kind: "file".to_string(),
@@ -3687,10 +3618,9 @@ pub async fn telegram_media_prepare_playback(
             "user".to_string()
         }
     });
-    let meta =
-        telegram_media_ensure_cached(app.clone(), state, chat_id, message_id, priority).await?;
+    let meta = telegram_media_ensure_cached(app, state, chat_id, message_id, priority).await?;
     let playback = if meta.success {
-        ensure_native_playback_file(&app, &meta).ok()
+        ensure_native_playback_file(app, &meta).ok()
     } else {
         None
     };
@@ -3719,23 +3649,17 @@ pub async fn telegram_media_prepare_playback(
     })
 }
 
-#[tauri::command]
 pub async fn telegram_media_save(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
     destination_path: Option<String>,
 ) -> Result<NativeSavedMedia, String> {
-    let save_abort_flag = native_media_abort_flag(&state, chat_id, message_id).await;
-    let meta = telegram_media_ensure_cached(
-        app.clone(),
-        state,
-        chat_id,
-        message_id,
-        Some("user".to_string()),
-    )
-    .await?;
+    let save_abort_flag = native_media_abort_flag(state, chat_id, message_id).await;
+    let meta =
+        telegram_media_ensure_cached(app, state, chat_id, message_id, Some("user".to_string()))
+            .await?;
 
     if !meta.success {
         let canceled = meta.state == "partial" && meta.error.is_none();
@@ -3770,11 +3694,7 @@ pub async fn telegram_media_save(
         .unwrap_or_else(|| sanitize_filename(&format!("media_{message_id}")));
     let destination = match destination_path {
         Some(path) if !path.trim().is_empty() => PathBuf::from(path),
-        _ => app
-            .path()
-            .download_dir()
-            .map_err(|error| error.to_string())?
-            .join(&file_name),
+        _ => app.paths().download_dir()?.join(&file_name),
     };
 
     if let Some(parent) = destination.parent() {
@@ -3792,7 +3712,7 @@ pub async fn telegram_media_save(
                 .map(|metadata| metadata.len() as i64)
         });
         let mut on_progress = |percent, stage| {
-            emit_native_media_progress(&app, chat_id, message_id, stage, percent, total_bytes);
+            emit_native_media_progress(app, chat_id, message_id, stage, percent, total_bytes);
         };
         copy_file_with_progress(
             Path::new(&source_path),
@@ -3801,9 +3721,8 @@ pub async fn telegram_media_save(
             &mut on_progress,
             &|| save_abort_flag.load(Ordering::SeqCst),
         )
-        .map_err(|error| {
+        .inspect_err(|_error| {
             let _ = std::fs::remove_file(&tmp_path);
-            error
         })?;
         std::fs::rename(&tmp_path, &destination).map_err(|error| {
             let _ = std::fs::remove_file(&tmp_path);
@@ -3821,47 +3740,42 @@ pub async fn telegram_media_save(
     })
 }
 
-#[tauri::command]
 pub async fn telegram_media_cancel(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
 ) -> Result<bool, String> {
-    let abort_flag = native_media_abort_flag(&state, chat_id, message_id).await;
+    let abort_flag = native_media_abort_flag(state, chat_id, message_id).await;
     abort_flag.store(true, Ordering::SeqCst);
     Ok(true)
 }
 
-#[tauri::command]
-pub async fn telegram_media_cache_stats(app: AppHandle) -> Result<NativeMediaCacheStats, String> {
-    Ok(native_media_cache_stats(&app))
+pub async fn telegram_media_cache_stats(app: &AppEnv) -> Result<NativeMediaCacheStats, String> {
+    Ok(native_media_cache_stats(app))
 }
 
-#[tauri::command]
-pub async fn telegram_media_clear_cache(app: AppHandle) -> Result<NativeMediaCacheStats, String> {
-    let root = native_media_root_dir(&app)?;
+pub async fn telegram_media_clear_cache(app: &AppEnv) -> Result<NativeMediaCacheStats, String> {
+    let root = native_media_root_dir(app)?;
     if root.exists() {
         std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     }
-    Ok(native_media_cache_stats(&app))
+    Ok(native_media_cache_stats(app))
 }
 
-#[tauri::command]
 pub async fn telegram_media_evict_cache(
-    app: AppHandle,
+    app: &AppEnv,
     max_cache_size: i64,
 ) -> Result<NativeMediaCacheStats, String> {
-    evict_native_media_cache(&app, max_cache_size)
+    evict_native_media_cache(app, max_cache_size)
 }
 
-#[tauri::command]
 pub async fn tdlib_download_message_media(
-    state: State<'_, TdlibManager>,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
     folder_path: String,
 ) -> Result<TdlibDownloadResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibDownloadResult {
@@ -3945,14 +3859,13 @@ pub async fn tdlib_download_message_media(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_cache_message_media(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
 ) -> Result<TdlibDownloadResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibDownloadResult {
@@ -4006,10 +3919,7 @@ pub async fn tdlib_cache_message_media(
     let media_file = media.file;
     let file_name = media.file_name;
     let mime_type = media.mime_type;
-    let app_cache_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?;
+    let app_cache_dir = app.paths().cache_dir();
     let destination_dir = app_cache_dir
         .join("telegram-media-cache")
         .join(chat_id.to_string());
@@ -4044,14 +3954,13 @@ pub async fn tdlib_cache_message_media(
     })
 }
 
-#[tauri::command]
 pub async fn tdlib_download_message_thumbnail(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
 ) -> Result<TdlibThumbnailResult, String> {
-    if let Ok(meta) = read_native_media_meta(&app, chat_id, message_id) {
+    if let Ok(meta) = read_native_media_meta(app, chat_id, message_id) {
         if let Some(path) = meta.thumbnail_path {
             if Path::new(&path).exists() {
                 return Ok(TdlibThumbnailResult {
@@ -4063,7 +3972,7 @@ pub async fn tdlib_download_message_thumbnail(
         }
     }
 
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibThumbnailResult {
@@ -4104,7 +4013,7 @@ pub async fn tdlib_download_message_thumbnail(
     .filter(|path| !path.is_empty());
     let thumbnail = message_thumbnail_file(message.content);
 
-    let media_dir = match native_media_dir(&app, chat_id, message_id) {
+    let media_dir = match native_media_dir(app, chat_id, message_id) {
         Ok(dir) => dir,
         Err(error) => {
             return Ok(TdlibThumbnailResult {
@@ -4126,11 +4035,11 @@ pub async fn tdlib_download_message_thumbnail(
 
     match thumbnail_path {
         Some(path) => {
-            let mut meta = read_native_media_meta(&app, chat_id, message_id)
+            let mut meta = read_native_media_meta(app, chat_id, message_id)
                 .unwrap_or_else(|_| empty_native_media_meta(chat_id, message_id));
             meta.thumbnail_path = Some(path.clone());
             meta.updated_at = now_millis();
-            let _ = write_native_media_meta(&app, &meta);
+            let _ = write_native_media_meta(app, &meta);
             Ok(TdlibThumbnailResult {
                 success: true,
                 file_path: Some(path),
@@ -4151,16 +4060,14 @@ pub async fn tdlib_download_message_thumbnail(
     }
 }
 
-#[tauri::command]
 pub async fn tdlib_download_chat_avatar(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     chat_id: i64,
 ) -> Result<TdlibAvatarResult, String> {
     let avatar_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?
+        .paths()
+        .cache_dir()
         .join("plasma-media")
         .join("telegram-avatars");
     if let Ok(entries) = std::fs::read_dir(&avatar_dir) {
@@ -4181,7 +4088,7 @@ pub async fn tdlib_download_chat_avatar(
         }
     }
 
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibAvatarResult {
@@ -4213,9 +4120,9 @@ pub async fn tdlib_download_chat_avatar(
 
     let small = photo.small;
     let big = photo.big;
-    let avatar_path = match download_avatar_to_cache(&app, client_id, chat_id, Some(small)).await {
+    let avatar_path = match download_avatar_to_cache(app, client_id, chat_id, Some(small)).await {
         Some(path) => Some(path),
-        None => download_avatar_to_cache(&app, client_id, chat_id, Some(big)).await,
+        None => download_avatar_to_cache(app, client_id, chat_id, Some(big)).await,
     };
 
     match avatar_path {
@@ -4235,19 +4142,17 @@ pub async fn tdlib_download_chat_avatar(
     }
 }
 
-#[tauri::command]
-pub async fn tdlib_stop_download(state: State<'_, TdlibManager>) -> Result<(), String> {
+pub async fn tdlib_stop_download(state: &TdlibManager) -> Result<(), String> {
     state.download_aborted.store(true, Ordering::Release);
     Ok(())
 }
 
-#[tauri::command]
 pub async fn tdlib_start_mass_download(
-    app: AppHandle,
-    state: State<'_, TdlibManager>,
+    app: &AppEnv,
+    state: &TdlibManager,
     request: TdlibMassDownloadRequest,
 ) -> Result<TdlibMassDownloadResult, String> {
-    let client_id = match ready_client_id(&state).await {
+    let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
         Err(status) => {
             return Ok(TdlibMassDownloadResult {
@@ -4274,7 +4179,7 @@ pub async fn tdlib_start_mass_download(
     let mut scanned_messages: Vec<tdlib_rs::types::Message> = Vec::new();
 
     emit_mass_progress(
-        &app,
+        app,
         request.chat_id,
         0,
         0.0,
@@ -4444,7 +4349,7 @@ pub async fn tdlib_start_mass_download(
     let total = items.len();
     if !state.download_aborted.load(Ordering::Acquire) {
         emit_mass_progress(
-            &app,
+            app,
             request.chat_id,
             total,
             0.0,
@@ -4466,7 +4371,7 @@ pub async fn tdlib_start_mass_download(
             items[item_index].status = "skipped".to_string();
             items[item_index].progress = 100;
             emit_mass_progress(
-                &app,
+                app,
                 request.chat_id,
                 total,
                 (downloaded_count + skipped_count + failed_count) as f64,
@@ -4481,7 +4386,7 @@ pub async fn tdlib_start_mass_download(
         items[item_index].thumbnail_path =
             download_thumbnail_path(client_id, pending.thumbnail).await;
         emit_mass_progress(
-            &app,
+            app,
             request.chat_id,
             total,
             (downloaded_count + skipped_count + failed_count) as f64,
@@ -4503,7 +4408,7 @@ pub async fn tdlib_start_mass_download(
                     format!("{file_name} ({percent}%)")
                 };
                 emit_mass_progress(
-                    &app,
+                    app,
                     request.chat_id,
                     total,
                     (downloaded_count + skipped_count + failed_count) as f64
@@ -4543,7 +4448,7 @@ pub async fn tdlib_start_mass_download(
                 items[item_index].status = "failed".to_string();
                 items[item_index].progress = 0;
                 emit_mass_progress(
-                    &app,
+                    app,
                     request.chat_id,
                     total,
                     (downloaded_count + skipped_count + failed_count) as f64,
@@ -4556,7 +4461,7 @@ pub async fn tdlib_start_mass_download(
         }
 
         emit_mass_progress(
-            &app,
+            app,
             request.chat_id,
             total,
             (downloaded_count + skipped_count + failed_count) as f64,
@@ -4574,7 +4479,7 @@ pub async fn tdlib_start_mass_download(
     };
 
     emit_mass_progress(
-        &app,
+        app,
         request.chat_id,
         total,
         (downloaded_count + skipped_count + failed_count) as f64,
@@ -4585,8 +4490,8 @@ pub async fn tdlib_start_mass_download(
 
     let tracking_error = if !aborted && failed_count == 0 {
         request.topic_id.and_then(|topic_id| {
-            crate::services::message_cache::record_topic_mass_download(
-                &app,
+            plasma_store::record_topic_mass_download(
+                app,
                 request.chat_id,
                 topic_id,
                 request.topic_kind.as_deref().unwrap_or("forum"),

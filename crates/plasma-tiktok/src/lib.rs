@@ -1,5 +1,5 @@
+use plasma_core::AppEnv;
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
 
 #[cfg(not(target_os = "android"))]
 use regex::Regex;
@@ -14,10 +14,9 @@ use tokio::{
 };
 
 #[cfg(not(target_os = "android"))]
-use super::{
-    download_control::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR},
-    youtube::ensure_ytdlp,
-};
+use plasma_download::{DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
+#[cfg(not(target_os = "android"))]
+use plasma_youtube::ensure_ytdlp;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,7 +243,7 @@ async fn request_tiktok_media(
 
 #[cfg(not(target_os = "android"))]
 async fn download_tiktok_direct(
-    app_handle: &tauri::AppHandle,
+    app_handle: &AppEnv,
     id: &str,
     source_url: &str,
     format_id: &str,
@@ -303,7 +302,7 @@ async fn download_tiktok_direct(
             } else {
                 50.0
             };
-            let _ = app_handle.emit(
+            app_handle.emit(
                 "tiktok-download-progress",
                 TikTokDownloadProgressEvent {
                     id: id.to_string(),
@@ -324,13 +323,12 @@ async fn download_tiktok_direct(
     result
 }
 
-#[tauri::command]
 #[cfg(not(target_os = "android"))]
 pub async fn analyze_tiktok_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     url: String,
 ) -> Result<TikTokMediaInfo, String> {
-    let binary_path = ensure_ytdlp(&app_handle).await?;
+    let binary_path = ensure_ytdlp(app_handle).await?;
     let output = Command::new(binary_path)
         .arg("--dump-single-json")
         .arg("--no-playlist")
@@ -373,9 +371,7 @@ pub async fn analyze_tiktok_native(
         .or_else(|| data.get("channel_id"))
         .and_then(Value::as_str)
         .unwrap_or("TikTok");
-    let author = if author_id.starts_with('@') {
-        author_id.to_string()
-    } else if author_id == "TikTok" {
+    let author = if author_id.starts_with('@') || author_id == "TikTok" {
         author_id.to_string()
     } else {
         format!("@{}", author_id)
@@ -451,19 +447,17 @@ pub async fn analyze_tiktok_native(
     })
 }
 
-#[tauri::command]
 #[cfg(target_os = "android")]
 pub async fn analyze_tiktok_native(
-    _app_handle: tauri::AppHandle,
+    _app_handle: &AppEnv,
     _url: String,
 ) -> Result<TikTokMediaInfo, String> {
     Err("Analisador TikTok nativo indisponível no Android.".to_string())
 }
 
-#[tauri::command]
 #[cfg(not(target_os = "android"))]
 pub async fn download_tiktok_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     id: String,
     url: String,
     format_id: String,
@@ -471,15 +465,12 @@ pub async fn download_tiktok_native(
     direct_url: Option<String>,
 ) -> Result<(), String> {
     let cancellation = DownloadCancellation::register(id.clone());
-    let download_dir = app_handle
-        .path()
-        .download_dir()
-        .map_err(|error| error.to_string())?;
+    let download_dir = app_handle.paths().download_dir()?;
     let output_path = download_dir.join(filename);
 
     if let Some(direct_url) = direct_url.filter(|url| !url.trim().is_empty()) {
         let result = download_tiktok_direct(
-            &app_handle,
+            app_handle,
             &id,
             &url,
             &format_id,
@@ -490,7 +481,7 @@ pub async fn download_tiktok_native(
         .await;
         match result {
             Ok(()) => {
-                let _ = app_handle.emit(
+                app_handle.emit(
                     "tiktok-download-done",
                     TikTokDownloadDoneEvent { id: id.clone() },
                 );
@@ -500,7 +491,7 @@ pub async fn download_tiktok_native(
                 if error == DOWNLOAD_CANCELED_ERROR {
                     return Err(error);
                 }
-                let _ = app_handle.emit(
+                app_handle.emit(
                     "tiktok-download-error",
                     TikTokDownloadErrorEvent {
                         id,
@@ -512,7 +503,7 @@ pub async fn download_tiktok_native(
         }
     }
 
-    let binary_path = ensure_ytdlp(&app_handle).await?;
+    let binary_path = ensure_ytdlp(app_handle).await?;
 
     let mut command = Command::new(binary_path);
     command
@@ -546,13 +537,13 @@ pub async fn download_tiktok_native(
         .ok_or_else(|| "Não foi possível acompanhar o download do TikTok.".to_string())?;
     let mut reader = BufReader::new(stdout).lines();
     let progress_regex = Regex::new(r"\[download\]\s+([\d\.]+)%").map_err(|e| e.to_string())?;
-    let app_clone = app_handle.clone();
+    let app_clone = (*app_handle).clone();
     let id_clone = id.clone();
     tokio::spawn(async move {
         while let Ok(Some(line)) = reader.next_line().await {
             if let Some(captures) = progress_regex.captures(&line) {
                 if let Ok(progress) = captures[1].parse::<f64>() {
-                    let _ = app_clone.emit(
+                    app_clone.emit(
                         "tiktok-download-progress",
                         TikTokDownloadProgressEvent {
                             id: id_clone.clone(),
@@ -574,14 +565,14 @@ pub async fn download_tiktok_native(
     };
 
     if status.success() {
-        let _ = app_handle.emit(
+        app_handle.emit(
             "tiktok-download-done",
             TikTokDownloadDoneEvent { id: id.clone() },
         );
         Ok(())
     } else {
         let error = "O download nativo do TikTok falhou.".to_string();
-        let _ = app_handle.emit(
+        app_handle.emit(
             "tiktok-download-error",
             TikTokDownloadErrorEvent {
                 id,
@@ -592,10 +583,9 @@ pub async fn download_tiktok_native(
     }
 }
 
-#[tauri::command]
 #[cfg(target_os = "android")]
 pub async fn download_tiktok_native(
-    _app_handle: tauri::AppHandle,
+    _app_handle: &AppEnv,
     _id: String,
     _url: String,
     _format_id: String,

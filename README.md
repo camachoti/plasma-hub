@@ -32,12 +32,25 @@ The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it re
 
 ## Project Map
 
+- `Cargo.toml`: Cargo workspace for the Rust core and the Tauri app.
+- `crates/plasma-core`: shared errors, app paths, and the UI-agnostic `AppEnv`.
+- `crates/plasma-platform`: filesystem and OS helpers.
+- `crates/plasma-store`: SQLite message cache, download history, and topic state.
+- `crates/plasma-download`: cancellation, streamed HTTPS downloads, and file sinks.
+- `crates/plasma-media`: media cache helpers and video thumbnails.
+- `crates/plasma-telegram`: TDLib integration and the loopback media server.
+- `crates/plasma-twitter`, `crates/plasma-tiktok`, `crates/plasma-youtube`: native extractors and downloaders.
+- `crates/plasma-duplicates`: duplicate media search.
+- `crates/plasma-instagram`, `crates/plasma-reddit`: migration placeholders.
+- `crates/plasma-ui`, `apps/plasma`: Rust UI migration placeholders.
+- `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
 - `src/app`: app shell, navigation, login flow, and bootstrap hooks.
 - `src/features`: product domains such as Telegram, Twitter/X, downloader, and appearance.
 - `src/shared/platform`: runtime capability detection, service worker registration, and typed Tauri wrappers.
 - `src/shared/storage`: storage abstraction used before deciding the final desktop/mobile storage backend.
-- `src-tauri/src/commands`: commands exposed to the webview.
-- `src-tauri/src/services`: native services for TDLib, Twitter/X, YouTube, and Android fallbacks.
+
+The domain crates are UI-agnostic: they never import `tauri`, `dioxus`, `tao` or `wry`.
+See `docs/rust-rewrite-plan.md` for the full Rust migration plan.
 
 ## Platform Notes
 
@@ -55,8 +68,9 @@ Useful checks while refactoring:
 
 ```bash
 npm run build
-cd src-tauri && cargo check
-cd .. && scripts/check-android-toolchain.sh
+npm run check:rust
+cargo check -p plasma-hub
+scripts/check-android-toolchain.sh
 ```
 
 Validate the generated Android project and native library with:

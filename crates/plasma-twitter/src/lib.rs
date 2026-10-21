@@ -1,3 +1,8 @@
+mod cookies;
+
+pub use cookies::{load_twitter_cookies, save_twitter_cookies, TWITTER_COOKIES_FILE};
+
+use plasma_core::AppEnv;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -7,11 +12,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tauri::{Emitter, Manager};
 
-use super::download_control::{
-    is_cancellation_error, DownloadCancellation, DOWNLOAD_CANCELED_ERROR,
-};
+use plasma_download::{is_cancellation_error, DownloadCancellation, DOWNLOAD_CANCELED_ERROR};
 
 const TWITTER_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
@@ -148,7 +150,6 @@ struct TwitterDownloadDoneEvent {
     id: String,
 }
 
-#[tauri::command]
 pub async fn analyze_twitter_profile_native(
     url: String,
     cookies: Option<String>,
@@ -198,7 +199,6 @@ pub async fn analyze_twitter_profile_native(
     })
 }
 
-#[tauri::command]
 pub async fn analyze_twitter_tweet_native(
     url: String,
     cookies: Option<String>,
@@ -595,9 +595,8 @@ async fn analyze_twitter_tweet_syndication(
     Ok(tweet_to_media_info(converted, original_url.to_string()))
 }
 
-#[tauri::command]
 pub async fn download_twitter_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     id: String,
     url: String,
     filename: String,
@@ -605,13 +604,13 @@ pub async fn download_twitter_native(
 ) -> Result<(), String> {
     let cancellation = DownloadCancellation::register(id.clone());
     let result =
-        download_twitter_native_inner(&app_handle, &id, &url, &filename, cookies, &cancellation)
+        download_twitter_native_inner(app_handle, &id, &url, &filename, cookies, &cancellation)
             .await;
     if let Err(error) = &result {
         if is_cancellation_error(error) {
             return result;
         }
-        let _ = app_handle.emit(
+        app_handle.emit(
             "twitter-download-error",
             TwitterDownloadErrorEvent {
                 id: id.clone(),
@@ -622,9 +621,8 @@ pub async fn download_twitter_native(
     result
 }
 
-#[tauri::command]
 pub async fn download_twitter_profile_native(
-    app_handle: tauri::AppHandle,
+    app_handle: &AppEnv,
     id: String,
     username: String,
     media_urls: Vec<String>,
@@ -632,7 +630,7 @@ pub async fn download_twitter_profile_native(
 ) -> Result<(), String> {
     let cancellation = DownloadCancellation::register(id.clone());
     let result = download_twitter_profile_native_inner(
-        &app_handle,
+        app_handle,
         &id,
         &username,
         media_urls,
@@ -644,7 +642,7 @@ pub async fn download_twitter_profile_native(
         if is_cancellation_error(error) {
             return result;
         }
-        let _ = app_handle.emit(
+        app_handle.emit(
             "twitter-download-error",
             TwitterDownloadErrorEvent {
                 id: id.clone(),
@@ -655,21 +653,15 @@ pub async fn download_twitter_profile_native(
     result
 }
 
-fn twitter_download_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn twitter_download_dir(app_handle: &AppEnv) -> Result<PathBuf, String> {
     app_handle
-        .path()
+        .paths()
         .download_dir()
-        .or_else(|_| {
-            app_handle
-                .path()
-                .app_data_dir()
-                .map(|dir| dir.join("downloads"))
-        })
-        .map_err(|e| e.to_string())
+        .or_else(|_| Ok(app_handle.paths().data_dir().join("downloads")))
 }
 
 async fn download_twitter_profile_native_inner(
-    app_handle: &tauri::AppHandle,
+    app_handle: &AppEnv,
     id: &str,
     username: &str,
     media_urls: Vec<String>,
@@ -718,7 +710,7 @@ async fn download_twitter_profile_native_inner(
         }
 
         let progress = (((idx + 1) as f64 / total_items) * 100.0).min(99.0);
-        let _ = app_handle.emit(
+        app_handle.emit(
             "twitter-download-progress",
             TwitterDownloadProgressEvent {
                 id: id.to_string(),
@@ -727,7 +719,7 @@ async fn download_twitter_profile_native_inner(
         );
     }
 
-    let _ = app_handle.emit(
+    app_handle.emit(
         "twitter-download-done",
         TwitterDownloadDoneEvent { id: id.to_string() },
     );
@@ -735,7 +727,7 @@ async fn download_twitter_profile_native_inner(
 }
 
 async fn download_twitter_native_inner(
-    app_handle: &tauri::AppHandle,
+    app_handle: &AppEnv,
     id: &str,
     url: &str,
     filename: &str,
@@ -777,7 +769,7 @@ async fn download_twitter_native_inner(
         } else {
             50.0
         };
-        let _ = app_handle.emit(
+        app_handle.emit(
             "twitter-download-progress",
             TwitterDownloadProgressEvent {
                 id: id.to_string(),
@@ -786,7 +778,7 @@ async fn download_twitter_native_inner(
         );
     }
 
-    let _ = app_handle.emit(
+    app_handle.emit(
         "twitter-download-done",
         TwitterDownloadDoneEvent { id: id.to_string() },
     );
@@ -966,7 +958,7 @@ fn graphql_value_to_media_info(
 ) -> Result<NativeMediaInfo, String> {
     let mut variants = Vec::new();
     collect_graphql_video_variants(value, &mut variants);
-    variants.sort_by(|a, b| b.bitrate.unwrap_or(0).cmp(&a.bitrate.unwrap_or(0)));
+    variants.sort_by_key(|b| std::cmp::Reverse(b.bitrate.unwrap_or(0)));
     variants.dedup_by(|a, b| a.url == b.url);
 
     if variants.is_empty() {
@@ -1138,7 +1130,7 @@ fn extract_video_urls_from_text(text: &str) -> Vec<String> {
             urls.push(url);
         }
     }
-    urls.sort_by(|a, b| video_url_height(b).cmp(&video_url_height(a)));
+    urls.sort_by_key(|b| std::cmp::Reverse(video_url_height(b)));
     urls
 }
 
@@ -1257,14 +1249,9 @@ fn profile_media_bottom_cursor(value: &Value) -> Option<String> {
             map.get("bottom_cursor")
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
-                .or_else(|| {
-                    map.values()
-                        .find_map(|child| profile_media_bottom_cursor(child))
-                })
+                .or_else(|| map.values().find_map(profile_media_bottom_cursor))
         }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|child| profile_media_bottom_cursor(child)),
+        Value::Array(items) => items.iter().find_map(profile_media_bottom_cursor),
         _ => None,
     }
 }
@@ -1511,7 +1498,7 @@ fn tweet_to_media_info(tweet: TwitterTweet, original_url: String) -> NativeMedia
                     .iter()
                     .filter(|variant| variant.content_type == "video/mp4")
                     .collect();
-                variants.sort_by(|a, b| b.bitrate.unwrap_or(0).cmp(&a.bitrate.unwrap_or(0)));
+                variants.sort_by_key(|b| std::cmp::Reverse(b.bitrate.unwrap_or(0)));
 
                 for (variant_idx, variant) in variants.iter().enumerate() {
                     let kbps = variant.bitrate.unwrap_or(0) / 1000;
@@ -1589,7 +1576,7 @@ fn tweet_to_media_info(tweet: TwitterTweet, original_url: String) -> NativeMedia
         ),
         author_full: tweet.user.and_then(|user| user.name),
         duration: duration_ms
-            .map(|ms| format_duration((ms / 1000) as u64))
+            .map(|ms| format_duration(ms / 1000))
             .unwrap_or_else(|| "—".to_string()),
         thumb_hue: 200,
         thumb_hue2: 220,

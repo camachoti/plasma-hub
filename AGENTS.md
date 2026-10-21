@@ -6,12 +6,28 @@ This repository is `plasma-hub`, a Tauri 2 application with a React/Vite fronten
 
 ## Project Layout
 
+The repository is a Cargo workspace plus the current React frontend.
+
+- `crates/plasma-core`: shared errors, app paths, event sink (`AppEnv`).
+- `crates/plasma-platform`: filesystem and OS helpers.
+- `crates/plasma-store`: SQLite message cache, download history, topic state.
+- `crates/plasma-download`: cancellation, streamed HTTPS downloads, file sinks.
+- `crates/plasma-media`: media cache helpers and video thumbnails.
+- `crates/plasma-telegram`: TDLib integration and the local media HTTP server.
+- `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: native extractors/downloaders.
+- `crates/plasma-duplicates`: duplicate media search.
+- `crates/plasma-instagram`, `plasma-reddit`: migration placeholders.
+- `crates/plasma-ui`, `apps/plasma`: Rust UI migration placeholders.
+- `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
+- `src-tauri/src/env.rs`: Tauri `AppEnv`/event bridge.
 - `src/app`: app shell, navigation, login flow, bootstrap hooks.
 - `src/features`: product domains such as Telegram, Twitter/X, downloader, and appearance.
 - `src/shared/platform`: runtime capability detection, service worker registration, typed Tauri wrappers.
 - `src/shared/storage`: storage abstraction used before finalizing desktop/mobile storage backends.
-- `src-tauri/src/commands`: commands exposed to the webview.
-- `src-tauri/src/services`: native services for TDLib, Twitter/X, YouTube, and Android fallbacks.
+
+Domain crates must not depend on `tauri`, `dioxus`, `tao` or `wry`; they receive
+`plasma_core::AppEnv` and return domain types. The Tauri layer only maps commands and
+events. See `docs/rust-rewrite-plan.md`.
 
 ## Core Commands
 
@@ -35,7 +51,8 @@ This repository is `plasma-hub`, a Tauri 2 application with a React/Vite fronten
 
 - Keep changes aligned with existing React, TypeScript, and Tauri patterns in the repo.
 - Scope frontend changes to the relevant feature area under `src/features` and shared runtime/storage code under `src/shared` when needed.
-- Scope native changes to `src-tauri/src/commands` and `src-tauri/src/services`.
+- Put native behaviour in `crates/*`; `src-tauri/src/commands` should stay a thin adapter.
+- Run `cargo fmt --all` before committing Rust changes.
 - Preserve desktop behavior while treating Android as an active compatibility target.
 - Prefer small wrappers around platform-specific behavior instead of branching feature logic across the app shell.
 - Use `TextField` and `TextArea` from `src/design-system` for editable text controls, and `Select` for choices. Raw native inputs are reserved for non-text controls such as checkboxes and file pickers.
@@ -46,7 +63,8 @@ This repository is `plasma-hub`, a Tauri 2 application with a React/Vite fronten
 Use the smallest relevant validation set for the change:
 
 - `npm run build`
-- `cd src-tauri && cargo check`
+- `npm run check:rust` (fmt + clippy + workspace tests)
+- `cargo check -p plasma-hub`
 - `scripts/check-android-toolchain.sh`
 
 For Android-specific work, also validate with:

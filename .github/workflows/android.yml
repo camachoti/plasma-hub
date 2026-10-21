@@ -5,6 +5,10 @@ on:
   pull_request:
     paths:
       - 'src-tauri/**'
+      - 'crates/**'
+      - 'apps/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'src/shared/platform/**'
       - 'package.json'
       - 'package-lock.json'

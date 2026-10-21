@@ -33,3 +33,6 @@ src-tauri/gen/android/*.keystore
 *.njsproj
 *.sln
 *.sw?
+
+# Rust workspace build output
+/target

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 #[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
-use tauri::AppHandle;
+use plasma_core::AppEnv;
 
 #[cfg(not(target_os = "android"))]
 use super::{
@@ -52,12 +52,12 @@ pub fn playback_url(chat_id: i64, message_id: i64) -> String {
 }
 
 #[cfg(target_os = "android")]
-pub fn start_server(_app: AppHandle) -> Result<(), String> {
+pub fn start_server(_app: AppEnv) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn start_server(app: AppHandle) -> Result<(), String> {
+pub fn start_server(app: AppEnv) -> Result<(), String> {
     if PLASMA_MEDIA_HTTP_PORT.get().is_some() {
         return Ok(());
     }
@@ -94,7 +94,7 @@ pub fn start_server(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn handle_stream(app: AppHandle, mut stream: TcpStream) {
+fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let cloned = match stream.try_clone() {
@@ -250,7 +250,7 @@ fn copy_file_range(
 
 #[cfg(not(target_os = "android"))]
 fn write_response(
-    app: &AppHandle,
+    app: &AppEnv,
     stream: &mut TcpStream,
     method: &str,
     path: &str,

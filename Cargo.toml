@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/plasma",
+    "crates/plasma-core",
+    "crates/plasma-download",
+    "crates/plasma-duplicates",
+    "crates/plasma-instagram",
+    "crates/plasma-media",
+    "crates/plasma-platform",
+    "crates/plasma-reddit",
+    "crates/plasma-store",
+    "crates/plasma-telegram",
+    "crates/plasma-testkit",
+    "crates/plasma-tiktok",
+    "crates/plasma-twitter",
+    "crates/plasma-ui",
+    "crates/plasma-youtube",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Camacho"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52.3", features = ["full"] }
+reqwest = { version = "0.13.4", features = ["stream", "json", "query"] }
+regex = "1.12.4"
+rand = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tdlib-rs = { version = "1.4.0", features = ["download-tdlib"] }
+http = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -1,0 +1,16 @@
+[package]
+name = "plasma-media"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Media cache layout, thumbnails and local streaming"
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "plasma-download"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Download job control and streaming file sinks"
+
+[dependencies]
+plasma-core = { path = "../plasma-core" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
