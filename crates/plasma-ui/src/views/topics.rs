@@ -181,7 +181,7 @@ pub fn TopicBrowser(chat: TdlibChatInfo, on_close: EventHandler<()>) -> Element 
                                         }
                                         div { class: "topic-browser-copy",
                                             strong {
-                                                "{topic.title}"
+                                                span { class: "topic-browser-title", "{topic.title}" }
                                                 if topic.is_pinned {
                                                     span { class: "topic-browser-pin", "📌" }
                                                 }
