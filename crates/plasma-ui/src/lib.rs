@@ -185,8 +185,9 @@ pub fn App() -> Element {
             let Some(credentials) = init_services.credentials.clone() else {
                 apply_auth_error(
                     ui,
-                    "Credenciais do Telegram ausentes. Defina VITE_API_ID e VITE_API_HASH no .env \
-                 e recompile o shell (npm run dev:ui), ou use a prévia sem conta."
+                    "Credenciais do Telegram ausentes. Defina PLASMA_TELEGRAM_API_ID e \
+                 PLASMA_TELEGRAM_API_HASH (ou VITE_API_ID/VITE_API_HASH) no .env e recompile \
+                 com cargo build -p plasma, ou use a prévia sem conta."
                         .to_string(),
                 );
                 ui.booting.set(false);

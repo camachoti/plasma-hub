@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This repository is `plasma-hub`, a Tauri 2 application with a React/Vite frontend plus a Rust/Dioxus shell being built for the migration. The same app shell is intended to work on desktop and Android, with platform-specific behavior isolated behind shared runtime wrappers and Tauri commands.
+`plasma-hub` is a Rust application for desktop and Android with a Dioxus 0.7 UI and a domain workspace independent of the renderer. The React/Vite/Tauri implementation was retired in the Phase 8 cutover; its source is kept read-only in `reference/react-frontend/` for consultation only.
 
 ## Project Layout
 
-The repository is a Cargo workspace plus the current React frontend.
+The repository is a single Cargo workspace.
 
 - `crates/plasma-core`: shared errors, app paths, event sink (`AppEnv`).
 - `crates/plasma-platform`: filesystem and OS helpers.
@@ -18,70 +18,70 @@ The repository is a Cargo workspace plus the current React frontend.
 - `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: native extractors/downloaders.
 - `crates/plasma-duplicates`: duplicate media search.
 - `crates/plasma-instagram`, `plasma-reddit`: migration placeholders.
-- `crates/plasma-ui`: Dioxus shell (views, theme, virtualization spike); renderer-independent.
-- `apps/plasma`: Rust desktop/Android composition root and Dioxus renderer. It has its own nested workspace until the Tauri cutover because Dioxus 0.7 and Tauri 2 pin incompatible `wry`/`webkit2gtk` versions.
-- `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
-- `src-tauri/src/env.rs`: Tauri `AppEnv`/event bridge.
-- `src/app`: app shell, navigation, login flow, bootstrap hooks.
-- `src/features`: product domains such as Telegram, Twitter/X, downloader, and appearance.
-- `src/shared/platform`: runtime capability detection, service worker registration, typed Tauri wrappers.
-- `src/shared/storage`: storage abstraction used before finalizing desktop/mobile storage backends.
+- `crates/plasma-ui`: Dioxus views, theme, virtualized timeline, shared controls and CSS; renderer-independent.
+- `apps/plasma`: desktop/Android composition root and Dioxus renderer (package `plasma`, member of the root workspace).
+- `reference/react-frontend`: old React/TypeScript/Vite frontend kept as reference. It is not compiled, tested or packaged.
+- `docs/rust-rewrite-plan.md`: migration plan and history.
+- `scripts/`: desktop packaging, Android build/install and toolchain checks.
 
-Domain crates must not depend on `tauri`, `dioxus`, `tao` or `wry`; they receive
-`plasma_core::AppEnv` and return domain types. The Tauri layer only maps commands and
-events. See `docs/rust-rewrite-plan.md`.
+Domain crates must not depend on `dioxus`, `tao` or `wry`; they receive
+`plasma_core::AppEnv` and return domain types. The app layer only handles
+platform startup and maps UI actions. See `docs/rust-rewrite-plan.md`.
 
 ## Core Commands
 
-- `npm run dev`: run the Vite frontend only.
-- `npm run build`: run TypeScript checks and build the frontend bundle.
-- `npm run tauri:dev`: run the desktop Tauri app.
-- `npm run tauri:build`: build the desktop Tauri app.
-- `npm run dev:ui`: run the Rust/Dioxus shell.
-- `npm run check:ui`: fmt, clippy, and tests for the Rust shell.
-- `npm run build:ui`: build the Rust shell in release mode.
-- `npm run tauri:android:init`: initialize the Android project.
-- `npm run tauri:android:dev`: run the Android app in development mode.
-- `npm run tauri:android:build`: build the Android app for `aarch64`.
-- `npm run tauri:android:install`: install the generated Android APK.
+- `cargo run -p plasma`: run the desktop app.
+- `cargo build -p plasma --release`: optimized desktop build.
+- `cargo fmt --all`: format the workspace.
+- `cargo clippy --workspace --all-targets -- -D warnings`: lint everything.
+- `cargo test --workspace`: run the Rust tests.
+- `cargo check -p plasma`: fast check of the app shell.
+- `scripts/bundle-dioxus-desktop.sh`: build the `.deb` and the portable directory in `dist/` (requires Dioxus CLI 0.7.10).
+- `scripts/check-android-toolchain.sh`: validate the Android environment.
+- `scripts/build-dioxus-android.sh [debug|release]`: build the arm64 APK.
+- `scripts/install-android-apk.sh [apk]`: install the latest (or given) APK with adb.
 
 ## Environment Expectations
 
-- Desktop Tauri commands depend on `scripts/check-tdlib-runtime.sh`.
-- Android commands depend on `scripts/check-android-toolchain.sh`.
-- Android builds require a full JDK, Android SDK, and Android NDK.
-- Use the Tauri Android workflow for mobile validation instead of plain Cargo target checks because the CLI injects required linker/toolchain environment.
+- Desktop builds need GTK 3, WebKitGTK 4.1, libsoup 3, OpenSSL, libxdo and the C++ runtime required by TDLib. Packaging also needs `dx` 0.7.10.
+- Android builds require a full JDK, Android SDK and Android NDK.
+- Use `scripts/build-dioxus-android.sh` for mobile validation instead of plain Cargo target checks because it injects the linker/toolchain environment and packages `libtdjson` into the APK.
+- `PLASMA_HOME` isolates app data during development or smoke tests.
+- `apps/plasma/build.rs` embeds `PLASMA_TELEGRAM_API_ID/HASH` or the legacy `VITE_API_ID/HASH` from the environment or the root `.env`; runtime variables take precedence.
+- Distribution is manual for now: `.deb` plus portable directory. There is no auto-updater or signed release pipeline yet.
 
 ## Working Rules
 
-- Keep changes aligned with existing React, TypeScript, and Tauri patterns in the repo.
-- Scope frontend changes to the relevant feature area under `src/features` and shared runtime/storage code under `src/shared` when needed.
-- Put native behaviour in `crates/*`; `src-tauri/src/commands` should stay a thin adapter.
+- Keep changes aligned with the Rust/Dioxus patterns in the repo. UI work belongs in `crates/plasma-ui`; startup and platform wiring belong in `apps/plasma`.
+- Put native behaviour in `crates/*`; keep the app shell thin.
 - Run `cargo fmt --all` before committing Rust changes.
-- Preserve desktop behavior while treating Android as an active compatibility target.
-- Prefer small wrappers around platform-specific behavior instead of branching feature logic across the app shell.
-- Use `TextField` and `TextArea` from `src/design-system` for editable text controls, and `Select` for choices. Raw native inputs are reserved for non-text controls such as checkboxes and file pickers.
+- Preserve desktop behaviour while treating Android as an active compatibility target.
+- Prefer small wrappers around platform-specific behaviour instead of branching feature logic across the app shell.
 - Do not revert unrelated user changes already present in the worktree.
+- Treat `reference/react-frontend` as historical material: do not wire it into the build or copy new features from it without porting them to Rust.
 
 ## Validation
 
 Use the smallest relevant validation set for the change:
 
-- `npm run build`
-- `npm run check:rust` (fmt + clippy + workspace tests)
-- `npm run check:ui` for anything under `crates/plasma-ui` or `apps/plasma`
-- `cargo check -p plasma-hub`
+- `cargo fmt --all --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace`
+- `cargo check -p plasma`
 - `scripts/check-android-toolchain.sh`
 
-For Android-specific work, also validate with:
+For packaging changes, also run `scripts/bundle-dioxus-desktop.sh` and smoke test `dist/plasma-linux-x86_64/plasma` with `PLASMA_HOME` pointing to a development data directory.
 
-- `npm run tauri:android:init -- --ci --skip-targets-install`
-- `npx tauri android build --debug --apk --target aarch64 --ci`
+For Android-specific work, validate with:
+
+- `scripts/check-android-toolchain.sh`
+- `scripts/build-dioxus-android.sh debug`
 
 ## Current Product Constraints
 
-- TDLib native login/downloads are expected to work in Tauri, including Android.
-- Twitter/X native downloads are expected to work in Tauri, including Android.
+- TDLib native login/downloads work on desktop and are expected to work on Android.
+- Twitter/X native downloads work on desktop and are expected to work on Android.
 - YouTube direct and signed stream downloads are supported on Android, but adaptive video-only formats are hidden there unless audio is already included.
 - Opening or revealing files is desktop-first; Android may fall back to app/system paths where available.
-- Service worker registration is disabled inside Tauri webviews by default.
+- Android uses `network_security_config` with cleartext only for `127.0.0.1` (playback and thumbnails through the loopback server).
+- The SQLite schema, `plasma-hub.sqlite3`, cookies, media cache and TDLib data remain compatible with the pre-cutover app.

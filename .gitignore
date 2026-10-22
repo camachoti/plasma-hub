@@ -7,6 +7,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Frontend reference material (not built)
 node_modules
 dist
 dist-ssr
@@ -18,10 +19,10 @@ f485ff55-fdbb-4396-b2ae-4897befaaca7.png
 .env.*
 !.env.example
 
-# Android signing secrets
-src-tauri/gen/android/keystore.properties
-src-tauri/gen/android/*.jks
-src-tauri/gen/android/*.keystore
+# Android signing secrets (kept outside the repository)
+**/keystore.properties
+**/*.jks
+**/*.keystore
 
 # Editor directories and files
 .vscode/*

@@ -1,14 +1,15 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0–7 implementadas; foco atual no desktop antes da validação Android.
+> Status: **concluído**. Fases 0–8 implementadas; o shell Dioxus é o app padrão.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
 > **Execução atual:** o shell Dioxus desktop foi validado com TDLib real e o gate visual
 > foi desbloqueado em 2026-10-21. A tela preta era causada por um cache WebKitGTK parcial;
 > o app agora isola e reinicia o cache do WebView a cada execução. O download em massa de
 > Telegram ganhou painel no shell Rust (pasta, tópico, divisão por usuário/álbum, progresso
-> detalhado e parada). O frontend React continua sendo o app padrão até a Fase 8.
-> Próximos passos desktop: validação em conta real, empacotamento e cutover (Fase 8).
+> detalhado e parada). O cutover da Fase 8 foi concluído em 2026-10-22: React/Vite/Tauri
+> saíram do build e o frontend antigo ficou em `reference/react-frontend/`. A distribuição
+> desktop é manual (`.deb` + portátil) e o Android ainda aguarda validação em device.
 
 ---
 
@@ -714,23 +715,56 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
 7. `apps/plasma/Dioxus.toml` aponta para o manifesto e o `MainActivity.kt` customizados.
    O manifesto inclui `extractNativeLibs`, share filters, tema e configuração de rede; o
    ProGuard mantém o Activity e os métodos nativos no release.
-8. Empacotamento: `scripts/build-dioxus-android.sh` (também `npm run build:ui:android`)
+8. Empacotamento: `scripts/build-dioxus-android.sh`
    roda `dx build --android --target aarch64-linux-android`, copia o `libtdjson.so` do
    `tdlib-rs` para o `jniLibs/arm64-v8a` gerado e roda o Gradle. Isso corrige a lacuna do
    `dx`, que liga o `libmain.so` ao TDLib mas não empacota a biblioteca compartilhada.
    O APK debug `aarch64` foi gerado com Dioxus CLI 0.7.10, NDK 27.1, compile/target SDK 36
    e validado com `aapt2` (manifesto/rede/share filters); `libmain.so` e `libtdjson.so`
    estão alinhados em 16 KB (`p_align=0x4000`) e exportam os callbacks JNI.
-9. Assinatura: o keystore existente em `src-tauri/gen/android` é local e não é versionado.
-   O gate usa APK debug assinado automaticamente; releases devem usar o keystore local
-   (Android Studio/Gradle) ou secrets de CI, nunca `Dioxus.toml` com senha. Updater próprio
-   continua em aberto para a Fase 8.
+9. Assinatura: o keystore de release fica fora do repositório (backup em
+   `~/Documentos/plasma-hub-android-signing-backup/`). O gate usa APK debug assinado
+   automaticamente; releases devem usar esse keystore via Gradle/secrets de CI, nunca
+   `Dioxus.toml` com senha. Updater próprio continua em aberto para a Fase 8.
 10. Limitações desta fase: não há device/emulator neste ambiente, então SAF, share,
     player, thumbnail e abertura de arquivo foram validados por compilação, inspeção do
     APK/`nm`/`aapt2`, não por execução. A abertura no Android depende do MediaScanner para
     arquivos externos; arquivos internos (ex.: mídia do Telegram) ainda não têm
     `FileProvider`. Clipboard, notificações e fullscreen de vídeo permanecem sem validação
     de device. A janela desktop continua sem render visual neste ambiente (WebKitGTK).
+
+### Fase 8 — cutover concluído (2026-10-22)
+
+1. Empacotamento desktop: `dx bundle --desktop --release --package-types deb` gera
+   `plasma_0.1.0_amd64.deb` com `usr/bin/plasma`, `usr/lib/plasma/libtdjson.so.1.8.61`,
+   ícones 32–512 e `.desktop`. O RUNPATH inclui `$ORIGIN` e
+   `$ORIGIN/../lib/plasma` (além do caminho de build usado pelo `cargo run`).
+2. `scripts/bundle-dioxus-desktop.sh` compila o release no workspace raiz, copia o
+   `libtdjson` do `tdlib-rs` para `apps/plasma/packaging/linux/` (ignorado no git),
+   roda o `dx` e monta `dist/plasma-linux-x86_64/` com o binário portátil.
+3. Smoke test do portátil: com o diretório `tdlib-rs` temporariamente oculto, o app
+   iniciou, abriu o TDLib e carregou as conversas via `$ORIGIN`, confirmando que o
+   pacote não depende do caminho absoluto do build. O `.deb` foi inspecionado com
+   `dpkg-deb -I/-c` e `readelf -d`.
+4. Antes do cutover, o header da conversa foi ajustado para não quebrar a linha
+   (a busca encolhe; Buscar/Download em massa/Mídia ficam na mesma linha) e os resumos
+   da última mensagem ganharam limite (80/90 caracteres). O menu de contexto do chip
+   "Todos" foi adicionado e o menu nativo do WebView ("Inspect Element") foi suprimido
+   com um listener global de `contextmenu`.
+5. Cutover: `src/`, `tests/`, fixtures TS/JSON, `public/`, `index.html`, configs do
+   Vite/TS, `package*.json`, `log-server.js` e `scripts/check-form-controls.mjs` foram
+   movidos para `reference/react-frontend/` (somente consulta). `src-tauri/`,
+   `node_modules` e o workspace aninhado de `apps/plasma` foram removidos; o app entrou
+   no workspace raiz (pacote `plasma`). Os comandos agora são `cargo run -p plasma` e
+   `cargo build -p plasma --release`, sem Node/npm.
+6. Scripts, CI (jobs `rust` e `android`), AGENTS.md e README foram atualizados para o
+   workspace único. O `.cargo/config.toml` com o alinhamento de 16 KB subiu para a raiz.
+7. Distribuição permanece manual: `.deb` + diretório portátil, sem auto-updater nem
+   pipeline de release assinada. O backup do keystore Android está fora do repositório
+   (`~/Documentos/plasma-hub-android-signing-backup/`) e o signing release ainda precisa
+   ser configurado no projeto Gradle gerado pelo `dx`.
+8. Pendências conhecidas: validação Android em device (SAF, share, player, thumbnails,
+   abertura de arquivo), Reddit 403 e validação completa do TikTok.
 
 ---
 
@@ -776,13 +810,11 @@ Rust".
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --exclude plasma-hub
-cargo check -p plasma-hub
-cd apps/plasma && cargo fmt --all --check
-cd apps/plasma && cargo clippy --all-targets -- -D warnings
-cd apps/plasma && cargo test
+cargo test --workspace
+cargo check -p plasma
 cargo check -p plasma-telegram --target aarch64-linux-android
-scripts/build-dioxus-android.sh debug   # Fase 7+; requer dx 0.7.10 e NDK
+scripts/build-dioxus-android.sh debug   # requer dx 0.7.10 e NDK
+scripts/bundle-dioxus-desktop.sh        # .deb + portátil em dist/
 ```
 
 Testes que valem a pena desde a Fase 0:

@@ -132,7 +132,7 @@ scripts/build-dioxus-android.sh debug
 O script roda `dx build --android --target aarch64-linux-android`, copia o
 `libtdjson.so` para o `jniLibs/arm64-v8a` do projeto gerado e chama o Gradle —
 o `dx` sozinho não empacota essa biblioteca. O APK fica em
-`apps/plasma/target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/`.
+`target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/`.
 
 Para instalar em um device/emulador conectado:
 

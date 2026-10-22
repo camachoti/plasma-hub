@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-apk_path="${1:-src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ $# -ge 1 ]; then
+  apk_path="$1"
+else
+  apk_path="$(find "$repo_root/target/dx" "$repo_root/apps/plasma/target/dx" \
+    -path '*/android/app/app/build/outputs/apk/*/*.apk' -type f -print 2>/dev/null \
+    | sort | tail -1)"
+fi
 
 android_sdk_dir() {
   if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}" ]; then
@@ -34,9 +42,9 @@ if [ -z "$adb_bin" ]; then
   exit 1
 fi
 
-if [ ! -f "$apk_path" ]; then
-  printf 'APK nao encontrado: %s\n' "$apk_path" >&2
-  printf 'Gere primeiro com: npm run tauri:android:build\n' >&2
+if [ -z "$apk_path" ] || [ ! -f "$apk_path" ]; then
+  printf 'APK nao encontrado: %s\n' "${apk_path:-<nenhum build>}" >&2
+  printf 'Gere primeiro com: scripts/build-dioxus-android.sh debug\n' >&2
   exit 1
 fi
 

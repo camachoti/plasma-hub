@@ -4,15 +4,12 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - 'src-tauri/**'
       - 'crates/**'
       - 'apps/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'src/shared/platform/**'
-      - 'package.json'
-      - 'package-lock.json'
       - 'scripts/check-android-toolchain.sh'
+      - 'scripts/build-dioxus-android.sh'
       - '.github/workflows/android.yml'
 
 permissions:
@@ -24,10 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -38,16 +31,17 @@ jobs:
           targets: aarch64-linux-android
       - name: Install Android SDK and NDK
         run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973"
-      - run: npm ci
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.10 --locked
       - name: Verify Android toolchain
         run: scripts/check-android-toolchain.sh
       - name: Generate and build the arm64 debug APK
-        run: |
-          npm run tauri:android:init -- --ci --skip-targets-install
-          npx tauri android build --debug --apk --target aarch64 --ci
+        run: scripts/build-dioxus-android.sh debug
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: plasma-hub-arm64-debug-apk
-          path: src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          path: |
+            target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/*.apk
+            apps/plasma/target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error

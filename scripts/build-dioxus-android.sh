@@ -80,16 +80,22 @@ if [ "$mode" = "release" ]; then
   gradle_task="assembleRelease"
 fi
 
-tdlib_lib="$(find "$app_dir/target/$target" -path "*/build/tdlib-rs-*/out/tdlib/lib/libtdjson.so" -print -quit 2>/dev/null || true)"
-if [ -z "$tdlib_lib" ]; then
-  tdlib_lib="$(find "$repo_root/src-tauri/target/$target" -path "*/build/tdlib-rs-*/out/tdlib/lib/libtdjson.so" -print -quit 2>/dev/null || true)"
-fi
+tdlib_lib="$(find "$repo_root/target/$target" "$app_dir/target/$target" \
+  -path "*/build/tdlib-rs-*/out/tdlib/lib/libtdjson.so" -print -quit 2>/dev/null || true)"
 if [ -z "$tdlib_lib" ] || [ ! -f "$tdlib_lib" ]; then
   printf 'libtdjson.so não encontrado para %s.\n' "$target" >&2
   exit 1
 fi
 
-gradle_project="$app_dir/target/dx/plasma/$profile_dir/android/app"
+# O app pertence ao workspace raiz, então o dx grava em target/dx/plasma;
+# o fallback cobre um dx antigo que ainda use o target local do app.
+gradle_project="$(find "$repo_root/target/dx/plasma/$profile_dir/android/app" \
+  "$app_dir/target/dx/plasma/$profile_dir/android/app" \
+  -maxdepth 0 -type d -print -quit 2>/dev/null || true)"
+if [ -z "$gradle_project" ] || [ ! -d "$gradle_project" ]; then
+  printf 'Projeto Android gerado não encontrado para o perfil %s.\n' "$profile_dir" >&2
+  exit 1
+fi
 jni_dir="$gradle_project/app/src/main/jniLibs/arm64-v8a"
 if [ ! -d "$jni_dir" ]; then
   printf 'Projeto Android gerado não encontrado em %s.\n' "$jni_dir" >&2

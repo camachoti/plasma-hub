@@ -16,7 +16,7 @@ members = [
     "crates/plasma-twitter",
     "crates/plasma-ui",
     "crates/plasma-youtube",
-    "src-tauri",
+    "apps/plasma",
 ]
 
 [workspace.package]

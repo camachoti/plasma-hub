@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// Filesystem locations owned by the application.
 ///
 /// The values are resolved once at startup by the composition root
-/// (`src-tauri` today, the Rust app shell later) and shared by every service.
+/// (`apps/plasma`) and shared by every service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppPaths {
     data_dir: PathBuf,
