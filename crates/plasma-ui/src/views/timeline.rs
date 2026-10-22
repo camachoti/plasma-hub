@@ -8,6 +8,8 @@ use crate::icons::{Icon, IconName};
 use crate::state::{react_to_message, AppServices, ReactionPickerState, UiState};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
+use serde::Deserialize;
+use std::collections::HashMap;
 use time::OffsetDateTime;
 
 const OVERSCAN: usize = 6;
@@ -15,6 +17,85 @@ const DEFAULT_VIEWPORT: f64 = 620.0;
 const TIMELINE_ID: &str = "plasma-timeline-scroll";
 const ALBUM_CELL_HEIGHT: f64 = 104.0;
 const ALBUM_GAP: f64 = 4.0;
+
+/// Observes the rendered rows and reports their real height to Rust.
+///
+/// The canvas positions rows with `top`/`height` before they exist in the DOM,
+/// so it starts with estimates. Measuring `height: auto` for a frame gives the
+/// exact height (the assigned height clips overflow with `overflow: hidden`),
+/// and the layout is rebuilt with the measured value. The script only reports
+/// changed rows, so the measurement converges after one render.
+const MEASURE_ROWS_SCRIPT: &str = r#"
+(() => {
+    const measure = () => {
+        const element = document.getElementById("plasma-timeline-scroll");
+        if (!element) return;
+        const scrollTop = element.scrollTop;
+        const heights = {};
+        let deltaAbove = 0;
+        for (const row of element.querySelectorAll("article.message-row[data-key]")) {
+            const key = row.dataset.key;
+            if (!key) continue;
+            const oldHeight = row.offsetHeight;
+            const top = parseFloat(row.style.top) || 0;
+            const previous = row.style.height;
+            // Reading the natural height is independent of the estimated
+            // height currently assigned to the row, and the style is restored
+            // before the frame is painted.
+            row.style.height = "auto";
+            const height = Math.ceil(row.offsetHeight);
+            row.style.height = previous;
+            if (height <= 0) continue;
+            heights[key] = height;
+            if (top + oldHeight <= scrollTop + 0.5) {
+                deltaAbove += height - oldHeight;
+            }
+        }
+        dioxus.send({
+            heights,
+            deltaAbove,
+            atBottom: element.__plasmaBottom == null || element.__plasmaBottom < 120,
+        });
+    };
+
+    let frame = 0;
+    const schedule = () => {
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+            frame = 0;
+            measure();
+        });
+    };
+
+    let container = null;
+    const mutations = new MutationObserver(schedule);
+    const resizes = new ResizeObserver(schedule);
+    const bind = () => {
+        const element = document.getElementById("plasma-timeline-scroll");
+        if (!element) return false;
+        if (container === element) return true;
+        container = element;
+        mutations.disconnect();
+        mutations.observe(element, { childList: true, subtree: true });
+        resizes.disconnect();
+        resizes.observe(element);
+        schedule();
+        return true;
+    };
+
+    // The timeline may appear after messages are loaded, and switching chats
+    // can replace the scroll container entirely. Rebind when that happens.
+    const watcher = new MutationObserver(() => {
+        const element = document.getElementById("plasma-timeline-scroll");
+        if (element && element !== container) bind();
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    bind();
+    window.addEventListener("resize", schedule);
+    schedule();
+    setTimeout(schedule, 300);
+})();
+"#;
 
 /// A row of the timeline: a single message or a grouped album.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,6 +111,12 @@ impl TimelineItem {
             TimelineItem::Album(messages) => format!("album-{}", messages[0].id),
         }
     }
+}
+
+/// Measurement keys are scoped by chat: Telegram message ids are only unique
+/// inside a conversation, so the same id in two chats must not share a height.
+fn scoped_key(chat_id: i64, item: &TimelineItem) -> String {
+    format!("{chat_id}:{}", item.key())
 }
 
 /// Collapses consecutive messages that share a `grouped_id` into albums.
@@ -68,13 +155,23 @@ struct TimelineLayout {
     total_height: f64,
 }
 
-fn build_layout(items: &[TimelineItem]) -> TimelineLayout {
+fn build_layout(
+    items: &[TimelineItem],
+    measured: &HashMap<String, f64>,
+    chat_id: i64,
+) -> TimelineLayout {
     let mut offsets = Vec::with_capacity(items.len());
     let mut heights = Vec::with_capacity(items.len());
     let mut top = 0.0;
     for item in items {
         offsets.push(top);
-        let height = estimate_item_height(item);
+        // Rendered rows are measured by the WebView; estimates only cover rows
+        // that have never been on screen. This keeps long messages from being
+        // clipped by the virtualized canvas.
+        let height = measured
+            .get(&scoped_key(chat_id, item))
+            .copied()
+            .unwrap_or_else(|| estimate_item_height(item));
         heights.push(height);
         top += height;
     }
@@ -83,6 +180,15 @@ fn build_layout(items: &[TimelineItem]) -> TimelineLayout {
         heights,
         total_height: top,
     }
+}
+
+#[derive(Deserialize)]
+struct RowMeasurements {
+    heights: HashMap<String, f64>,
+    #[serde(default, rename = "deltaAbove")]
+    delta_above: f64,
+    #[serde(default, rename = "atBottom")]
+    at_bottom: bool,
 }
 
 /// Number of grid rows used by an album grid.
@@ -418,7 +524,8 @@ pub fn MessageTimeline(
         }
     };
     let items_memo = use_memo(move || group_albums(&source()));
-    let layout_memo = use_memo(move || build_layout(&items_memo()));
+    let mut measured_heights = use_signal(HashMap::<String, f64>::new);
+    let layout_memo = use_memo(move || build_layout(&items_memo(), &measured_heights(), chat_id));
     // First and newest ids identify what changed between two renders.
     let bounds = use_memo(move || {
         let list = source();
@@ -468,6 +575,72 @@ pub fn MessageTimeline(
         spawn(apply_scroll(intent));
     });
 
+    // Feed the rendered height of every row back into the layout. Estimates
+    // remain useful for rows that were never on screen, but a message longer
+    // than its estimate must grow instead of being clipped by the canvas.
+    use_effect(move || {
+        spawn(async move {
+            let mut eval = document::eval(MEASURE_ROWS_SCRIPT);
+            while let Ok(payload) = eval.recv::<RowMeasurements>().await {
+                let changed = {
+                    let current = measured_heights.peek();
+                    payload.heights.iter().any(|(key, height)| {
+                        height.is_finite()
+                            && *height > 0.0
+                            && current
+                                .get(key)
+                                .is_none_or(|current| (*current - *height).abs() > 0.5)
+                    })
+                };
+                if !changed {
+                    continue;
+                }
+                measured_heights.with_mut(|current| {
+                    for (key, height) in payload.heights {
+                        if height.is_finite() && height > 0.0 {
+                            current.insert(key, height);
+                        }
+                    }
+                });
+                // Dioxus applies the new layout on the next frame. Rows that
+                // grew above the viewport would otherwise move the reader's
+                // position, so compensate; at the bottom, stay pinned.
+                let script = if payload.at_bottom {
+                    format!(
+                        r#"
+                        requestAnimationFrame(() => requestAnimationFrame(() => {{
+                            const element = document.getElementById("{TIMELINE_ID}");
+                            if (!element) return;
+                            element.scrollTop = element.scrollHeight;
+                            element.__plasmaBottom = 0;
+                        }}));
+                        true
+                        "#
+                    )
+                } else if payload.delta_above.abs() > 0.5 {
+                    let delta = payload.delta_above;
+                    format!(
+                        r#"
+                        requestAnimationFrame(() => requestAnimationFrame(() => {{
+                            const element = document.getElementById("{TIMELINE_ID}");
+                            if (!element) return;
+                            element.scrollTop = Math.max(0, element.scrollTop + {delta});
+                            element.__plasmaBottom =
+                                element.scrollHeight - element.scrollTop - element.clientHeight;
+                        }}));
+                        true
+                        "#
+                    )
+                } else {
+                    String::new()
+                };
+                if !script.is_empty() {
+                    let _ = document::eval(&script).await;
+                }
+            }
+        });
+    });
+
     rsx! {
         if items.is_empty() {
             div { class: "empty-state",
@@ -496,7 +669,7 @@ pub fn MessageTimeline(
                     style: "height: {layout.total_height}px;",
                     for (item, top, height) in rows {
                         {
-                            let key = item.key();
+                            let key = scoped_key(chat_id, &item);
                             match item {
                                 TimelineItem::Message(message) => {
                                     let message = *message;
@@ -512,6 +685,7 @@ pub fn MessageTimeline(
                                     rsx! {
                                         article {
                                             key: "{key}",
+                                            "data-key": "{key}",
                                             class: "{row_class}",
                                             style: "top: {top}px; height: {height}px;",
                                             oncontextmenu: {
@@ -714,6 +888,7 @@ pub fn MessageTimeline(
                                     rsx! {
                                         article {
                                             key: "{key}",
+                                            "data-key": "{key}",
                                             class: "{row_class}",
                                             style: "top: {top}px; height: {height}px;",
                                             oncontextmenu: {
@@ -925,8 +1100,20 @@ mod tests {
     fn offsets_are_cumulative_and_total_matches() {
         let messages = vec![message(1, 1, "curta"), message(2, 2, &"a".repeat(300))];
         let items = group_albums(&messages);
-        let layout = build_layout(&items);
+        let layout = build_layout(&items, &HashMap::new(), 7);
         assert_eq!(layout.offsets[0], 0.0);
+        assert_eq!(layout.offsets[1], layout.heights[0]);
+        assert_eq!(layout.total_height, layout.heights.iter().sum::<f64>());
+    }
+
+    #[test]
+    fn measured_height_replaces_the_estimate() {
+        let messages = vec![message(1, 1, "curta"), message(2, 2, "outra")];
+        let items = group_albums(&messages);
+        let estimated = build_layout(&items, &HashMap::new(), 7);
+        let measured = HashMap::from([(scoped_key(7, &items[0]), estimated.heights[0] + 180.0)]);
+        let layout = build_layout(&items, &measured, 7);
+        assert_eq!(layout.heights[0], estimated.heights[0] + 180.0);
         assert_eq!(layout.offsets[1], layout.heights[0]);
         assert_eq!(layout.total_height, layout.heights.iter().sum::<f64>());
     }
@@ -937,7 +1124,7 @@ mod tests {
             .map(|index| message(index, index as i32, "mensagem"))
             .collect();
         let items = group_albums(&messages);
-        let layout = build_layout(&items);
+        let layout = build_layout(&items, &HashMap::new(), 7);
         let (start, end) = visible_range(&layout.offsets, 0.0, 620.0, items.len());
         assert_eq!(start, 0);
         assert!(end > start);
