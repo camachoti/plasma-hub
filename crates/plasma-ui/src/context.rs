@@ -82,6 +82,9 @@ pub enum ContextTarget {
         topic: Box<TdlibForumTopicInfo>,
         hidden: bool,
     },
+    /// The "Todos" chip. It has no topic of its own, so the menu only opens
+    /// the topic browser.
+    Topics,
     /// An album (grouped media) of the timeline. `anchor_id` is the media the
     /// user right-clicked, used by the single-item actions.
     Album {
@@ -152,6 +155,12 @@ impl ContextTarget {
                     .icon(IconName::List)
                     .separator(),
             ],
+            ContextTarget::Topics => {
+                vec![
+                    ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
+                        .icon(IconName::List),
+                ]
+            }
             ContextTarget::Album {
                 messages,
                 anchor_id,
@@ -297,7 +306,7 @@ pub fn handle_context_action(
             };
             push_toast(ui.toasts, message, ToastKind::Info);
         }
-        (ContextTarget::Topic { .. }, "topic.browse") => {
+        (ContextTarget::Topic { .. }, "topic.browse") | (ContextTarget::Topics, "topic.browse") => {
             ui.topic_browser_open.set(true);
         }
         (ContextTarget::Message { message, .. }, "message.reply") => {

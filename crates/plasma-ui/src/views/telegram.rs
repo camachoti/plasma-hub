@@ -379,7 +379,7 @@ fn RealTelegram() -> Element {
                                     if let Some(topic) = topic.as_ref() {
                                         "Tópico: {topic.title}"
                                     } else {
-                                        "{chat_kind(&chat)} · {chat.last_message_text}"
+                                        "{chat_summary(&chat)}"
                                     }
                                 }
                             }
@@ -451,6 +451,16 @@ fn RealTelegram() -> Element {
                                 onclick: move |_| {
                                     ui.selected_topic.set(None);
                                     ui.reply_to.set(None);
+                                },
+                                oncontextmenu: move |event: Event<MouseData>| {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    let point = event.data().client_coordinates();
+                                    ui.context_menu.set(Some(ContextMenuState::new(
+                                        point.x,
+                                        point.y,
+                                        ContextTarget::Topics,
+                                    )));
                                 },
                                 "Todos"
                             }
@@ -1834,6 +1844,15 @@ fn chat_kind(chat: &TdlibChatInfo) -> &'static str {
     } else {
         "Conversa privada"
     }
+}
+
+/// One-line subtitle of the conversation header.
+fn chat_summary(chat: &TdlibChatInfo) -> String {
+    format!(
+        "{} · {}",
+        chat_kind(chat),
+        chat_list::summarize_last_message(&chat.last_message_text, 80)
+    )
 }
 
 /* ------------------------------------------------------------------------- */

@@ -328,6 +328,15 @@ pub fn App() -> Element {
         spawn(async move {
             let mut eval = document::eval(
                 r#"
+                // The webview's native menu (Inspect Element, reload, ...) is
+                // never useful here: every right-click action is rendered by
+                // the app itself. Capture also covers elements that call
+                // stopPropagation in their own contextmenu handler.
+                document.addEventListener(
+                    "contextmenu",
+                    (event) => event.preventDefault(),
+                    { capture: true },
+                );
                 document.addEventListener("keydown", (event) => {
                     const key = event.key.toLowerCase();
                     if ((event.ctrlKey || event.metaKey) && key === "k") {
