@@ -1,14 +1,14 @@
 # Plasma Hub 100% Rust — Plano de Reescrita
 
-> Status: **aprovado**. Fases 0 e 1 concluídas; Fases 2, 3, 4, 5 e 6 implementadas em 2026-10-20.
+> Status: **aprovado**. Fases 0–7 implementadas; foco atual no desktop antes da validação Android.
 > Escopo: reescrever o app inteiro em Rust (UI + lógica), removendo React/Vite/Tauri IPC.
 >
-> **Execução atual:** fases 0–2 concluídas; fase 3 (TDLib real) implementada e compilando.
-> O workspace de domínio, as migrações SQLite e o `SettingsStore`/`EventBus` estão prontos;
-> o frontend React continua sendo o app padrão e sem mudanças visíveis. O gate visual das
-> fases 2/3 segue pendente de um desktop com WebKitGTK compatível; o gate de leitura real
-> precisa de uma sessão TDLib autenticada.
-> Próximo passo: validar o gate visual/leitura real e iniciar a fase 4 (escrita e mídia).
+> **Execução atual:** o shell Dioxus desktop foi validado com TDLib real e o gate visual
+> foi desbloqueado em 2026-10-21. A tela preta era causada por um cache WebKitGTK parcial;
+> o app agora isola e reinicia o cache do WebView a cada execução. O download em massa de
+> Telegram ganhou painel no shell Rust (pasta, tópico, divisão por usuário/álbum, progresso
+> detalhado e parada). O frontend React continua sendo o app padrão até a Fase 8.
+> Próximos passos desktop: validação em conta real, empacotamento e cutover (Fase 8).
 
 ---
 
@@ -492,11 +492,71 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    altura de thumbnails e colapso de mensagens apagadas; helpers de formatação de mídia têm
    teste unitário. Validação executada: fmt, clippy, testes do workspace e do app aninhado,
    `cargo check -p plasma-hub`, `npm run build` e `npm test`.
-9. Limitações desta fase: mass download, estatísticas/limpeza do cache de mídia e busca de
-   duplicados ainda não têm tela no shell Rust; ficam para as Fases 5/6. Playback e seletor
-   de arquivos no Android ficam para a Fase 7. A conta real de escrita e a conferência
-   visual continuam pendentes pelo mesmo bloqueio de WebKitGTK; os caminhos de backend são
-   os mesmos já usados pelo app Tauri.
+9. Limitações desta fase: estatísticas/limpeza do cache de mídia e busca de duplicados
+   ainda não têm tela no shell Rust; playback e seletor de arquivos no Android ficam para a
+   Fase 7. O backend de escrita/mídia é o mesmo já usado pelo app Tauri.
+10. Download em massa (2026-10-21): o botão “Download em massa” no cabeçalho do chat abre
+   um painel com pasta de destino, seleção de tópico, divisão por usuário/álbum (separador
+   ou comentário), progresso por arquivo e botão de parada. O shell consome os eventos
+   `tdlib-download-progress` via `AppEvent::TelegramDownloadProgress` e chama
+   `tdlib_start_mass_download`/`tdlib_stop_download` pelos mesmos serviços do backend.
+11. Gate visual desktop (2026-10-21): o cache WebKitGTK em `$XDG_CACHE_HOME/<app>` pode
+   ficar parcial após uma execução interrompida e deixar o WebProcess sem pintar a página.
+   O composition root agora usa `AppPaths::cache_dir()/webview`, limpa esse diretório antes
+   de criar o WebView e define `XDG_CACHE_HOME` para ele. Isso também isola o cache do shell
+   dos demais apps WebKitGTK.
+12. Menus de contexto e refino visual (2026-10-21): `plasma-ui::context` define os alvos
+   (`ContextTarget`) e as ações do menu de botão direito; `plasma-ui::views::context_menu`
+   renderiza o menu flutuante com ícones, atalhos, separadores, navegação por teclado
+   (`ArrowUp`/`ArrowDown`/`Escape`) e ajuste automático dentro da viewport. O menu é
+   renderizado na raiz do shell (`UiState::context_menu`) e abre em conversas, mensagens
+   da timeline e itens do histórico de downloads. Ações: abrir conversa, marcar como lida,
+   download em massa, copiar ID, responder, encaminhar, copiar texto, abrir/salvar mídia,
+   abrir arquivo, mostrar na pasta, copiar caminho/link e remover do histórico. O shell
+   também ganhou um conjunto próprio de ícones SVG (`plasma-ui::icons`) e uma rodada de
+   refino visual (bubble de mensagem, indicador de conversa ativa, tooltips no rail,
+   `focus-visible`, estados de status, `prefers-reduced-motion`).
+13. Controles e menus (2026-10-21): a barra de menu nativa do Dioxus (Window/Edit/Help)
+   foi removida com `Config::with_menu(None)`; botões, campos, switches e selects seguiram os
+   tokens do design system React (`--control-height`, `--field-focus-border`,
+   `--field-focus-ring`). O shell ganhou um `Select` próprio (`plasma-ui::views::select`) com
+   chevron e check do conjunto de ícones SVG, e o composer de conversas somente-leitura
+   agora mostra apenas um rodapé compacto com o aviso, sem campo de texto nem botões.
+14. Selection mark nos controles (2026-10-21): botões, switches e o `Select` agora usam
+   `user-select: none`, evitando a marca de seleção de texto que aparecia ao clicar nos
+   controles (o DOM do dropdown muda entre `mousedown` e `mouseup`). Campos de texto e
+   `textarea` mantêm a seleção de texto.
+15. Cache de mídia e busca de duplicados (2026-10-21): os Ajustes passaram a exibir o
+    tamanho do cache nativo de mídia, o limite aplicado (com evicção do mais antigo) e a
+    limpeza do cache; a timeline ganhou um modo de seleção de mídias e o diálogo
+    "Procurar arquivo no sistema", que usa `plasma-duplicates` (busca exata e varredura
+    profunda) com progresso via `AppEvent::DuplicateSearchProgress` e ação de revelar o
+    arquivo encontrado.
+16. Foco neutro (2026-10-21): campos de texto e selects não usam mais anel colorido no
+    foco (apenas a borda muda, em tom neutro) e o `::selection` segue a paleta, evitando
+    o aspecto de "marca texto" apontado no visual.
+17. Avatar das conversas (2026-10-21): a lista de chats passou a mostrar a foto real de
+   cada grupo/conversa. `plasma-telegram` expõe `telegram_avatar_dir`, `cached_chat_avatar`
+   e a rota `/avatar/{chat_id}` do servidor HTTP local; o download do avatar é feito sob
+   demanda por linha (`plasma-ui::views::chat_list::ChatAvatar`) e fica em cache em
+   `cache/plasma-media/telegram-avatars`, então a segunda visita não fala com o TDLib.
+   A imagem é servida pelo loopback local (com token) em vez de base64 no DOM. Conversas
+   sem foto mantêm a letra colorida como fallback.
+18. Álbuns (2026-10-22): a timeline agrupa mensagens consecutivas com o mesmo `grouped_id`
+   em um único item (`TimelineItem::Album`), como no dashboard React: grade de miniaturas,
+   rótulo “álbum · N” e seleção por célula. O menu de contexto do álbum traz abrir mídia,
+   salvar esta mídia, salvar o álbum inteiro, copiar legenda e encaminhar; o salvamento usa
+   o cache de mídia (`ensure_media_cached`) e a pasta de downloads configurada.
+19. Estabilidade da timeline (2026-10-22): o refresh em segundo plano (novas mensagens,
+   edições, exclusões, botão “Atualizar conversas”) não desmonta mais a timeline.
+   `UiState::messages_key` identifica a conversa exibida e `load_conversation` mantém a
+   página visível (`keep_visible`) em vez de limpar as mensagens e mostrar “Carregando”; a
+   lista de chats só exibe o placeholder na primeira carga. O scroll passou a ser
+   intencional (`ScrollIntent`): abre no fim ao trocar de conversa, acompanha novas
+   mensagens apenas quando o leitor já está no fim (distância < 120 px) e preserva a
+   posição visual quando histórico antigo é pré-inserido (deslocamento pelo delta de
+   altura). `MessageTimeline` recebe o `Signal` das mensagens e guarda os limites
+   anteriores em um `CopyValue`, sem re-disparar o efeito a cada render.
 
 ### Fase 5 — downloads e Twitter implementados (2026-10-20)
 
@@ -579,8 +639,8 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
 9. Limitações: Instagram pode exigir login/GraphQL atualizado e não há tela de cookies
    dedicada; Reddit pode responder 403 em IPs bloqueados; YouTube não trata vídeos com
    idade/região restrita; retry de downloads de plataforma é feito reanalisando o link
-   (não pelo botão genérico); mass download de Telegram, cache de mídia e duplicados
-   continuam pendentes. O código Android foi validado com `cargo check` e
+   (não pelo botão genérico); cache de mídia e duplicados continuam pendentes. O código
+   Android foi validado com `cargo check` e
    `cargo clippy --target aarch64-linux-android` usando NDK 27.1; execução de UI, SAF,
    players e downloads Android continuam pendentes para a Fase 7.
 
