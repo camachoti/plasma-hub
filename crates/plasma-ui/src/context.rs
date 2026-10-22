@@ -8,7 +8,8 @@
 use crate::downloads::DownloadRecord;
 use crate::icons::IconName;
 use crate::state::{
-    push_toast, toggle_topic_hidden, AppServices, LightboxState, ToastKind, UiState,
+    push_toast, toggle_topic_hidden, AppServices, LightboxState, ReactionPickerState, ToastKind,
+    UiState,
 };
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibForumTopicInfo, TdlibMessageInfo};
@@ -110,6 +111,7 @@ impl ContextTarget {
             ContextTarget::Message { message, .. } => {
                 let mut entries = vec![
                     ContextMenuEntry::new("message.reply", "Responder").icon(IconName::Reply),
+                    ContextMenuEntry::new("message.react", "Reagir").icon(IconName::Smile),
                     ContextMenuEntry::new("message.forward", "Encaminhar").icon(IconName::Forward),
                     ContextMenuEntry::new("message.copy", "Copiar texto")
                         .icon(IconName::Copy)
@@ -300,6 +302,16 @@ pub fn handle_context_action(
         }
         (ContextTarget::Message { message, .. }, "message.reply") => {
             ui.reply_to.set(Some(message.as_ref().clone()));
+        }
+        (ContextTarget::Message { chat_id, message }, "message.react") => {
+            if let Some(menu) = ui.context_menu() {
+                ui.reaction_picker.set(Some(ReactionPickerState {
+                    chat_id: *chat_id,
+                    message_id: message.id,
+                    x: menu.x,
+                    y: menu.y,
+                }));
+            }
         }
         (ContextTarget::Message { message, .. }, "message.forward") => {
             let chat_id = ui

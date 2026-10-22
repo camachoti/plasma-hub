@@ -5,7 +5,7 @@
 
 use crate::context::{save_album, ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
-use crate::state::{AppServices, UiState};
+use crate::state::{react_to_message, AppServices, ReactionPickerState, UiState};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use time::OffsetDateTime;
@@ -132,6 +132,9 @@ fn estimate_height(message: &TdlibMessageInfo) -> f64 {
     }
     if message.reply_to_msg_id.is_some() {
         height += 18.0;
+    }
+    if !message.reactions.is_empty() {
+        height += 26.0;
     }
     height.max(64.0)
 }
@@ -573,6 +576,35 @@ pub fn MessageTimeline(
                                                         }
                                                     }
                                                 }
+                                                if !message.reactions.is_empty() {
+                                                    div { class: "message-reactions",
+                                                        for reaction in message.reactions.iter() {
+                                                            button {
+                                                                r#type: "button",
+                                                                class: if reaction.mine {
+                                                                    "reaction-chip mine"
+                                                                } else {
+                                                                    "reaction-chip"
+                                                                },
+                                                                title: "Reagir com {reaction.emoji}",
+                                                                onclick: {
+                                                                    let emoji = reaction.emoji.clone();
+                                                                    let message_id = message.id;
+                                                                    let services = services.clone();
+                                                                    move |_| react_to_message(
+                                                                        &services,
+                                                                        ui,
+                                                                        chat_id,
+                                                                        message_id,
+                                                                        emoji.clone(),
+                                                                    )
+                                                                },
+                                                                span { "{reaction.emoji}" }
+                                                                span { class: "reaction-chip-count", "{reaction.count}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 div { class: "message-actions",
                                                     if message.has_media {
                                                         button {
@@ -597,6 +629,23 @@ pub fn MessageTimeline(
                                                             move |_| on_action.call((message.clone(), MessageAction::Reply))
                                                         },
                                                         Icon { name: IconName::Reply, size: 14, class: "icon" }
+                                                    }
+                                                    button {
+                                                        class: "msg-action",
+                                                        title: "Reagir",
+                                                        onclick: {
+                                                            let message_id = message.id;
+                                                            move |event: Event<MouseData>| {
+                                                                let point = event.data().client_coordinates();
+                                                                ui.reaction_picker.set(Some(ReactionPickerState {
+                                                                    chat_id,
+                                                                    message_id,
+                                                                    x: point.x,
+                                                                    y: point.y,
+                                                                }));
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Smile, size: 14, class: "icon" }
                                                     }
                                                     if message.has_media {
                                                         button {
@@ -860,6 +909,7 @@ mod tests {
             media_size: None,
             thumbnail_path: None,
             is_deleted: false,
+            reactions: Vec::new(),
         }
     }
 

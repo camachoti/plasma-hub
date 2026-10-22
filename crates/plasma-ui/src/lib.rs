@@ -23,7 +23,8 @@ use plasma_store::SettingKey;
 use plasma_telegram::{TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo};
 use state::{
     apply_auth_error, apply_auth_status, bump_telegram_tick, mark_deleted_messages, AppServices,
-    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress, Tab, UiState,
+    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress,
+    ReactionPickerState, Tab, UiState,
 };
 use theme::{Density, Palette};
 use views::{
@@ -31,6 +32,7 @@ use views::{
     downloads::DownloadsView,
     login::LoginView,
     palette::CommandPalette,
+    reaction_picker::ReactionPicker,
     select::{SelectMenu, SelectPortal},
     settings::SettingsView,
     telegram::TelegramView,
@@ -105,6 +107,7 @@ pub fn App() -> Element {
     let reply_to = use_signal(|| None::<TdlibMessageInfo>);
     let forward_state = use_signal(|| None::<ForwardState>);
     let lightbox = use_signal(|| None::<LightboxState>);
+    let reaction_picker = use_signal(|| None::<ReactionPickerState>);
     let shared_url = use_signal(|| services.initial_shared_url.clone());
 
     let mut ui = use_context_provider(|| UiState {
@@ -150,6 +153,7 @@ pub fn App() -> Element {
         reply_to,
         forward_state,
         lightbox,
+        reaction_picker,
         shared_url,
     });
 
@@ -394,6 +398,12 @@ pub fn App() -> Element {
                 SelectMenu {
                     portal,
                     on_close: move |_| ui.select_portal.set(None),
+                }
+            }
+            if let Some(target) = ui.reaction_picker() {
+                ReactionPicker {
+                    target,
+                    on_close: move |_| ui.reaction_picker.set(None),
                 }
             }
             ToastStack {}

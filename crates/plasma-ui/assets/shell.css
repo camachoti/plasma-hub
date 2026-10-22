@@ -1520,6 +1520,65 @@ svg.icon { display: block; flex: 0 0 auto; }
 .message-thumb { transition: border-color .14s ease; }
 .message-thumb:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
+/* Reactions */
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in oklch, var(--bg-2) 72%, transparent);
+  color: var(--text-1);
+  font-size: 12px;
+  line-height: 1;
+  transition: border-color .1s ease, background .1s ease, color .1s ease;
+}
+.reaction-chip:hover { border-color: var(--accent); color: var(--text-0); }
+.reaction-chip.mine {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in oklch, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.reaction-chip-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.reaction-picker {
+  position: fixed;
+  z-index: 95;
+  display: flex;
+  gap: 2px;
+  padding: 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: color-mix(in oklch, var(--bg-1) 94%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  box-shadow: 0 20px 52px rgba(0, 0, 0, .55);
+  animation: context-menu-in .12s ease;
+}
+.reaction-picker-emoji {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-0);
+  font-size: 19px;
+  line-height: 1;
+}
+.reaction-picker-emoji:hover { background: var(--bg-hover); }
+
 /* Composer: elevated surface. */
 .composer {
   background: color-mix(in oklch, var(--bg-1) 94%, var(--bg-0));

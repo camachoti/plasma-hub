@@ -6,6 +6,7 @@ pub mod downloads;
 pub mod duplicate_search;
 pub mod login;
 pub mod palette;
+pub mod reaction_picker;
 pub mod select;
 pub mod settings;
 pub mod spike;

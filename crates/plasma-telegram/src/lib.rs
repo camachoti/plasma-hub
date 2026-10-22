@@ -15,13 +15,13 @@ use tdlib_rs::{
     enums::{
         AuthorizationState, ChatList, ChatMemberStatus, ChatType, ConnectionState, InputFile,
         InputMessageContent, InputMessageReplyTo, MessageContent, MessageReplyTo, MessageSender,
-        MessageTopic, Update,
+        MessageTopic, ReactionType, Update,
     },
     functions,
     types::{
         ChatPermissions, File, FormattedText, InputFileLocal, InputMessageDocument,
         InputMessagePhoto, InputMessageReplyToMessage, InputMessageText, InputMessageVideo,
-        MessageTopicForum, MessageTopicThread, Photo,
+        MessageTopicForum, MessageTopicThread, Photo, ReactionTypeEmoji,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -220,6 +220,15 @@ pub struct TdlibChatsResult {
     pub error: Option<String>,
 }
 
+/// Emoji reaction attached to a message.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibReactionInfo {
+    pub emoji: String,
+    pub count: i32,
+    pub mine: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMessageInfo {
@@ -242,6 +251,9 @@ pub struct TdlibMessageInfo {
     pub media_size: Option<i64>,
     pub thumbnail_path: Option<String>,
     pub is_deleted: bool,
+    /// Emoji reactions; `#[serde(default)]` keeps old cached rows readable.
+    #[serde(default)]
+    pub reactions: Vec<TdlibReactionInfo>,
 }
 
 #[derive(Serialize)]
@@ -1461,7 +1473,38 @@ fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMessageInfo {
         media_size,
         thumbnail_path,
         is_deleted: false,
+        reactions: message_reactions(&message),
     }
+}
+
+/// Maps the TDLib reaction list to the flat shape used by the UI.
+///
+/// Custom-emoji and paid reactions are skipped: the shell only renders
+/// standard emoji chips today.
+fn message_reactions(message: &tdlib_rs::types::Message) -> Vec<TdlibReactionInfo> {
+    let Some(interactions) = message.interaction_info.as_ref() else {
+        return Vec::new();
+    };
+    let Some(reactions) = interactions.reactions.as_ref() else {
+        return Vec::new();
+    };
+    reactions
+        .reactions
+        .iter()
+        .filter_map(|reaction| {
+            let ReactionType::Emoji(emoji) = &reaction.r#type else {
+                return None;
+            };
+            if reaction.total_count <= 0 {
+                return None;
+            }
+            Some(TdlibReactionInfo {
+                emoji: emoji.emoji.clone(),
+                count: reaction.total_count,
+                mine: reaction.is_chosen,
+            })
+        })
+        .collect()
 }
 
 async fn resolve_message_sender_names(client_id: i32, messages: &mut [TdlibMessageInfo]) {
@@ -3139,6 +3182,49 @@ pub async fn tdlib_send_message(
             error: Some(error.message),
         }),
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibActionResult {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Adds or removes an emoji reaction on a message.
+pub async fn tdlib_toggle_message_reaction(
+    state: &TdlibManager,
+    chat_id: i64,
+    message_id: i64,
+    emoji: String,
+    add: bool,
+) -> Result<TdlibActionResult, String> {
+    let client_id = match ready_client_id(state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibActionResult {
+                success: false,
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+    let reaction = ReactionType::Emoji(ReactionTypeEmoji { emoji });
+    let message_id = tdlib_message_id_from_app_id(message_id);
+    let result = if add {
+        functions::add_message_reaction(chat_id, message_id, reaction, false, true, client_id).await
+    } else {
+        functions::remove_message_reaction(chat_id, message_id, reaction, client_id).await
+    };
+    Ok(match result {
+        Ok(()) => TdlibActionResult {
+            success: true,
+            error: None,
+        },
+        Err(error) => TdlibActionResult {
+            success: false,
+            error: Some(error.message),
+        },
+    })
 }
 
 pub async fn tdlib_send_media(

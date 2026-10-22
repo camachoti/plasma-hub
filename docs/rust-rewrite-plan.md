@@ -586,6 +586,17 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
     chama `on_reach_start`, que pede a página anterior com o mesmo `load_older` (guardado
     por `loading_older` e `messages_has_more`), como o `startReached` do React. O botão
     continua visível como alternativa quando a lista é menor que o viewport.
+24. Reações (2026-10-22): o modelo compartilhado `TdlibMessageInfo` ganhou `reactions`
+    (emoji, contagem e `mine`) com `serde(default)`, então mensagens antigas do SQLite
+    continuam legíveis. `plasma-telegram` mapeia `interaction_info.reactions` (ignora
+    custom emoji e reações pagas) e expõe `tdlib_toggle_message_reaction`, que converte o
+    id do app para o id do TDLib antes de chamar `addMessageReaction`/`removeMessageReaction`.
+    O shell aplica a mudança de forma otimista, desenha os chips sob a bolha, abre um
+    seletor de emojis pelo menu de contexto (“Reagir”) ou pelo botão de ação da mensagem e
+    reverte com toast se o TDLib recusar. `merge_messages` passou a substituir linhas
+    existentes pela versão mais nova, para que edições e reações apareçam no refresh,
+    preservando o marcador local de exclusão. O Tauri serializa o mesmo modelo, então o
+    React também recebe as reações; o envio pelo `TelegramService.sendReaction` segue stub.
 
 ### Fase 5 — downloads e Twitter implementados (2026-10-20)
 

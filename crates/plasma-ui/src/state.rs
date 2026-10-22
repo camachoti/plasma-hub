@@ -386,6 +386,31 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    /// Adds or removes an emoji reaction. Returns an error message on failure.
+    pub async fn toggle_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: String,
+        add: bool,
+    ) -> Result<(), String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_toggle_message_reaction(
+                &manager, chat_id, message_id, emoji, add,
+            )
+            .await
+        });
+        let result = self.join(handle).await??;
+        if result.success {
+            Ok(())
+        } else {
+            Err(result
+                .error
+                .unwrap_or_else(|| "Não foi possível reagir.".to_string()))
+        }
+    }
+
     pub async fn thumbnail_data_url(
         &self,
         chat_id: i64,
@@ -774,6 +799,15 @@ pub struct ForwardState {
     pub message: TdlibMessageInfo,
 }
 
+/// Emoji picker opened from a message reaction control.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReactionPickerState {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub x: f64,
+    pub y: f64,
+}
+
 /// Media opened in the lightbox.
 #[derive(Clone, PartialEq)]
 pub struct LightboxState {
@@ -849,6 +883,8 @@ pub struct UiState {
     pub forward_state: Signal<Option<ForwardState>>,
     /// Media opened in the lightbox.
     pub lightbox: Signal<Option<LightboxState>>,
+    /// Emoji picker for message reactions.
+    pub reaction_picker: Signal<Option<ReactionPickerState>>,
 
     /// Pending URL delivered by an Android share intent.
     pub shared_url: Signal<Option<String>>,
@@ -1017,6 +1053,10 @@ impl UiState {
         (self.lightbox)()
     }
 
+    pub fn reaction_picker(self) -> Option<ReactionPickerState> {
+        (self.reaction_picker)()
+    }
+
     pub fn telegram_tick(self) -> u64 {
         (self.telegram_tick)()
     }
@@ -1170,6 +1210,111 @@ pub fn message_cache_key(chat_id: &str, topic: Option<&TdlibForumTopicInfo>) -> 
     }
 }
 
+/// Toggles an emoji reaction on a message, updating the timeline immediately
+/// and reverting the optimistic change if TDLib rejects it.
+pub fn react_to_message(
+    services: &AppServices,
+    mut ui: UiState,
+    chat_id: i64,
+    message_id: i64,
+    emoji: String,
+) {
+    let Some(mine) = ui
+        .messages()
+        .iter()
+        .find(|message| message.id == message_id)
+        .map(|message| {
+            message
+                .reactions
+                .iter()
+                .any(|reaction| reaction.emoji == emoji && reaction.mine)
+        })
+    else {
+        return;
+    };
+    let add = !mine;
+    let previous = ui
+        .messages()
+        .iter()
+        .find(|message| message.id == message_id)
+        .map(|message| message.reactions.clone())
+        .unwrap_or_default();
+
+    apply_reaction(&mut ui, message_id, &emoji, add);
+    let services = services.clone();
+    spawn(async move {
+        if let Err(error) = services
+            .telegram
+            .toggle_reaction(chat_id, message_id, emoji, add)
+            .await
+        {
+            let mut messages = ui.messages();
+            if let Some(message) = messages.iter_mut().find(|message| message.id == message_id) {
+                message.reactions = previous.clone();
+            }
+            set_if_changed(ui.messages, messages);
+            let mut results = ui.search_results();
+            if let Some(message) = results.iter_mut().find(|message| message.id == message_id) {
+                message.reactions = previous;
+            }
+            set_if_changed(ui.search_results, results);
+            push_toast(ui.toasts, error, ToastKind::Error);
+        }
+    });
+}
+
+/// Applies the optimistic reaction change to the conversation and search rows.
+fn apply_reaction(ui: &mut UiState, message_id: i64, emoji: &str, add: bool) {
+    let mut messages = ui.messages();
+    if let Some(message) = messages.iter_mut().find(|message| message.id == message_id) {
+        change_reactions(&mut message.reactions, emoji, add);
+    }
+    set_if_changed(ui.messages, messages);
+
+    let mut results = ui.search_results();
+    if let Some(message) = results.iter_mut().find(|message| message.id == message_id) {
+        change_reactions(&mut message.reactions, emoji, add);
+    }
+    set_if_changed(ui.search_results, results);
+}
+
+fn change_reactions(
+    reactions: &mut Vec<plasma_telegram::TdlibReactionInfo>,
+    emoji: &str,
+    add: bool,
+) {
+    if add {
+        if let Some(reaction) = reactions
+            .iter_mut()
+            .find(|reaction| reaction.emoji == emoji)
+        {
+            if !reaction.mine {
+                reaction.count += 1;
+                reaction.mine = true;
+            }
+        } else {
+            reactions.push(plasma_telegram::TdlibReactionInfo {
+                emoji: emoji.to_string(),
+                count: 1,
+                mine: true,
+            });
+        }
+        reactions.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.emoji.cmp(&b.emoji)));
+    } else if let Some(position) = reactions
+        .iter()
+        .position(|reaction| reaction.emoji == emoji)
+    {
+        let reaction = &mut reactions[position];
+        if reaction.mine {
+            reaction.count -= 1;
+            reaction.mine = false;
+            if reaction.count <= 0 {
+                reactions.remove(position);
+            }
+        }
+    }
+}
+
 /// Marks the currently displayed messages as deleted immediately, before the
 /// SQLite write finishes.
 pub fn mark_deleted_messages(mut ui: UiState, message_ids: &[i64]) {
@@ -1207,10 +1352,19 @@ pub fn merge_messages(
     target: &mut Vec<TdlibMessageInfo>,
     incoming: impl IntoIterator<Item = TdlibMessageInfo>,
 ) {
-    let mut seen: std::collections::HashSet<i64> =
-        target.iter().map(|message| message.id).collect();
-    for message in incoming {
-        if seen.insert(message.id) {
+    // Existing rows are replaced by the fresher copy so edits and reactions
+    // show up after a refresh; the local deleted marker is never undone.
+    let mut positions: std::collections::HashMap<i64, usize> = target
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.id, index))
+        .collect();
+    for mut message in incoming {
+        if let Some(position) = positions.get(&message.id).copied() {
+            message.is_deleted = message.is_deleted || target[position].is_deleted;
+            target[position] = message;
+        } else {
+            positions.insert(message.id, target.len());
             target.push(message);
         }
     }
@@ -1250,6 +1404,7 @@ mod tests {
             media_size: None,
             thumbnail_path: None,
             is_deleted: false,
+            reactions: Vec::new(),
         }
     }
 
@@ -1294,5 +1449,45 @@ mod tests {
             target.iter().map(|message| message.id).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn merge_messages_refreshes_existing_rows() {
+        let mut target = vec![message(1, 10)];
+        let mut updated = message(1, 10);
+        updated.text = "editada".to_string();
+        updated.reactions.push(plasma_telegram::TdlibReactionInfo {
+            emoji: "👍".to_string(),
+            count: 2,
+            mine: true,
+        });
+        merge_messages(&mut target, [updated]);
+        assert_eq!(target.len(), 1);
+        assert_eq!(target[0].text, "editada");
+        assert_eq!(target[0].reactions.len(), 1);
+        assert_eq!(target[0].reactions[0].count, 2);
+    }
+
+    #[test]
+    fn merge_messages_keeps_the_deleted_marker() {
+        let mut target = vec![message(1, 10)];
+        target[0].is_deleted = true;
+        merge_messages(&mut target, [message(1, 10)]);
+        assert!(target[0].is_deleted);
+    }
+
+    #[test]
+    fn change_reactions_adds_and_removes() {
+        let mut reactions = Vec::new();
+        change_reactions(&mut reactions, "👍", true);
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].count, 1);
+        assert!(reactions[0].mine);
+        change_reactions(&mut reactions, "👍", true);
+        assert_eq!(reactions[0].count, 1, "adding twice must not inflate");
+        change_reactions(&mut reactions, "❤️", true);
+        change_reactions(&mut reactions, "👍", false);
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].emoji, "❤️");
     }
 }
