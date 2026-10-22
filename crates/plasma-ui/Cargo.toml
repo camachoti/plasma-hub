@@ -12,6 +12,7 @@ plasma-platform = { path = "../plasma-platform" }
 plasma-store = { path = "../plasma-store" }
 plasma-telegram = { path = "../plasma-telegram" }
 plasma-download = { path = "../plasma-download" }
+plasma-duplicates = { path = "../plasma-duplicates" }
 plasma-twitter = { path = "../plasma-twitter" }
 plasma-extract = { path = "../plasma-extract" }
 dioxus = { workspace = true }

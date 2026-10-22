@@ -1,5 +1,6 @@
 //! Downloads queue, unified URL analysis and persisted history.
 
+use crate::context::{ContextMenuState, ContextTarget};
 use crate::downloads::{
     new_download_id, push_download, sanitize_filename, update_download, DownloadRecord,
 };
@@ -312,6 +313,20 @@ fn DownloadRow(item: DownloadRecord) -> Element {
 
     rsx! {
         article { class: "download-row {item.status}",
+            oncontextmenu: {
+                let record = item.clone();
+                move |event: Event<MouseData>| {
+                    event.prevent_default();
+                    let point = event.data().client_coordinates();
+                    ui.context_menu.set(Some(ContextMenuState::new(
+                        point.x,
+                        point.y,
+                        ContextTarget::Download {
+                            record: Box::new(record.clone()),
+                        },
+                    )));
+                }
+            },
             div { class: "download-row-head",
                 div { class: "download-row-title",
                     strong { "{item.title()}" }

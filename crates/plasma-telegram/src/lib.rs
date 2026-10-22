@@ -30,7 +30,34 @@ const STALE_NATIVE_PARTIAL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SENDER_NAME_RESOLUTION_CONCURRENCY: usize = 8;
 
 mod media_http;
+pub use media_http::avatar_url as chat_avatar_url;
 pub use media_http::start_server as start_plasma_media_http_server;
+
+/// Directory that stores the chat avatars downloaded from TDLib.
+pub fn telegram_avatar_dir(app: &AppEnv) -> PathBuf {
+    app.paths()
+        .cache_dir()
+        .join("plasma-media")
+        .join("telegram-avatars")
+}
+
+/// Returns the avatar already stored on disk for a chat, when there is one.
+pub fn cached_chat_avatar(app: &AppEnv, chat_id: i64) -> Option<PathBuf> {
+    let avatar_dir = telegram_avatar_dir(app);
+    let entries = std::fs::read_dir(&avatar_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value == chat_id.to_string())
+            && path.exists()
+        {
+            return Some(path);
+        }
+    }
+    None
+}
 
 #[derive(Default)]
 struct TdlibInner {
@@ -193,7 +220,7 @@ pub struct TdlibChatsResult {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibMessageInfo {
     pub id: i64,
@@ -330,27 +357,27 @@ pub struct TdlibMassDownloadResult {
     pub tracking_error: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TdlibDownloadItem {
-    name: String,
-    message_id: i64,
-    status: String,
-    progress: u8,
-    size: i64,
-    file_path: Option<String>,
-    thumbnail_path: Option<String>,
+pub struct TdlibDownloadItem {
+    pub name: String,
+    pub message_id: i64,
+    pub status: String,
+    pub progress: u8,
+    pub size: i64,
+    pub file_path: Option<String>,
+    pub thumbnail_path: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TdlibDownloadProgress {
-    chat_id: i64,
-    total: usize,
-    downloaded: f64,
-    current_file: String,
-    is_scanning: bool,
-    items: Vec<TdlibDownloadItem>,
+pub struct TdlibDownloadProgress {
+    pub chat_id: i64,
+    pub total: usize,
+    pub downloaded: f64,
+    pub current_file: String,
+    pub is_scanning: bool,
+    pub items: Vec<TdlibDownloadItem>,
 }
 
 #[derive(Clone, Serialize)]
@@ -4042,27 +4069,12 @@ pub async fn tdlib_download_chat_avatar(
     state: &TdlibManager,
     chat_id: i64,
 ) -> Result<TdlibAvatarResult, String> {
-    let avatar_dir = app
-        .paths()
-        .cache_dir()
-        .join("plasma-media")
-        .join("telegram-avatars");
-    if let Ok(entries) = std::fs::read_dir(&avatar_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value == chat_id.to_string())
-                && path.exists()
-            {
-                return Ok(TdlibAvatarResult {
-                    success: true,
-                    file_path: Some(path.to_string_lossy().to_string()),
-                    error: None,
-                });
-            }
-        }
+    if let Some(path) = cached_chat_avatar(app, chat_id) {
+        return Ok(TdlibAvatarResult {
+            success: true,
+            file_path: Some(path.to_string_lossy().to_string()),
+            error: None,
+        });
     }
 
     let client_id = match ready_client_id(state).await {

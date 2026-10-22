@@ -6,12 +6,44 @@ use std::time::Duration;
 use plasma_core::AppEnv;
 
 use super::{
-    complete_native_media_meta, ensure_native_playback_file, parse_plasma_media_path,
-    parse_range_header,
+    cached_chat_avatar, complete_native_media_meta, ensure_native_playback_file,
+    parse_plasma_media_path, parse_range_header,
 };
 
 static PLASMA_MEDIA_HTTP_PORT: OnceLock<u16> = OnceLock::new();
 static PLASMA_MEDIA_HTTP_TOKEN: OnceLock<String> = OnceLock::new();
+
+/// URL of the avatar of a chat, served by the local media server.
+pub fn avatar_url(chat_id: i64) -> String {
+    if let (Some(port), Some(token)) = (PLASMA_MEDIA_HTTP_PORT.get(), PLASMA_MEDIA_HTTP_TOKEN.get())
+    {
+        return format!("http://127.0.0.1:{port}/avatar/{chat_id}?token={token}");
+    }
+    format!("plasma-media://localhost/avatar/{chat_id}")
+}
+
+fn parse_avatar_path(path: &str) -> Option<i64> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("avatar"), Some(chat_id), None) => chat_id.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn avatar_content_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
+    }
+}
 
 fn request_has_token(target: &str, expected: &str) -> bool {
     target
@@ -216,6 +248,55 @@ fn copy_file_range(
     Ok(sent)
 }
 
+/// Serves the avatar of a chat from the local cache.
+fn write_avatar_response(
+    app: &AppEnv,
+    stream: &mut TcpStream,
+    method: &str,
+    chat_id: i64,
+) -> std::io::Result<()> {
+    let Some(path) = cached_chat_avatar(app, chat_id) else {
+        return write_text_response(stream, 404, "Avatar não encontrado".to_string());
+    };
+    let content_type = avatar_content_type(&path);
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) => return write_text_response(stream, 404, error.to_string()),
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+
+    if method.eq_ignore_ascii_case("HEAD") {
+        return write_headers(
+            stream,
+            200,
+            vec![
+                ("Accept-Ranges".to_string(), "bytes".to_string()),
+                ("Content-Type".to_string(), content_type.to_string()),
+                ("Content-Length".to_string(), len.to_string()),
+                (
+                    "Cache-Control".to_string(),
+                    "private, max-age=86400".to_string(),
+                ),
+            ],
+        );
+    }
+
+    let mut body = Vec::with_capacity(len as usize);
+    file.read_to_end(&mut body)?;
+    stream.write_all(&build_http_response(
+        200,
+        vec![
+            ("Content-Type".to_string(), content_type.to_string()),
+            ("Content-Length".to_string(), body.len().to_string()),
+            (
+                "Cache-Control".to_string(),
+                "private, max-age=86400".to_string(),
+            ),
+        ],
+        body,
+    ))
+}
+
 fn write_response(
     app: &AppEnv,
     stream: &mut TcpStream,
@@ -223,6 +304,10 @@ fn write_response(
     path: &str,
     range_header: Option<&str>,
 ) -> std::io::Result<()> {
+    if let Some(chat_id) = parse_avatar_path(path) {
+        return write_avatar_response(app, stream, method, chat_id);
+    }
+
     let Some((chat_id, message_id)) = parse_plasma_media_path(path) else {
         return write_text_response(stream, 400, "URL inválida".to_string());
     };

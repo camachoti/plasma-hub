@@ -4,7 +4,9 @@
 //! Telegram live in the UI-agnostic crates and reach this layer through
 //! [`state::AppServices`] and [`plasma_core::EventBus`].
 
+pub mod context;
 pub mod downloads;
+pub mod icons;
 pub mod state;
 pub mod theme;
 pub mod twitter;
@@ -16,16 +18,17 @@ use downloads::{
     DownloadRecord,
 };
 use plasma_core::AppEvent;
+use plasma_duplicates::SearchMatch;
 use plasma_store::SettingKey;
-use plasma_telegram::{TdlibChatInfo, TdlibForumTopicInfo, TdlibMessageInfo};
+use plasma_telegram::{TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo};
 use state::{
     apply_auth_error, apply_auth_status, bump_telegram_tick, mark_deleted_messages, AppServices,
-    Tab, UiState,
+    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress, Tab, UiState,
 };
 use theme::{Density, Palette};
 use views::{
-    downloads::DownloadsView, login::LoginView, palette::CommandPalette, settings::SettingsView,
-    telegram::TelegramView, toasts::ToastStack, twitter::TwitterView,
+    context_menu::ContextMenu, downloads::DownloadsView, login::LoginView, palette::CommandPalette,
+    settings::SettingsView, telegram::TelegramView, toasts::ToastStack, twitter::TwitterView,
 };
 
 const SHELL_CSS: &str = include_str!("../assets/shell.css");
@@ -71,6 +74,7 @@ pub fn App() -> Element {
     let messages_loading = use_signal(|| false);
     let messages_error = use_signal(|| None::<String>);
     let messages_has_more = use_signal(|| false);
+    let messages_key = use_signal(|| None::<String>);
 
     let topics = use_signal(Vec::<TdlibForumTopicInfo>::new);
     let selected_topic = use_signal(|| None::<TdlibForumTopicInfo>);
@@ -81,6 +85,15 @@ pub fn App() -> Element {
 
     let telegram_tick = use_signal(|| 0u64);
     let downloads = use_signal(Vec::<DownloadRecord>::new);
+    let mass_download_running = use_signal(|| false);
+    let mass_download_stopping = use_signal(|| false);
+    let mass_download_progress = use_signal(|| None::<MassDownloadProgress>);
+    let mass_download_open = use_signal(|| false);
+    let duplicate_search_progress = use_signal(|| None::<DuplicateSearchProgress>);
+    let context_menu = use_signal(|| None::<context::ContextMenuState>);
+    let reply_to = use_signal(|| None::<TdlibMessageInfo>);
+    let forward_state = use_signal(|| None::<ForwardState>);
+    let lightbox = use_signal(|| None::<LightboxState>);
     let shared_url = use_signal(|| services.initial_shared_url.clone());
 
     let mut ui = use_context_provider(|| UiState {
@@ -105,6 +118,7 @@ pub fn App() -> Element {
         messages_loading,
         messages_error,
         messages_has_more,
+        messages_key,
         topics,
         selected_topic,
         search_results,
@@ -112,6 +126,15 @@ pub fn App() -> Element {
         search_error,
         telegram_tick,
         downloads,
+        mass_download_running,
+        mass_download_stopping,
+        mass_download_progress,
+        mass_download_open,
+        duplicate_search_progress,
+        context_menu,
+        reply_to,
+        forward_state,
+        lightbox,
         shared_url,
     });
 
@@ -207,6 +230,49 @@ pub fn App() -> Element {
                             bump_telegram_tick(ui);
                         });
                     }
+                    Ok(AppEvent::TelegramDownloadProgress {
+                        chat_id,
+                        total,
+                        downloaded,
+                        current_file,
+                        is_scanning,
+                        items,
+                    }) => {
+                        let items = items
+                            .into_iter()
+                            .filter_map(|item| {
+                                serde_json::from_value::<TdlibDownloadItem>(item).ok()
+                            })
+                            .collect();
+                        ui.mass_download_progress.set(Some(MassDownloadProgress {
+                            chat_id,
+                            total,
+                            downloaded,
+                            current_file,
+                            is_scanning,
+                            items,
+                        }));
+                    }
+                    Ok(AppEvent::DuplicateSearchProgress {
+                        run_id,
+                        scanned,
+                        analyzed,
+                        matches,
+                        unreadable,
+                    }) => {
+                        let matches = matches
+                            .into_iter()
+                            .filter_map(|item| serde_json::from_value::<SearchMatch>(item).ok())
+                            .collect();
+                        ui.duplicate_search_progress
+                            .set(Some(DuplicateSearchProgress {
+                                run_id,
+                                scanned,
+                                analyzed,
+                                matches,
+                                unreadable,
+                            }));
+                    }
                     Ok(AppEvent::DownloadProgress {
                         id,
                         downloaded_bytes,
@@ -261,7 +327,10 @@ pub fn App() -> Element {
                         let next = !ui.show_palette();
                         ui.show_palette.set(next);
                     }
-                    "close" => ui.show_palette.set(false),
+                    "close" => {
+                        ui.show_palette.set(false);
+                        ui.context_menu.set(None);
+                    }
                     _ => {}
                 }
             }
@@ -270,6 +339,7 @@ pub fn App() -> Element {
 
     let palette = ui.palette();
     let density = ui.density();
+    let open_menu = ui.context_menu();
 
     rsx! {
         style { dangerous_inner_html: SHELL_CSS }
@@ -283,6 +353,28 @@ pub fn App() -> Element {
                 LoginView {}
             }
             CommandPalette {}
+            if let Some(menu) = open_menu {
+                ContextMenu {
+                    entries: menu.entries,
+                    x: menu.x,
+                    y: menu.y,
+                    on_select: {
+                        let services = services.clone();
+                        move |id: String| {
+                            let Some(menu) = ui.context_menu() else {
+                                return;
+                            };
+                            context::handle_context_action(
+                                services.clone(),
+                                ui,
+                                &menu.target,
+                                &id,
+                            );
+                        }
+                    },
+                    on_close: move |_| ui.context_menu.set(None),
+                }
+            }
             ToastStack {}
         }
     }
@@ -330,6 +422,7 @@ fn Shell() -> Element {
                         key: "{item.label()}",
                         class: if tab == item { "rail-item active" } else { "rail-item" },
                         title: "{item.label()}",
+                        "data-tip": "{item.label()}",
                         onclick: move |_| ui.tab.set(item),
                         "{item.rail_label()}"
                     }
@@ -338,6 +431,7 @@ fn Shell() -> Element {
                 button {
                     class: "rail-item",
                     title: "Paleta de comandos",
+                    "data-tip": "Paleta de comandos",
                     onclick: move |_| ui.show_palette.set(true),
                     "⌘"
                 }

@@ -27,6 +27,15 @@ fn run() -> Result<(), String> {
         bus: events.clone(),
     });
     let env = AppEnv::new(paths, emitter);
+
+    // WebKitGTK keeps its disk cache in `$XDG_CACHE_HOME/<app-name>`. A cache
+    // left behind by an interrupted run can leave the web process spinning
+    // without ever painting the page, which shows up as an empty window. The
+    // shell serves embedded assets and does not need a persistent web cache,
+    // so isolate it in the app cache and start every launch from a clean one.
+    #[cfg(target_os = "linux")]
+    prepare_webview_cache(&env)?;
+
     let settings = SettingsStore::open(&env).map_err(|error| error.to_string())?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -76,7 +85,9 @@ fn run() -> Result<(), String> {
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(LogicalSize::new(960.0, 640.0))
             .with_always_on_top(false);
-        let config = Config::new().with_window(window);
+        // The default Dioxus menu bar (Window/Edit/Help) is a native GTK menu
+        // that does not belong to the Plasma Hub interface, so it is removed.
+        let config = Config::new().with_window(window).with_menu(None);
 
         dioxus::LaunchBuilder::desktop()
             .with_context(services)
@@ -91,6 +102,37 @@ fn run() -> Result<(), String> {
             .launch(plasma_ui::App);
     }
 
+    Ok(())
+}
+
+/// Prepares an app-owned WebKitGTK cache directory for this launch.
+///
+/// Clearing the directory is intentional: a partial or stale cache can make
+/// WebKitGTK never finish its first paint, leaving the Dioxus window blank.
+/// The content is embedded in the binary, so losing this cache has no user
+/// data impact beyond regenerating it on the next page load.
+#[cfg(target_os = "linux")]
+fn prepare_webview_cache(env: &AppEnv) -> Result<(), String> {
+    let root = env.paths().cache_dir().join("webview");
+
+    if root.exists() {
+        std::fs::remove_dir_all(&root).map_err(|error| {
+            format!(
+                "não foi possível limpar o cache do WebView em {}: {error}",
+                root.display()
+            )
+        })?;
+    }
+
+    std::fs::create_dir_all(&root).map_err(|error| {
+        format!(
+            "não foi possível criar o cache do WebView em {}: {error}",
+            root.display()
+        )
+    })?;
+
+    // Must be set before WebKitGTK is initialized by Dioxus.
+    std::env::set_var("XDG_CACHE_HOME", &root);
     Ok(())
 }
 
@@ -234,6 +276,61 @@ impl EventEmitter for BusEmitter {
                 self.bus.publish(AppEvent::TelegramMessagesDeleted {
                     chat_id,
                     message_ids,
+                });
+            }
+            "tdlib-download-progress" => {
+                let Some(chat_id) = payload.get("chatId").and_then(Value::as_i64) else {
+                    return;
+                };
+                self.bus.publish(AppEvent::TelegramDownloadProgress {
+                    chat_id,
+                    total: payload
+                        .get("total")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default() as usize,
+                    downloaded: payload
+                        .get("downloaded")
+                        .and_then(Value::as_f64)
+                        .unwrap_or_default(),
+                    current_file: payload
+                        .get("currentFile")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    is_scanning: payload
+                        .get("isScanning")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    items: payload
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
+            "duplicate-media-search-progress" => {
+                let Some(run_id) = payload.get("runId").and_then(Value::as_str) else {
+                    return;
+                };
+                self.bus.publish(AppEvent::DuplicateSearchProgress {
+                    run_id: run_id.to_string(),
+                    scanned: payload
+                        .get("scanned")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    analyzed: payload
+                        .get("analyzed")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    matches: payload
+                        .get("matches")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                    unreadable: payload
+                        .get("unreadable")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
                 });
             }
             "telegram-media-progress" => {

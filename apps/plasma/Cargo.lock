@@ -3714,6 +3714,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-duplicates"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "plasma-core",
+ "plasma-download",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "plasma-extract"
 version = "0.1.0"
 dependencies = [
@@ -3809,6 +3821,7 @@ dependencies = [
  "dioxus",
  "plasma-core",
  "plasma-download",
+ "plasma-duplicates",
  "plasma-extract",
  "plasma-platform",
  "plasma-store",

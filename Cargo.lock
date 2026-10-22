@@ -3677,6 +3677,7 @@ dependencies = [
  "dioxus",
  "plasma-core",
  "plasma-download",
+ "plasma-duplicates",
  "plasma-extract",
  "plasma-platform",
  "plasma-store",

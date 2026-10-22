@@ -1,9 +1,21 @@
-//! Settings view for the Rust shell (appearance, session, migration).
+//! Settings view for the Rust shell (appearance, session, cache, migration).
 
 use crate::state::{apply_density, apply_palette, push_toast, AppServices, ToastKind, UiState};
 use crate::theme::{Density, Palette};
+use crate::views::select::{Select, SelectOption};
 use dioxus::prelude::*;
 use plasma_store::SettingKey;
+use plasma_telegram::NativeMediaCacheStats;
+
+/// Cache limits offered to the user, in bytes (`0` means unlimited).
+const CACHE_LIMITS: &[(i64, &str)] = &[
+    (0, "Sem limite"),
+    (500 * 1024 * 1024, "500 MB"),
+    (1024 * 1024 * 1024, "1 GB"),
+    (2 * 1024 * 1024 * 1024, "2 GB"),
+    (5 * 1024 * 1024 * 1024, "5 GB"),
+    (10 * 1024 * 1024 * 1024, "10 GB"),
+];
 
 const LEGACY_KEYS: &[&str] = &[
     "skip_login",
@@ -29,6 +41,30 @@ pub fn SettingsView() -> Element {
     });
     let palette = ui.palette();
     let density = ui.density();
+
+    let mut cache_stats = use_signal(|| None::<NativeMediaCacheStats>);
+    let mut cache_limit = use_signal(|| {
+        services
+            .settings
+            .get(SettingKey::MEDIA_CACHE_LIMIT)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    });
+    let mut clearing_cache = use_signal(|| false);
+    let mut confirm_clear = use_signal(|| false);
+
+    // The cache stats are read once when the screen opens.
+    let stats_services = services.clone();
+    use_effect(move || {
+        let services = stats_services.clone();
+        spawn(async move {
+            if let Ok(stats) = services.telegram.media_cache_stats().await {
+                cache_stats.set(Some(stats));
+            }
+        });
+    });
 
     let database_path = services
         .env
@@ -139,6 +175,121 @@ pub fn SettingsView() -> Element {
                 }
 
                 section { class: "settings-card",
+                    h2 { "Cache de mídia" }
+                    p { class: "hint",
+                        "Mídias baixadas do Telegram ficam em um cache local. O limite é aplicado \
+                         apagando os arquivos mais antigos quando o espaço é atingido."
+                    }
+                    div { class: "setting-row",
+                        div { class: "setting-row-copy",
+                            strong { "Cache nativo" }
+                            span {
+                                match &cache_stats() {
+                                    Some(stats) if stats.success => format!(
+                                        "{} em {} mídias",
+                                        format_bytes(stats.total_size),
+                                        stats.media_count
+                                    ),
+                                    Some(stats) => stats
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| "Indisponível".to_string()),
+                                    None => "Calculando...".to_string(),
+                                }
+                            }
+                        }
+                        button {
+                            class: if confirm_clear() { "btn small danger" } else { "btn small ghost" },
+                            disabled: clearing_cache(),
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    if !confirm_clear() {
+                                        confirm_clear.set(true);
+                                        return;
+                                    }
+                                    confirm_clear.set(false);
+                                    clearing_cache.set(true);
+                                    let services = services.clone();
+                                    spawn(async move {
+                                        match services.telegram.clear_media_cache().await {
+                                            Ok(stats) => {
+                                                cache_stats.set(Some(stats));
+                                                push_toast(
+                                                    ui.toasts,
+                                                    "Cache de mídia limpo.",
+                                                    ToastKind::Success,
+                                                );
+                                            }
+                                            Err(error) => push_toast(
+                                                ui.toasts,
+                                                format!("Falha ao limpar o cache: {error}"),
+                                                ToastKind::Error,
+                                            ),
+                                        }
+                                        clearing_cache.set(false);
+                                    });
+                                }
+                            },
+                            if clearing_cache() {
+                                "Limpando..."
+                            } else if confirm_clear() {
+                                "Confirmar limpeza"
+                            } else {
+                                "Limpar cache"
+                            }
+                        }
+                    }
+                    div { class: "setting-row",
+                        div { class: "setting-row-copy",
+                            strong { "Limite do cache" }
+                            span { "Espaço máximo usado pelas mídias baixadas." }
+                        }
+                        div { class: "setting-row-control",
+                            Select {
+                                value: cache_limit().to_string(),
+                                options: CACHE_LIMITS
+                                    .iter()
+                                    .map(|(bytes, label)| {
+                                        SelectOption::new(bytes.to_string(), (*label).to_string())
+                                    })
+                                    .collect(),
+                                placeholder: "Sem limite",
+                                disabled: false,
+                                on_change: {
+                                    let services = services.clone();
+                                    move |value: String| {
+                                        let bytes = value.parse::<i64>().unwrap_or(0);
+                                        cache_limit.set(bytes);
+                                        let services = services.clone();
+                                        spawn(async move {
+                                            if let Err(error) = services
+                                                .settings
+                                                .set(SettingKey::MEDIA_CACHE_LIMIT, &bytes.to_string())
+                                            {
+                                                push_toast(
+                                                    ui.toasts,
+                                                    format!("Falha ao salvar o limite: {error}"),
+                                                    ToastKind::Error,
+                                                );
+                                            }
+                                            match services.telegram.evict_media_cache(bytes).await {
+                                                Ok(stats) => cache_stats.set(Some(stats)),
+                                                Err(error) => push_toast(
+                                                    ui.toasts,
+                                                    format!("Falha ao aplicar o limite: {error}"),
+                                                    ToastKind::Error,
+                                                ),
+                                            }
+                                        });
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+
+                section { class: "settings-card",
                     h2 { "Migração do app antigo" }
                     p { class: "hint",
                         "Lê as chaves globais do localStorage desta WebView e copia para o SQLite. \
@@ -177,6 +328,22 @@ pub fn SettingsView() -> Element {
                 }
             }
         }
+    }
+}
+
+fn format_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = bytes.max(0) as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.0} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes / KB)
+    } else {
+        format!("{bytes:.0} B")
     }
 }
 

@@ -29,6 +29,22 @@ pub enum AppEvent {
         chat_id: i64,
         message_ids: Vec<i64>,
     },
+    TelegramDownloadProgress {
+        chat_id: i64,
+        total: usize,
+        downloaded: f64,
+        current_file: String,
+        is_scanning: bool,
+        items: Vec<Value>,
+    },
+    /// Progress of the duplicate media search.
+    DuplicateSearchProgress {
+        run_id: String,
+        scanned: u64,
+        analyzed: u64,
+        matches: Vec<Value>,
+        unreadable: u64,
+    },
     MediaProgress {
         chat_id: i64,
         message_id: i64,
@@ -71,6 +87,8 @@ impl AppEvent {
             Self::TelegramAuth { .. } => "telegram-auth",
             Self::TelegramNewMessage { .. } => "telegram-new-message",
             Self::TelegramMessagesDeleted { .. } => "telegram-messages-deleted",
+            Self::TelegramDownloadProgress { .. } => "telegram-download-progress",
+            Self::DuplicateSearchProgress { .. } => "duplicate-search-progress",
             Self::MediaProgress { .. } => "media-progress",
             Self::DownloadProgress { .. } => "download-progress",
             Self::DownloadDone { .. } => "download-done",

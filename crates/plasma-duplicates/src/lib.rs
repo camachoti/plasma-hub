@@ -11,14 +11,32 @@ use serde::{Deserialize, Serialize};
 
 use plasma_download::DownloadCancellation;
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchSource {
-    id: String,
-    name: String,
-    path: Option<String>,
-    bytes: Option<Vec<u8>>,
-    is_video: bool,
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub bytes: Option<Vec<u8>>,
+    pub is_video: bool,
+}
+
+impl SearchSource {
+    /// Source backed by a file already on disk.
+    pub fn from_path(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        path: impl Into<String>,
+        is_video: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            path: Some(path.into()),
+            bytes: None,
+            is_video,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -28,31 +46,31 @@ pub enum SearchMode {
     Visual,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchMatch {
-    source_id: String,
-    path: String,
+    pub source_id: String,
+    pub path: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchProgress {
-    run_id: String,
-    scanned: u64,
-    analyzed: u64,
-    matches: Vec<SearchMatch>,
-    unreadable: u64,
+    pub run_id: String,
+    pub scanned: u64,
+    pub analyzed: u64,
+    pub matches: Vec<SearchMatch>,
+    pub unreadable: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
-    scanned: u64,
-    analyzed: u64,
-    matches: Vec<SearchMatch>,
-    unreadable: u64,
-    canceled: bool,
+    pub scanned: u64,
+    pub analyzed: u64,
+    pub matches: Vec<SearchMatch>,
+    pub unreadable: u64,
+    pub canceled: bool,
 }
 
 struct PreparedSource {

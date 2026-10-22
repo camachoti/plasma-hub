@@ -1,18 +1,22 @@
 //! Shared UI state and services.
 
+use crate::context::ContextMenuState;
 use crate::downloads::{DownloadHandle, DownloadRecord};
 use crate::theme::{Density, Palette};
 use crate::twitter::TwitterHandle;
 use base64::Engine as _;
 use dioxus::prelude::*;
 use plasma_core::{AppEnv, EventBus};
+use plasma_duplicates::{SearchMatch, SearchMode, SearchResult, SearchSource};
 use plasma_extract::{DownloadSpec, MediaInfo, Platform};
 use plasma_store::{MessageCacheGetResult, MessageCacheMeta, SettingsStore};
 use plasma_telegram::{
-    NativePlaybackSource, NativeSavedMedia, TdlibChatCapabilitiesResult, TdlibChatInfo,
-    TdlibChatsResult, TdlibCommandResult, TdlibForumTopicInfo, TdlibForumTopicsResult,
-    TdlibForwardResult, TdlibManager, TdlibMessageInfo, TdlibMessagesResult,
-    TdlibSearchMessagesResult, TdlibSendResult, TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
+    NativeMediaAssetMeta, NativeMediaCacheStats, NativePlaybackSource, NativeSavedMedia,
+    TdlibChatCapabilitiesResult, TdlibChatInfo, TdlibChatsResult, TdlibCommandResult,
+    TdlibDownloadItem, TdlibForumTopicInfo, TdlibForumTopicsResult, TdlibForwardResult,
+    TdlibManager, TdlibMassDownloadRequest, TdlibMassDownloadResult, TdlibMessageInfo,
+    TdlibMessagesResult, TdlibSearchMessagesResult, TdlibSendResult, TdlibSharedMediaResult,
+    TdlibStatus, TdlibUserInfo,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -439,6 +443,121 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    pub async fn start_mass_download(
+        &self,
+        request: TdlibMassDownloadRequest,
+    ) -> Result<TdlibMassDownloadResult, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_start_mass_download(&env, &manager, request).await
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn stop_mass_download(&self) -> Result<(), String> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_stop_download(&manager).await });
+        self.join(handle).await?
+    }
+
+    /// Makes sure the avatar of a chat is available on disk.
+    ///
+    /// The file is cached under the app cache directory, so the second call
+    /// for the same chat does not touch TDLib again.
+    pub async fn ensure_chat_avatar(&self, chat_id: i64) -> Result<Option<String>, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_download_chat_avatar(&env, &manager, chat_id).await
+        });
+        let result = self.join(handle).await??;
+        if !result.success {
+            return Ok(None);
+        }
+        Ok(result.file_path)
+    }
+
+    /// URL of the avatar of a chat, served by the local media server.
+    pub fn chat_avatar_url(&self, chat_id: i64) -> Option<String> {
+        plasma_telegram::cached_chat_avatar(&self.env, chat_id)?;
+        let url = plasma_telegram::chat_avatar_url(chat_id);
+        // The local media server is the only transport that can serve the
+        // file; without it the row keeps the letter placeholder.
+        url.starts_with("http://").then_some(url)
+    }
+
+    /// Ensures the media of a message is cached and returns its metadata.
+    pub async fn ensure_media_cached(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<NativeMediaAssetMeta, String> {
+        let env = self.env.clone();
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::telegram_media_ensure_cached(
+                &env,
+                &manager,
+                chat_id,
+                message_id,
+                Some("user".to_string()),
+            )
+            .await
+        });
+        self.join(handle).await?
+    }
+
+    /// Searches copies of the given media inside a folder.
+    pub async fn search_duplicate_media(
+        &self,
+        run_id: String,
+        folder_path: String,
+        sources: Vec<SearchSource>,
+        mode: Option<SearchMode>,
+    ) -> Result<SearchResult, String> {
+        let env = self.env.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_duplicates::search_duplicate_media(&env, run_id, folder_path, sources, mode)
+                .await
+        });
+        self.join(handle).await?
+    }
+
+    /// Cancels a running duplicate search.
+    pub fn cancel_duplicate_search(&self, run_id: &str) -> bool {
+        plasma_download::cancel_download(&format!("duplicate-search-{run_id}"))
+    }
+
+    /// Size and item count of the native Telegram media cache.
+    pub async fn media_cache_stats(&self) -> Result<NativeMediaCacheStats, String> {
+        let env = self.env.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::telegram_media_cache_stats(&env).await });
+        self.join(handle).await?
+    }
+
+    /// Removes every file of the native Telegram media cache.
+    pub async fn clear_media_cache(&self) -> Result<NativeMediaCacheStats, String> {
+        let env = self.env.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::telegram_media_clear_cache(&env).await });
+        self.join(handle).await?
+    }
+
+    /// Evicts the oldest media until the cache fits the given size in bytes.
+    pub async fn evict_media_cache(&self, max_size: i64) -> Result<NativeMediaCacheStats, String> {
+        let env = self.env.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::telegram_media_evict_cache(&env, max_size).await
+        });
+        self.join(handle).await?
+    }
+
     pub async fn download_avatar(&self, chat_id: i64) -> Result<Option<String>, String> {
         let env = self.env.clone();
         let manager = self.manager.clone();
@@ -626,6 +745,44 @@ impl Toast {
     }
 }
 
+/// Progress of the duplicate media search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateSearchProgress {
+    pub run_id: String,
+    pub scanned: u64,
+    pub analyzed: u64,
+    pub matches: Vec<SearchMatch>,
+    pub unreadable: u64,
+}
+
+/// Progress emitted by a Telegram mass download.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MassDownloadProgress {
+    pub chat_id: i64,
+    pub total: usize,
+    pub downloaded: f64,
+    pub current_file: String,
+    pub is_scanning: bool,
+    pub items: Vec<TdlibDownloadItem>,
+}
+
+/// Message selected for forwarding.
+#[derive(Clone, PartialEq)]
+pub struct ForwardState {
+    pub source_chat_id: i64,
+    pub message: TdlibMessageInfo,
+}
+
+/// Media opened in the lightbox.
+#[derive(Clone, PartialEq)]
+pub struct LightboxState {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub is_video: bool,
+    pub is_photo: bool,
+    pub title: String,
+}
+
 /// Signal bundle shared through context.
 #[derive(Clone, Copy)]
 pub struct UiState {
@@ -653,6 +810,8 @@ pub struct UiState {
     pub messages_loading: Signal<bool>,
     pub messages_error: Signal<Option<String>>,
     pub messages_has_more: Signal<bool>,
+    /// Cache key of the conversation currently rendered in the timeline.
+    pub messages_key: Signal<Option<String>>,
 
     pub topics: Signal<Vec<TdlibForumTopicInfo>>,
     pub selected_topic: Signal<Option<TdlibForumTopicInfo>>,
@@ -664,6 +823,22 @@ pub struct UiState {
     pub telegram_tick: Signal<u64>,
 
     pub downloads: Signal<Vec<DownloadRecord>>,
+
+    pub mass_download_running: Signal<bool>,
+    pub mass_download_stopping: Signal<bool>,
+    pub mass_download_progress: Signal<Option<MassDownloadProgress>>,
+    pub mass_download_open: Signal<bool>,
+    pub duplicate_search_progress: Signal<Option<DuplicateSearchProgress>>,
+
+    /// Right-click menu opened at the pointer position.
+    pub context_menu: Signal<Option<ContextMenuState>>,
+
+    /// Message the composer replies to.
+    pub reply_to: Signal<Option<TdlibMessageInfo>>,
+    /// Message waiting to be forwarded.
+    pub forward_state: Signal<Option<ForwardState>>,
+    /// Media opened in the lightbox.
+    pub lightbox: Signal<Option<LightboxState>>,
 
     /// Pending URL delivered by an Android share intent.
     pub shared_url: Signal<Option<String>>,
@@ -758,6 +933,10 @@ impl UiState {
         (self.selected_topic)()
     }
 
+    pub fn messages_key(self) -> Option<String> {
+        (self.messages_key)()
+    }
+
     pub fn search_results(self) -> Vec<TdlibMessageInfo> {
         (self.search_results)()
     }
@@ -772,6 +951,42 @@ impl UiState {
 
     pub fn downloads(self) -> Vec<DownloadRecord> {
         (self.downloads)()
+    }
+
+    pub fn mass_download_running(self) -> bool {
+        (self.mass_download_running)()
+    }
+
+    pub fn mass_download_stopping(self) -> bool {
+        (self.mass_download_stopping)()
+    }
+
+    pub fn mass_download_progress(self) -> Option<MassDownloadProgress> {
+        (self.mass_download_progress)()
+    }
+
+    pub fn mass_download_open(self) -> bool {
+        (self.mass_download_open)()
+    }
+
+    pub fn duplicate_search_progress(self) -> Option<DuplicateSearchProgress> {
+        (self.duplicate_search_progress)()
+    }
+
+    pub fn context_menu(self) -> Option<ContextMenuState> {
+        (self.context_menu)()
+    }
+
+    pub fn reply_to(self) -> Option<TdlibMessageInfo> {
+        (self.reply_to)()
+    }
+
+    pub fn forward_state(self) -> Option<ForwardState> {
+        (self.forward_state)()
+    }
+
+    pub fn lightbox(self) -> Option<LightboxState> {
+        (self.lightbox)()
     }
 
     pub fn telegram_tick(self) -> u64 {
