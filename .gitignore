@@ -37,3 +37,6 @@ src-tauri/gen/android/*.keystore
 # Rust workspace build output
 /target
 /apps/plasma/target
+
+# libtdjson copiada para o bundle em tempo de empacotamento
+/apps/plasma/packaging/linux/*.so*

@@ -1,131 +1,203 @@
 # Plasma Hub
 
-Plasma Hub is a Tauri 2 application with a React/Vite frontend. The codebase is organized to keep the same app shell usable on desktop and Android, while platform-specific features are isolated behind small runtime and Tauri wrappers.
+Cliente de Telegram para desktop e Android com baixador de mídia (YouTube,
+Twitter/X, TikTok, Instagram, Reddit e links diretos). O aplicativo é escrito em
+Rust, com UI em Dioxus e um núcleo de domínio independente de UI.
 
-## Running
+## Tecnologias
 
-```bash
-npm install
-npm run tauri:dev
-```
+| Camada | Tecnologia |
+| --- | --- |
+| Linguagem | Rust 2021 (MSRV 1.85) |
+| UI desktop | Dioxus 0.7.10 (WebView via wry + WebKitGTK 4.1) |
+| UI Android | Dioxus 0.7.10 (mobile) + JNI + Gradle |
+| Telegram | TDLib via `tdlib-rs` (`libtdjson` compartilhado) |
+| Persistência | SQLite via `rusqlite` (bundled), WAL e migrações |
+| Async | Tokio |
+| Rede/downloads | `reqwest` + extratores nativos por plataforma |
+| Mídia | cache próprio; thumbnails com `ffmpeg` no desktop e `MediaMetadataRetriever` no Android |
+| Estilo | CSS embutido (`include_str!`) e ícones SVG próprios |
+| Empacotamento | Dioxus CLI 0.7.10 (`dx bundle`) → `.deb` + diretório portátil |
+| Frontend legado | React/TypeScript em `reference/react-frontend/` (somente consulta; não é compilado) |
 
-Build the desktop app:
+O build, os testes e o empacotamento não dependem de Node/npm: usam apenas Cargo
+e, para empacotar, o Dioxus CLI.
 
-```bash
-npm run tauri:build
-```
+## Requisitos
 
-Initialize and run Android:
+### Desktop Linux
 
-```bash
-npm run tauri:android:init
-npm run tauri:android:dev
-```
+- Rust 1.85 ou mais novo (recomendado: rustup).
+- GTK 3, WebKitGTK 4.1, libsoup 3 e as bibliotecas C++ usadas pelo TDLib.
 
-`npm run tauri:android:build` targets `aarch64` by default. The Android migration targets modern arm64 Android devices (`arm64-v8a`).
-
-Android support is an active compatibility target: the app should initialize and open, and native Telegram/TDLib plus Twitter/X download paths are expected to run through Tauri commands. YouTube uses the native Android extractor for direct streams and `signatureCipher` streams that can be resolved from the YouTube player.
-
-Android builds require a full JDK, Android SDK, and Android NDK. If Gradle reports that the Java toolchain does not provide `JAVA_COMPILER`, install a JDK package that includes `javac` and point `JAVA_HOME` to it.
-
-The Android npm scripts run `scripts/check-android-toolchain.sh` first. If it reports `aarch64-linux-android-clang` as missing, install an Android NDK through Android Studio or `sdkmanager`, then make sure `ANDROID_HOME` or `ANDROID_SDK_ROOT` points at the SDK.
-
-### Rust shell (migration)
-
-The Dioxus shell is the migration target and is independent of the Tauri
-frontend until the Phase 8 cutover:
+No Ubuntu/Zorin:
 
 ```bash
-npm run dev:ui
-npm run check:ui
-npm run build:ui
-npm run build:ui:android
+sudo apt install build-essential pkg-config libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libsoup-3.0-dev libssl-dev libxdo-dev \
+  libc++1 libc++abi1 libunwind-18
 ```
 
-`build:ui:android` requires Dioxus CLI 0.7.10 (`dx`) and an Android NDK. It
-packages `libtdjson.so` into the generated `jniLibs` before invoking Gradle;
-`dx` alone does not copy that library. The default debug APK is written under
+`ffmpeg` é necessário para gerar thumbnails de vídeo no desktop. O `dx`
+(Dioxus CLI 0.7.10) só é necessário para empacotar e para o Android:
+
+```bash
+cargo install dioxus-cli --version 0.7.10 --locked
+```
+
+### Credenciais do Telegram
+
+O build embute `PLASMA_TELEGRAM_API_ID` / `PLASMA_TELEGRAM_API_HASH` (ou
+`VITE_API_ID` / `VITE_API_HASH`) lidos do ambiente ou do `.env` na raiz do
+projeto. Variáveis de ambiente em tempo de execução têm precedência. O `.env`
+não é versionado.
+
+## Rodando
+
+```bash
+cargo run -p plasma
+```
+
+Na primeira execução o app cria os diretórios de dados e o
+`plasma-hub.sqlite3`. Para isolar dados de desenvolvimento ou testes:
+
+```bash
+PLASMA_HOME=/tmp/plasma-dev cargo run -p plasma
+```
+
+`PLASMA_HOME` é uma opção de desenvolvimento; sem ela, os caminhos seguem o
+diretório de dados da plataforma (identificador `com.camacho.plasmahub`).
+
+Build otimizado:
+
+```bash
+cargo build -p plasma --release
+```
+
+## Checks
+
+Validação completa do workspace:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo check --workspace --all-targets
+```
+
+Durante o desenvolvimento, os recortes mais rápidos são:
+
+```bash
+cargo check -p plasma
+cargo test -p plasma-ui
+cargo clippy -p plasma-ui --all-targets -- -D warnings
+```
+
+## Empacotamento desktop
+
+```bash
+scripts/bundle-dioxus-desktop.sh
+```
+
+O script:
+
+1. compila o app em `--release`;
+2. copia o `libtdjson.so.1.8.61` baixado pelo `tdlib-rs` para
+   `apps/plasma/packaging/linux/`;
+3. roda `dx bundle --desktop --release --package-types deb`;
+4. monta `dist/plasma-linux-x86_64/` com o binário e a biblioteca ao lado
+   (RUNPATH `$ORIGIN`).
+
+Artefatos:
+
+- `dist/plasma_0.1.0_amd64.deb` — binário em `/usr/bin/plasma` e `libtdjson` em
+  `/usr/lib/plasma` (RUNPATH `$ORIGIN/../lib/plasma`);
+- `dist/plasma-linux-x86_64/plasma` — execução direta sem instalar.
+
+Para instalar o pacote Debian:
+
+```bash
+sudo apt install ./dist/plasma_0.1.0_amd64.deb
+```
+
+## Android
+
+Requisitos: JDK com `javac`, Android SDK, Android NDK e Dioxus CLI 0.7.10.
+
+```bash
+scripts/check-android-toolchain.sh
+scripts/build-dioxus-android.sh debug
+```
+
+O script roda `dx build --android --target aarch64-linux-android`, copia o
+`libtdjson.so` para o `jniLibs/arm64-v8a` do projeto gerado e chama o Gradle —
+o `dx` sozinho não empacota essa biblioteca. O APK fica em
 `apps/plasma/target/dx/plasma/debug/android/app/app/build/outputs/apk/debug/`.
 
-## Project Map
-
-- `Cargo.toml`: Cargo workspace for the UI-agnostic Rust core and the Tauri adapters. The Dioxus shell in `apps/plasma` is a nested workspace until the Tauri cutover.
-- `crates/plasma-core`: shared errors, app paths, and the UI-agnostic `AppEnv`.
-- `crates/plasma-platform`: filesystem and OS helpers.
-- `crates/plasma-store`: SQLite message cache, download history, topic state, settings, and migrations.
-- `crates/plasma-download`: cancellation, streamed HTTPS downloads, and file sinks.
-- `crates/plasma-media`: media cache helpers and video thumbnails.
-- `crates/plasma-telegram`: TDLib integration and the loopback media server.
-- `crates/plasma-twitter`, `crates/plasma-tiktok`, `crates/plasma-youtube`: native extractors and downloaders.
-- `crates/plasma-duplicates`: duplicate media search.
-- `crates/plasma-instagram`, `crates/plasma-reddit`: migration placeholders.
-- `crates/plasma-ui`: Dioxus shell views, theme, and the virtualized timeline spike.
-- `apps/plasma`: Rust desktop/Android composition root that opens SQLite and launches the Dioxus WebView.
-- `src-tauri/src/commands`: thin Tauri adapters for the workspace crates.
-- `src/app`: app shell, navigation, login flow, and bootstrap hooks.
-- `src/features`: product domains such as Telegram, Twitter/X, downloader, and appearance.
-- `src/shared/platform`: runtime capability detection, service worker registration, and typed Tauri wrappers.
-- `src/shared/storage`: storage abstraction used before deciding the final desktop/mobile storage backend.
-
-The domain crates are UI-agnostic: they never import `tauri`, `dioxus`, `tao` or `wry`.
-See `docs/rust-rewrite-plan.md` for the full Rust migration plan.
-
-## Platform Notes
-
-The desktop app currently owns the full feature set. Android is intentionally conservative where native dependencies still need a mobile implementation:
-
-- TDLib native login/downloads are enabled in Tauri, including Android.
-- Twitter/X native downloads are enabled in Tauri, including Android, with download-directory fallback to app data when the system Downloads directory is unavailable.
-- YouTube direct and signed stream downloads can be saved by the native downloader on Android. Adaptive video-only formats are hidden on Android unless they already include audio, because the mobile path does not mux separate audio/video tracks.
-- Opening/revealing files is desktop-first; Android falls back to app/system paths where available.
-- Service worker registration is disabled inside Tauri webviews by default.
-
-## Validation
-
-Useful checks while refactoring:
+Para instalar em um device/emulador conectado:
 
 ```bash
-npm run build
-npm run check:rust
-cargo check -p plasma-hub
-scripts/check-android-toolchain.sh
+scripts/install-android-apk.sh
 ```
 
-Validate the generated Android project and native library with:
+O script usa o `adb` de `ANDROID_HOME`, `ANDROID_SDK_ROOT` ou
+`$HOME/Android/Sdk`.
 
-```bash
-npm run tauri:android:init -- --ci --skip-targets-install
-npx tauri android build --debug --apk --target aarch64 --ci
-```
+## Estrutura do repositório
 
-Use `--target aarch64` for physical Android validation. Other Android ABIs are outside the current migration scope.
+- `Cargo.toml`: workspace Cargo com todos os crates, o shell e o app.
+- `crates/plasma-core`: erros, caminhos do app, `AppEnv` e eventos.
+- `crates/plasma-platform`: helpers de filesystem e sistema operacional.
+- `crates/plasma-store`: cache SQLite de mensagens, histórico de downloads,
+  tópicos, settings e migrações.
+- `crates/plasma-download`: cancelamento, downloads HTTPS em streaming e sinks.
+- `crates/plasma-extract`: análise/despacho unificado por plataforma.
+- `crates/plasma-media`: cache de mídia e thumbnails.
+- `crates/plasma-telegram`: integração TDLib e servidor HTTP local de mídia.
+- `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: extratores e
+  downloaders nativos.
+- `crates/plasma-duplicates`: busca de mídia duplicada.
+- `crates/plasma-instagram`, `plasma-reddit`: placeholders da migração.
+- `crates/plasma-ui`: views Dioxus, tema, timeline virtualizada e CSS.
+- `apps/plasma`: composition root desktop/Android e renderer Dioxus.
+- `reference/react-frontend`: código React/TypeScript mantido como referência
+  para funcionalidades ainda não portadas. Não é compilado nem testado.
+- `docs/rust-rewrite-plan.md`: plano e histórico da migração para Rust.
+- `scripts/bundle-dioxus-desktop.sh`: empacotamento desktop.
+- `scripts/build-dioxus-android.sh`: empacotamento Android.
+- `scripts/check-android-toolchain.sh`: validação do ambiente Android.
 
-The debug APK is emitted at `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`.
-Install the release APK on a connected device or emulator with:
+Os crates de domínio são independentes de UI: não importam `dioxus`, `tao` ou
+`wry`. Eles recebem `plasma_core::AppEnv` e devolvem tipos de domínio; o shell
+apenas renderiza e encaminha ações.
 
-```bash
-npm run tauri:android:install
-```
+## Dados e compatibilidade
 
-The install script uses `adb` from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `$HOME/Android/Sdk` when `platform-tools` is not on `PATH`.
+- O SQLite continua sendo `plasma-hub.sqlite3`, com o mesmo schema e as mesmas
+  migrações do app anterior.
+- Cookies, mídia baixada e dados do TDLib permanecem nos caminhos existentes.
+- `.env`, keystores e arquivos de assinatura não são versionados.
 
-Use the Tauri Android command for mobile validation instead of plain `cargo check --target ...`, because the Tauri CLI injects the Android NDK linker environment expected by native dependencies.
+## Notas de plataforma
 
-If local builds fail with `No space left on device`, clear generated Cargo/Tauri artifacts:
+- TDLib (login, mensagens e downloads) funciona no desktop e no Android.
+- Twitter/X usa o downloader nativo nas duas plataformas, com fallback para o
+  diretório de dados do app quando o diretório de Downloads do sistema não está
+  disponível.
+- YouTube aceita streams diretos e assinados no Android; formatos adaptativos
+  só de vídeo ficam ocultos porque o caminho mobile não faz mux de áudio/vídeo.
+- Abrir/mostrar arquivos é prioridade desktop; no Android o app cai para o
+  próprio arquivo ou caminhos do sistema quando não há equivalente.
+- O Android usa `network_security_config` com cleartext liberado apenas para
+  `127.0.0.1` (playback e thumbnails via servidor loopback).
 
-```bash
-cd src-tauri && cargo clean
-```
+## Problemas comuns
 
-For repeated native builds on a small partition, use a target directory on a larger disk:
-
-```bash
-CARGO_TARGET_DIR=/path/with/space/plasma-target npm run tauri:dev
-```
-
-Manual desktop regression areas:
-
-- Login and skip-login.
-- Telegram navigation, messages, sending, and media download.
-- Downloads tab and Twitter/X library.
-- Settings and appearance changes.
+- **`libtdjson.so.1.8.61: cannot open shared object file`**: use o diretório
+  portátil/`.deb` gerado pelo script, ou rode a partir do repositório (o build
+  adiciona o caminho absoluto do `tdlib-rs` ao RUNPATH).
+- **Janela em branco no desktop**: valide o WebKitGTK e o renderer do Dioxus
+  conforme os riscos em `docs/rust-rewrite-plan.md`.
+- **Pouco espaço em disco**: `cargo clean` remove os artefatos; o diretório
+  `target/` pode ser apontado para outro disco com
+  `CARGO_TARGET_DIR=/caminho/maior/plasma-target`.

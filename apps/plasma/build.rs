@@ -66,6 +66,12 @@ fn emit_tdlib_rpath() {
             );
         }
     }
+
+    // Layouts empacotados: o .deb instala o binário em /usr/bin/plasma e a
+    // biblioteca em /usr/lib/plasma. "$ORIGIN" cobre também um pacote portátil
+    // com a lib ao lado do binário.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/plasma");
 }
 
 fn lookup(key: &str) -> Option<String> {

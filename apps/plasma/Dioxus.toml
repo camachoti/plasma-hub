@@ -6,6 +6,33 @@ android_main_activity = "android/MainActivity.kt"
 [bundle]
 identifier = "com.camacho.plasmahub"
 version = "0.1.0"
+publisher = "Camacho"
+copyright = "© 2026 Camacho"
+category = "SocialNetworking"
+short_description = "Cliente de Telegram e baixador de mídia."
+long_description = "Plasma Hub é um cliente de Telegram desktop e um baixador de mídia para YouTube, Twitter/X, TikTok, Instagram, Reddit e links diretos."
+icon = [
+    "packaging/icons/32x32.png",
+    "packaging/icons/128x128.png",
+    "packaging/icons/128x128@2x.png",
+    "packaging/icons/icon.png",
+]
+
+# O libtdjson vem do build do tdlib-rs; o script de empacotamento copia a
+# biblioteca para packaging/linux antes de chamar o dx.
+[bundle.deb]
+depends = [
+    "libwebkit2gtk-4.1-0",
+    "libgtk-3-0",
+    "libxdo3",
+    "libssl3",
+    "libc++1",
+    "libc++abi1",
+    "libunwind-18",
+]
+
+[bundle.deb.files]
+"/usr/lib/plasma/libtdjson.so.1.8.61" = "packaging/linux/libtdjson.so.1.8.61"
 
 [android]
 identifier = "com.camacho.plasmahub"
