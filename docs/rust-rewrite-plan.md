@@ -557,6 +557,21 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    posição visual quando histórico antigo é pré-inserido (deslocamento pelo delta de
    altura). `MessageTimeline` recebe o `Signal` das mensagens e guarda os limites
    anteriores em um `CopyValue`, sem re-disparar o efeito a cada render.
+20. Tópicos ocultos e listagem (2026-10-22): os chips de tópico dos grupos de fórum
+   passaram a abrir um menu de contexto com “Ocultar tópico” (ou “Mostrar tópico”) e
+   “Exibir listagem de tópicos”. A visibilidade é por conversa, persistida em
+   `plasma_hidden_topics_<chat_id>` (JSON no `SettingsStore`, mesma chave usada pelo
+   React), e o chip do tópico aberto continua visível para não esconder a conversa ativa.
+   A listagem abre o diálogo `TopicBrowser` (`plasma-ui::views::topics`) com pesquisa,
+   alternância “Exibir tópicos ocultos (N)”, linha “Todos os tópicos”, seleção do tópico,
+   status (não lidas/fechado) e o mesmo menu de contexto por linha. O visual segue o shell
+   (modal card, tokens, ícones SVG), não o painel React.
+21. Select acima de modais (2026-10-22): a lista de opções do `Select` deixou de ser
+   renderizada dentro do campo. `open_select` mede o trigger e publica a lista em
+   `UiState::select_portal`; o shell renderiza `SelectMenu` na raiz com coordenadas de
+   viewport, então `overflow: hidden` e `backdrop-filter` de modais/painéis não recortam
+   mais o dropdown. A lista vira para cima quando não há espaço abaixo e o clique fora
+   fecha o menu.
 
 ### Fase 5 — downloads e Twitter implementados (2026-10-20)
 
