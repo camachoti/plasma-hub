@@ -224,6 +224,12 @@ pub enum MessageAction {
     Forward,
 }
 
+/// Mounted thumbnails kept in memory before the cache is dropped wholesale.
+///
+/// Data URLs are small enough to keep a scrolled conversation responsive, and
+/// the cap keeps a very long session from growing without bound.
+const THUMBNAIL_CACHE_LIMIT: usize = 512;
+
 #[component]
 pub(crate) fn MessageThumbnail(
     chat_id: i64,
@@ -232,27 +238,59 @@ pub(crate) fn MessageThumbnail(
     on_open: EventHandler<()>,
 ) -> Element {
     let services = use_context::<AppServices>();
+    let ui = use_context::<UiState>();
+    let key = (chat_id, message_id);
+    // Resolve from the memory cache first: rows that leave and re-enter the
+    // virtualized window used to show "…" and reload the thumbnail every time.
+    let cached_url = ui.thumbnails.read().get(&key).cloned();
+    let already_cached = cached_url.is_some();
+    let mut thumbnails = ui.thumbnails;
     let resource = use_resource(move || {
         let services = services.clone();
         async move {
+            if already_cached {
+                return Ok(None);
+            }
             services
                 .telegram
                 .thumbnail_data_url(chat_id, message_id)
                 .await
         }
     });
+    use_effect(move || {
+        let url = {
+            let state = resource.read();
+            match &*state {
+                Some(Ok(Some(url))) => url.clone(),
+                _ => return,
+            }
+        };
+        let mut cache = thumbnails.write();
+        if cache.get(&key) == Some(&url) {
+            return;
+        }
+        if cache.len() >= THUMBNAIL_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, url);
+    });
 
+    let state = resource.read_unchecked();
     rsx! {
         button {
             r#type: "button",
             class: "message-thumb",
             title: "Abrir mídia",
             onclick: move |_| on_open.call(()),
-            match &*resource.read_unchecked() {
-                Some(Ok(Some(url))) => rsx! { img { src: "{url}", alt: "" } },
-                Some(Ok(None)) => rsx! { span { class: "thumb-placeholder", "▣" } },
-                Some(Err(error)) => rsx! { span { class: "thumb-placeholder", title: "{error}", "!" } },
-                None => rsx! { span { class: "thumb-placeholder", "…" } },
+            if let Some(url) = cached_url {
+                img { src: "{url}", alt: "" }
+            } else {
+                match &*state {
+                    Some(Ok(Some(url))) => rsx! { img { src: "{url}", alt: "" } },
+                    Some(Ok(None)) => rsx! { span { class: "thumb-placeholder", "▣" } },
+                    Some(Err(error)) => rsx! { span { class: "thumb-placeholder", title: "{error}", "!" } },
+                    None => rsx! { span { class: "thumb-placeholder", "…" } },
+                }
             }
             if is_video {
                 span { class: "thumb-play", "▶" }
@@ -314,6 +352,16 @@ async fn apply_scroll(intent: ScrollIntent) {
                 element.__plasmaBottom =
                     element.scrollHeight - element.scrollTop - element.clientHeight;
             }}, {{ passive: true }});
+            // Keep the newest message visible when the viewport itself changes
+            // (composer/reply banner growth, window resize) while at the bottom.
+            if (typeof ResizeObserver !== "undefined") {{
+                new ResizeObserver(() => {{
+                    const bottom = element.__plasmaBottom;
+                    if (bottom == null || bottom >= 120) return;
+                    element.scrollTop = element.scrollHeight;
+                    element.__plasmaBottom = 0;
+                }}).observe(element);
+            }}
         }}
         const mode = "{mode}";
         const anchor = element.__plasmaBottom;

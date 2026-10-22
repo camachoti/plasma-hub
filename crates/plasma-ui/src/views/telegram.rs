@@ -4,8 +4,9 @@
 use crate::context::{ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
 use crate::state::{
-    load_hidden_topics, merge_messages, message_cache_key, push_toast, topic_visibility_key,
-    AppServices, ForwardState, LightboxState, MassDownloadProgress, ToastKind, UiState,
+    load_hidden_topics, merge_messages, message_cache_key, push_toast, set_if_changed,
+    topic_visibility_key, AppServices, ForwardState, LightboxState, MassDownloadProgress,
+    ToastKind, UiState,
 };
 use crate::views::chat_list;
 use crate::views::chat_list::ChatRow;
@@ -57,8 +58,8 @@ fn RealTelegram() -> Element {
         let services = chat_services.clone();
         spawn(async move {
             // Only the first load shows the placeholder; refreshes keep the list.
-            ui.chats_loading.set(ui.chats().is_empty());
-            ui.chats_error.set(None);
+            set_if_changed(ui.chats_loading, ui.chats().is_empty());
+            set_if_changed(ui.chats_error, None::<String>);
             match services.telegram.get_chats(150).await {
                 Ok(result) if result.success => {
                     let dialogs = result.dialogs;
@@ -66,7 +67,7 @@ fn RealTelegram() -> Element {
                         if let Some(updated) =
                             dialogs.iter().find(|chat| chat.id == selected.id).cloned()
                         {
-                            ui.selected_chat.set(Some(updated));
+                            set_if_changed(ui.selected_chat, Some(updated));
                         }
                     } else if let Some(first) = dialogs.first().cloned() {
                         if let Some(chat_id) = parse_chat_id(&first) {
@@ -74,16 +75,21 @@ fn RealTelegram() -> Element {
                         }
                         ui.selected_chat.set(Some(first));
                     }
-                    ui.chats.set(dialogs);
+                    set_if_changed(ui.chats, dialogs);
                 }
-                Ok(result) => ui.chats_error.set(
-                    result
-                        .error
-                        .or_else(|| Some("TDLib não retornou conversas.".into())),
-                ),
-                Err(error) => ui.chats_error.set(Some(error)),
+                Ok(result) => {
+                    set_if_changed(
+                        ui.chats_error,
+                        result
+                            .error
+                            .or_else(|| Some("TDLib não retornou conversas.".into())),
+                    );
+                }
+                Err(error) => {
+                    set_if_changed(ui.chats_error, Some(error));
+                }
             }
-            ui.chats_loading.set(false);
+            set_if_changed(ui.chats_loading, false);
         });
     });
 
@@ -109,7 +115,7 @@ fn RealTelegram() -> Element {
             if let Ok(result) = services.telegram.get_forum_topics(chat_id, 200).await {
                 if result.success && ui.selected_chat().map(|item| item.id) == Some(chat.id.clone())
                 {
-                    ui.topics.set(result.topics);
+                    set_if_changed(ui.topics, result.topics);
                 }
             }
         });
@@ -1555,7 +1561,7 @@ fn send_media_file(
     });
 }
 
-fn update_chat_preview(mut ui: UiState, chat_id: &str, message: &TdlibMessageInfo) {
+fn update_chat_preview(ui: UiState, chat_id: &str, message: &TdlibMessageInfo) {
     let mut chats = ui.chats();
     if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
         chat.last_message_text = message.text.clone();
@@ -1564,7 +1570,7 @@ fn update_chat_preview(mut ui: UiState, chat_id: &str, message: &TdlibMessageInf
         chat.last_message_is_video = message.is_video;
         chat.last_message_is_photo = message.is_photo;
     }
-    ui.chats.set(chats);
+    set_if_changed(ui.chats, chats);
     if let Some(selected) = ui.selected_chat() {
         if selected.id == chat_id {
             let mut selected = selected;
@@ -1573,7 +1579,7 @@ fn update_chat_preview(mut ui: UiState, chat_id: &str, message: &TdlibMessageInf
             selected.last_message_has_media = message.has_media;
             selected.last_message_is_video = message.is_video;
             selected.last_message_is_photo = message.is_photo;
-            ui.selected_chat.set(Some(selected));
+            set_if_changed(ui.selected_chat, Some(selected));
         }
     }
 }
@@ -1696,7 +1702,7 @@ async fn load_conversation(
                 .filter_map(|value| serde_json::from_value::<TdlibMessageInfo>(value.clone()).ok())
                 .collect();
             if !cached.is_empty() && conversation_matches(ui, &chat, topic.as_ref()) {
-                ui.messages.set(cached.clone());
+                set_if_changed(ui.messages, cached.clone());
             }
         }
     }
@@ -1714,8 +1720,8 @@ async fn load_conversation(
             }
             let mut merged = if keep_visible { ui.messages() } else { cached };
             merge_messages(&mut merged, result.messages);
-            ui.messages.set(merged.clone());
-            ui.messages_has_more.set(result.has_more);
+            set_if_changed(ui.messages, merged.clone());
+            set_if_changed(ui.messages_has_more, result.has_more);
             let _ = services.telegram.cache_messages(cache_key, merged).await;
         }
         Ok(result) => {
@@ -1772,8 +1778,8 @@ fn load_older(
                 }
                 let mut merged = ui.messages();
                 merge_messages(&mut merged, result.messages);
-                ui.messages.set(merged.clone());
-                ui.messages_has_more.set(result.has_more);
+                set_if_changed(ui.messages, merged.clone());
+                set_if_changed(ui.messages_has_more, result.has_more);
                 let _ = services.telegram.cache_messages(cache_key, merged).await;
             }
             Ok(result) => ui.messages_error.set(

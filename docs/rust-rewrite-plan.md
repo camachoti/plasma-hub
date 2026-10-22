@@ -572,6 +572,14 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
    viewport, então `overflow: hidden` e `backdrop-filter` de modais/painéis não recortam
    mais o dropdown. A lista vira para cima quando não há espaço abaixo e o clique fora
    fecha o menu.
+22. Desempenho da timeline (2026-10-22): `set_if_changed` passou a ser usado em chats,
+    tópicos, mensagens, `has_more`, erros e carregamento, para que refreshes em segundo
+    plano que devolvem os mesmos dados não notifiquem nem re-renderizem o shell. As
+    thumbnails ficaram em um cache em memória (`(chat_id, message_id)` -> data URL, limite
+    de 512) em `UiState::thumbnails`, então linhas que saem e voltam à janela virtualizada
+    aparecem de imediato em vez de piscar o placeholder e baixar de novo. Um
+    `ResizeObserver` no container mantém a última mensagem visível quando o viewport muda
+    (composer, banner de resposta, redimensionamento) e o leitor já estava no fim.
 
 ### Fase 5 — downloads e Twitter implementados (2026-10-20)
 

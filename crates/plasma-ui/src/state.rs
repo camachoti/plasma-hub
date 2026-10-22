@@ -820,6 +820,9 @@ pub struct UiState {
     pub selected_topic: Signal<Option<TdlibForumTopicInfo>>,
     /// Hidden topic keys (`kind:id`) of the selected chat.
     pub hidden_topics: Signal<Vec<String>>,
+    /// In-memory thumbnails (`(chat_id, message_id)` -> data URL) so rows that
+    /// leave and re-enter the virtualized window do not flash the placeholder.
+    pub thumbnails: Signal<std::collections::HashMap<(i64, i64), String>>,
     /// Whether the topic list dialog is open.
     pub topic_browser_open: Signal<bool>,
 
@@ -1035,7 +1038,7 @@ pub fn topic_hidden_setting_key(chat_id: i64) -> String {
 }
 
 /// Loads the hidden topics persisted for a chat.
-pub fn load_hidden_topics(services: &AppServices, mut ui: UiState, chat_id: i64) {
+pub fn load_hidden_topics(services: &AppServices, ui: UiState, chat_id: i64) {
     let keys = services
         .settings
         .get_raw(&topic_hidden_setting_key(chat_id))
@@ -1043,7 +1046,7 @@ pub fn load_hidden_topics(services: &AppServices, mut ui: UiState, chat_id: i64)
         .flatten()
         .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
         .unwrap_or_default();
-    ui.hidden_topics.set(keys);
+    set_if_changed(ui.hidden_topics, keys);
 }
 
 /// Toggles a topic between hidden and visible, persisting the chat list.
@@ -1078,6 +1081,22 @@ pub fn toggle_topic_hidden(
     }
     ui.hidden_topics.set(keys);
     hidden
+}
+
+/// Writes `next` only when it differs from the current value.
+///
+/// `Signal::set` always notifies its subscribers, so background refreshes that
+/// return the same data would re-render the shell (and the timeline) on every
+/// TDLib update. Returns `true` when the value changed.
+pub fn set_if_changed<T: PartialEq + 'static>(mut signal: Signal<T>, next: T) -> bool {
+    let changed = {
+        let current = signal.read();
+        *current != next
+    };
+    if changed {
+        signal.set(next);
+    }
+    changed
 }
 
 pub fn push_toast(mut toasts: Signal<Vec<Toast>>, message: impl Into<String>, kind: ToastKind) {

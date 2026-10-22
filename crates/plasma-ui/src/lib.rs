@@ -87,6 +87,7 @@ pub fn App() -> Element {
     let selected_topic = use_signal(|| None::<TdlibForumTopicInfo>);
     let hidden_topics = use_signal(Vec::<String>::new);
     let topic_browser_open = use_signal(|| false);
+    let thumbnails = use_signal(std::collections::HashMap::<(i64, i64), String>::new);
 
     let search_results = use_signal(Vec::<TdlibMessageInfo>::new);
     let search_loading = use_signal(|| false);
@@ -133,6 +134,7 @@ pub fn App() -> Element {
         selected_topic,
         hidden_topics,
         topic_browser_open,
+        thumbnails,
         search_results,
         search_loading,
         search_error,
