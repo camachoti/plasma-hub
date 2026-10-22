@@ -1067,19 +1067,22 @@ pub fn toggle_topic_hidden(
         keys.push(key);
         true
     };
+    // Update the UI first and persist off the UI thread: the SQLite write used
+    // to keep the chip visible until it finished.
+    ui.hidden_topics.set(keys.clone());
     if let Ok(raw) = serde_json::to_string(&keys) {
-        if let Err(error) = services
-            .settings
-            .set_raw(&topic_hidden_setting_key(chat_id), &raw)
-        {
-            push_toast(
-                ui.toasts,
-                format!("Falha ao salvar os tópicos ocultos: {error}"),
-                ToastKind::Error,
-            );
-        }
+        let services = services.clone();
+        let setting = topic_hidden_setting_key(chat_id);
+        spawn(async move {
+            if let Err(error) = services.settings.set_raw(&setting, &raw) {
+                push_toast(
+                    ui.toasts,
+                    format!("Falha ao salvar os tópicos ocultos: {error}"),
+                    ToastKind::Error,
+                );
+            }
+        });
     }
-    ui.hidden_topics.set(keys);
     hidden
 }
 
