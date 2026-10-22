@@ -12,4 +12,5 @@ pub mod spike;
 pub mod telegram;
 pub mod timeline;
 pub mod toasts;
+pub mod topics;
 pub mod twitter;

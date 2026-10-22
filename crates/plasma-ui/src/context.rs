@@ -7,9 +7,11 @@
 
 use crate::downloads::DownloadRecord;
 use crate::icons::IconName;
-use crate::state::{push_toast, AppServices, LightboxState, ToastKind, UiState};
+use crate::state::{
+    push_toast, toggle_topic_hidden, AppServices, LightboxState, ToastKind, UiState,
+};
 use dioxus::prelude::*;
-use plasma_telegram::TdlibMessageInfo;
+use plasma_telegram::{TdlibForumTopicInfo, TdlibMessageInfo};
 
 /// A single row of the context menu.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +74,13 @@ pub enum ContextTarget {
         chat_id: i64,
         message: Box<TdlibMessageInfo>,
     },
+    /// A forum topic chip or row. `hidden` mirrors the current visibility so
+    /// the menu label can offer hide/show.
+    Topic {
+        chat_id: i64,
+        topic: Box<TdlibForumTopicInfo>,
+        hidden: bool,
+    },
     /// An album (grouped media) of the timeline. `anchor_id` is the media the
     /// user right-clicked, used by the single-item actions.
     Album {
@@ -123,6 +132,24 @@ impl ContextTarget {
                 }
                 entries
             }
+            ContextTarget::Topic { hidden, .. } => vec![
+                ContextMenuEntry::new(
+                    "topic.toggle",
+                    if *hidden {
+                        "Mostrar tópico"
+                    } else {
+                        "Ocultar tópico"
+                    },
+                )
+                .icon(if *hidden {
+                    IconName::Eye
+                } else {
+                    IconName::EyeOff
+                }),
+                ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
+                    .icon(IconName::List)
+                    .separator(),
+            ],
             ContextTarget::Album {
                 messages,
                 anchor_id,
@@ -234,6 +261,8 @@ pub fn handle_context_action(
                 ui.messages_key.set(None);
                 ui.messages_has_more.set(false);
                 ui.selected_topic.set(None);
+                ui.hidden_topics.set(Vec::new());
+                ui.topic_browser_open.set(false);
                 ui.reply_to.set(None);
             }
         }
@@ -256,6 +285,18 @@ pub fn handle_context_action(
             spawn(async move {
                 copy_to_clipboard(chat_id).await;
             });
+        }
+        (ContextTarget::Topic { chat_id, topic, .. }, "topic.toggle") => {
+            let hidden = toggle_topic_hidden(&services, ui, *chat_id, topic);
+            let message = if hidden {
+                format!("Tópico \"{}\" oculto.", topic.title)
+            } else {
+                format!("Tópico \"{}\" visível novamente.", topic.title)
+            };
+            push_toast(ui.toasts, message, ToastKind::Info);
+        }
+        (ContextTarget::Topic { .. }, "topic.browse") => {
+            ui.topic_browser_open.set(true);
         }
         (ContextTarget::Message { message, .. }, "message.reply") => {
             ui.reply_to.set(Some(message.as_ref().clone()));

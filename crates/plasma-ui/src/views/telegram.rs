@@ -1,10 +1,11 @@
 //! Telegram view: real TDLib chats, topics, search and cache when signed in;
 //! a local preview on the same shell before login.
 
+use crate::context::{ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
 use crate::state::{
-    merge_messages, message_cache_key, push_toast, AppServices, ForwardState, LightboxState,
-    MassDownloadProgress, ToastKind, UiState,
+    load_hidden_topics, merge_messages, message_cache_key, push_toast, topic_visibility_key,
+    AppServices, ForwardState, LightboxState, MassDownloadProgress, ToastKind, UiState,
 };
 use crate::views::chat_list;
 use crate::views::chat_list::ChatRow;
@@ -12,6 +13,7 @@ use crate::views::duplicate_search::{DuplicateSearchDialog, DuplicateSearchItem}
 use crate::views::select::{Select, SelectOption};
 use crate::views::spike::VirtualTimeline;
 use crate::views::timeline::{format_timestamp, MessageAction, MessageThumbnail, MessageTimeline};
+use crate::views::topics::TopicBrowser;
 use dioxus::prelude::*;
 use plasma_telegram::{
     TdlibChatInfo, TdlibForumTopicInfo, TdlibMassDownloadRequest, TdlibMessageInfo,
@@ -111,6 +113,22 @@ fn RealTelegram() -> Element {
                 }
             }
         });
+    });
+
+    // Hidden topics are tracked per chat; load them when the conversation
+    // changes instead of on every Telegram tick.
+    let mut hidden_topics_chat = use_hook(|| CopyValue::new(None::<i64>));
+    let hidden_topics_services = services.clone();
+    use_effect(move || {
+        let chat_id = ui.selected_chat().and_then(|chat| parse_chat_id(&chat));
+        if hidden_topics_chat() == chat_id {
+            return;
+        }
+        hidden_topics_chat.set(chat_id);
+        match chat_id {
+            Some(chat_id) => load_hidden_topics(&hidden_topics_services, ui, chat_id),
+            None => ui.hidden_topics.set(Vec::new()),
+        }
     });
 
     let message_services = services.clone();
@@ -258,6 +276,20 @@ fn RealTelegram() -> Element {
         .collect();
     let mass_chat = selected.clone();
     let mass_topics = topics.clone();
+    // Hidden topics disappear from the chips bar, except the one currently
+    // open (it stays visible so the active conversation is not a mystery).
+    let hidden_keys = ui.hidden_topics();
+    let listed_topics: Vec<TdlibForumTopicInfo> = topics
+        .iter()
+        .filter(|item| {
+            let hidden = hidden_keys
+                .iter()
+                .any(|key| *key == topic_visibility_key(item));
+            !hidden || topic.as_ref().map(|current| current.id) == Some(item.id)
+        })
+        .cloned()
+        .collect();
+    let browser_chat = selected.clone();
 
     rsx! {
         div { class: "telegram-layout",
@@ -416,15 +448,35 @@ fn RealTelegram() -> Element {
                                 },
                                 "Todos"
                             }
-                            for item in topics {
+                            for item in listed_topics {
                                 button {
-                                    key: "{item.id}",
+                                    key: "{item.kind}:{item.id}",
                                     class: if topic.as_ref().map(|current| current.id) == Some(item.id) { "topic-chip active" } else { "topic-chip" },
                                     onclick: {
                                         let item = item.clone();
                                         move |_| {
                                             ui.selected_topic.set(Some(item.clone()));
                                             ui.reply_to.set(None);
+                                        }
+                                    },
+                                    oncontextmenu: {
+                                        let item = item.clone();
+                                        let hidden = hidden_keys
+                                            .iter()
+                                            .any(|key| *key == topic_visibility_key(&item));
+                                        move |event: Event<MouseData>| {
+                                            event.prevent_default();
+                                            event.stop_propagation();
+                                            let point = event.data().client_coordinates();
+                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                point.x,
+                                                point.y,
+                                                ContextTarget::Topic {
+                                                    chat_id: timeline_chat_id,
+                                                    topic: Box::new(item.clone()),
+                                                    hidden,
+                                                },
+                                            )));
                                         }
                                     },
                                     if item.is_closed { "🔒 " }
@@ -752,6 +804,14 @@ fn RealTelegram() -> Element {
                 DuplicateSearchDialog {
                     items: duplicate_items.clone(),
                     on_close: move |_| duplicate_search_open.set(false),
+                }
+            }
+            if ui.topic_browser_open() {
+                if let Some(chat) = browser_chat {
+                    TopicBrowser {
+                        chat,
+                        on_close: move |_| ui.topic_browser_open.set(false),
+                    }
                 }
             }
             if ui.mass_download_open() {

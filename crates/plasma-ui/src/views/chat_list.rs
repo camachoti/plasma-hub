@@ -114,6 +114,8 @@ pub fn open_chat(services: AppServices, mut ui: UiState, chat: TdlibChatInfo) {
     selected.unread_count = 0;
     ui.selected_chat.set(Some(selected.clone()));
     ui.selected_topic.set(None);
+    ui.hidden_topics.set(Vec::new());
+    ui.topic_browser_open.set(false);
     ui.avatar.set(None);
     ui.messages.set(Vec::new());
     ui.messages_has_more.set(false);

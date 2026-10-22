@@ -4,6 +4,7 @@ use crate::context::ContextMenuState;
 use crate::downloads::{DownloadHandle, DownloadRecord};
 use crate::theme::{Density, Palette};
 use crate::twitter::TwitterHandle;
+use crate::views::select::SelectPortal;
 use base64::Engine as _;
 use dioxus::prelude::*;
 use plasma_core::{AppEnv, EventBus};
@@ -793,6 +794,8 @@ pub struct UiState {
     pub show_spike: Signal<bool>,
     pub show_palette: Signal<bool>,
     pub toasts: Signal<Vec<Toast>>,
+    /// Option list of the select currently open, rendered at the app root.
+    pub select_portal: Signal<Option<SelectPortal>>,
 
     pub auth_state: Signal<String>,
     pub auth_error: Signal<Option<String>>,
@@ -815,6 +818,10 @@ pub struct UiState {
 
     pub topics: Signal<Vec<TdlibForumTopicInfo>>,
     pub selected_topic: Signal<Option<TdlibForumTopicInfo>>,
+    /// Hidden topic keys (`kind:id`) of the selected chat.
+    pub hidden_topics: Signal<Vec<String>>,
+    /// Whether the topic list dialog is open.
+    pub topic_browser_open: Signal<bool>,
 
     pub search_results: Signal<Vec<TdlibMessageInfo>>,
     pub search_loading: Signal<bool>,
@@ -933,6 +940,24 @@ impl UiState {
         (self.selected_topic)()
     }
 
+    /// Keys (`kind:id`) of the topics hidden in the selected chat.
+    pub fn hidden_topics(self) -> Vec<String> {
+        (self.hidden_topics)()
+    }
+
+    pub fn topic_hidden(self, topic: &TdlibForumTopicInfo) -> bool {
+        let key = topic_visibility_key(topic);
+        self.hidden_topics().contains(&key)
+    }
+
+    pub fn topic_browser_open(self) -> bool {
+        (self.topic_browser_open)()
+    }
+
+    pub fn select_portal(self) -> Option<SelectPortal> {
+        (self.select_portal)()
+    }
+
     pub fn messages_key(self) -> Option<String> {
         (self.messages_key)()
     }
@@ -992,6 +1017,67 @@ impl UiState {
     pub fn telegram_tick(self) -> u64 {
         (self.telegram_tick)()
     }
+}
+
+/// Stable key identifying a forum topic inside a chat.
+pub fn topic_visibility_key(topic: &TdlibForumTopicInfo) -> String {
+    let kind = if topic.kind.is_empty() {
+        "forum"
+    } else {
+        topic.kind.as_str()
+    };
+    format!("{kind}:{}", topic.id)
+}
+
+/// SQLite key holding the hidden topic list of a chat.
+pub fn topic_hidden_setting_key(chat_id: i64) -> String {
+    format!("plasma_hidden_topics_{chat_id}")
+}
+
+/// Loads the hidden topics persisted for a chat.
+pub fn load_hidden_topics(services: &AppServices, mut ui: UiState, chat_id: i64) {
+    let keys = services
+        .settings
+        .get_raw(&topic_hidden_setting_key(chat_id))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    ui.hidden_topics.set(keys);
+}
+
+/// Toggles a topic between hidden and visible, persisting the chat list.
+///
+/// Returns `true` when the topic is now hidden.
+pub fn toggle_topic_hidden(
+    services: &AppServices,
+    mut ui: UiState,
+    chat_id: i64,
+    topic: &TdlibForumTopicInfo,
+) -> bool {
+    let key = topic_visibility_key(topic);
+    let mut keys = ui.hidden_topics();
+    let hidden = if let Some(position) = keys.iter().position(|entry| *entry == key) {
+        keys.remove(position);
+        false
+    } else {
+        keys.push(key);
+        true
+    };
+    if let Ok(raw) = serde_json::to_string(&keys) {
+        if let Err(error) = services
+            .settings
+            .set_raw(&topic_hidden_setting_key(chat_id), &raw)
+        {
+            push_toast(
+                ui.toasts,
+                format!("Falha ao salvar os tópicos ocultos: {error}"),
+                ToastKind::Error,
+            );
+        }
+    }
+    ui.hidden_topics.set(keys);
+    hidden
 }
 
 pub fn push_toast(mut toasts: Signal<Vec<Toast>>, message: impl Into<String>, kind: ToastKind) {
@@ -1157,6 +1243,25 @@ mod tests {
         };
         assert_eq!(message_cache_key("-100", None), "-100");
         assert_eq!(message_cache_key("-100", Some(&topic)), "-100::forum:42");
+    }
+
+    #[test]
+    fn topic_visibility_keys_match_the_react_app() {
+        let topic = TdlibForumTopicInfo {
+            id: 42,
+            kind: "forum".to_string(),
+            title: "Topic".to_string(),
+            is_closed: false,
+            is_pinned: false,
+            unread_count: 0,
+        };
+        assert_eq!(topic_visibility_key(&topic), "forum:42");
+        let legacy = TdlibForumTopicInfo {
+            kind: String::new(),
+            ..topic
+        };
+        assert_eq!(topic_visibility_key(&legacy), "forum:42");
+        assert_eq!(topic_hidden_setting_key(-100), "plasma_hidden_topics_-100");
     }
 
     #[test]

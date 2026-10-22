@@ -27,8 +27,15 @@ use state::{
 };
 use theme::{Density, Palette};
 use views::{
-    context_menu::ContextMenu, downloads::DownloadsView, login::LoginView, palette::CommandPalette,
-    settings::SettingsView, telegram::TelegramView, toasts::ToastStack, twitter::TwitterView,
+    context_menu::ContextMenu,
+    downloads::DownloadsView,
+    login::LoginView,
+    palette::CommandPalette,
+    select::{SelectMenu, SelectPortal},
+    settings::SettingsView,
+    telegram::TelegramView,
+    toasts::ToastStack,
+    twitter::TwitterView,
 };
 
 const SHELL_CSS: &str = include_str!("../assets/shell.css");
@@ -78,6 +85,8 @@ pub fn App() -> Element {
 
     let topics = use_signal(Vec::<TdlibForumTopicInfo>::new);
     let selected_topic = use_signal(|| None::<TdlibForumTopicInfo>);
+    let hidden_topics = use_signal(Vec::<String>::new);
+    let topic_browser_open = use_signal(|| false);
 
     let search_results = use_signal(Vec::<TdlibMessageInfo>::new);
     let search_loading = use_signal(|| false);
@@ -91,6 +100,7 @@ pub fn App() -> Element {
     let mass_download_open = use_signal(|| false);
     let duplicate_search_progress = use_signal(|| None::<DuplicateSearchProgress>);
     let context_menu = use_signal(|| None::<context::ContextMenuState>);
+    let select_portal = use_signal(|| None::<SelectPortal>);
     let reply_to = use_signal(|| None::<TdlibMessageInfo>);
     let forward_state = use_signal(|| None::<ForwardState>);
     let lightbox = use_signal(|| None::<LightboxState>);
@@ -121,6 +131,8 @@ pub fn App() -> Element {
         messages_key,
         topics,
         selected_topic,
+        hidden_topics,
+        topic_browser_open,
         search_results,
         search_loading,
         search_error,
@@ -132,6 +144,7 @@ pub fn App() -> Element {
         mass_download_open,
         duplicate_search_progress,
         context_menu,
+        select_portal,
         reply_to,
         forward_state,
         lightbox,
@@ -373,6 +386,12 @@ pub fn App() -> Element {
                         }
                     },
                     on_close: move |_| ui.context_menu.set(None),
+                }
+            }
+            if let Some(portal) = ui.select_portal() {
+                SelectMenu {
+                    portal,
+                    on_close: move |_| ui.select_portal.set(None),
                 }
             }
             ToastStack {}
