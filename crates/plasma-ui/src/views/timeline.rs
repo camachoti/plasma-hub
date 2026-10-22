@@ -398,6 +398,9 @@ pub fn MessageTimeline(
     on_action: EventHandler<(TdlibMessageInfo, MessageAction)>,
     on_toggle_select: EventHandler<i64>,
     on_select_album: EventHandler<Vec<i64>>,
+    /// Called when the reader scrolls into the oldest loaded messages, so the
+    /// caller can fetch the previous page (React parity: `startReached`).
+    on_reach_start: EventHandler<()>,
 ) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
@@ -476,8 +479,14 @@ pub fn MessageTimeline(
                 id: TIMELINE_ID,
                 class: "message-scroll",
                 onscroll: move |event| {
-                    scroll_top.set(event.scroll_top());
+                    let top = event.scroll_top();
+                    scroll_top.set(top);
                     viewport_height.set(event.client_height() as f64);
+                    // The caller ignores this while a page is in flight or when
+                    // there is nothing older to fetch.
+                    if top < 220.0 {
+                        on_reach_start.call(());
+                    }
                 },
                 div {
                     class: "message-canvas",

@@ -572,6 +572,25 @@ fn RealTelegram() -> Element {
                                             }
                                             selected_messages.set(current);
                                         },
+                                        on_reach_start: {
+                                            let services = services.clone();
+                                            move |_| {
+                                                if in_search
+                                                    || !ui.messages_has_more()
+                                                    || loading_older()
+                                                {
+                                                    return;
+                                                }
+                                                let Some(chat) = ui.selected_chat() else { return; };
+                                                load_older(
+                                                    services.clone(),
+                                                    ui,
+                                                    chat,
+                                                    ui.selected_topic(),
+                                                    loading_older,
+                                                );
+                                            }
+                                        },
                                     }
                                 }
                             }

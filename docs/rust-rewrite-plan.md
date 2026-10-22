@@ -580,6 +580,11 @@ Cada fase termina com um gate verificável. O app Tauri continua compilando até
     aparecem de imediato em vez de piscar o placeholder e baixar de novo. Um
     `ResizeObserver` no container mantém a última mensagem visível quando o viewport muda
     (composer, banner de resposta, redimensionamento) e o leitor já estava no fim.
+23. Histórico automático (2026-10-22): a timeline deixou de depender só do botão
+    “Carregar mensagens antigas”. Ao rolar até os 220 px iniciais, `MessageTimeline`
+    chama `on_reach_start`, que pede a página anterior com o mesmo `load_older` (guardado
+    por `loading_older` e `messages_has_more`), como o `startReached` do React. O botão
+    continua visível como alternativa quando a lista é menor que o viewport.
 
 ### Fase 5 — downloads e Twitter implementados (2026-10-20)
 
