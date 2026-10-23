@@ -610,7 +610,25 @@ h1, h2, h3, p { margin: 0; }
 .message-meta strong { font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-meta span { font-size: 10px; color: var(--text-3); font-family: var(--font-mono); flex: 0 0 auto; }
 .message-text { color: var(--text-1); font-size: 13px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
-.message-reply { display: inline-block; color: var(--text-3); font-size: 11px; margin-top: 2px; }
+.message-reply {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  border: 0;
+  padding: 0;
+  margin-top: 2px;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.message-reply:hover { color: var(--accent); text-decoration: underline; }
+.message-row.highlight {
+  background: color-mix(in oklch, var(--accent) 13%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .message-media { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--text-2); font-size: 11px; }
 .message-media .pill { padding: 1px 6px; font-size: 9px; }
 .message-row.deleted .avatar { opacity: 0.45; }
@@ -1798,6 +1816,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: var(--focus-ri
 
 /* Settings: cache card controls. */
 .setting-row-control { width: 190px; flex: 0 0 190px; }
+.settings-inline-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .settings-stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

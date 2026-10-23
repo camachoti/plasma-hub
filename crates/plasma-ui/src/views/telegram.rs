@@ -1368,14 +1368,15 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                             .save_media(chat_id, message_id, None)
                                             .await
                                         {
-                                            Ok(result) if result.success => push_toast(
-                                                toasts,
-                                                format!(
-                                                    "Mídia salva em {}.",
-                                                    result.file_path.unwrap_or_default()
-                                                ),
-                                                ToastKind::Success,
-                                            ),
+                                            Ok(result) if result.success => {
+                                                let path = result.file_path.unwrap_or_default();
+                                                let _ = services.enforce_media_cache_limit().await;
+                                                push_toast(
+                                                    toasts,
+                                                    format!("Mídia salva em {path}."),
+                                                    ToastKind::Success,
+                                                )
+                                            }
                                             Ok(result) => save_error.set(
                                                 result.error.or_else(|| {
                                                     Some("Não foi possível salvar a mídia.".into())

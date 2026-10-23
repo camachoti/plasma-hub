@@ -68,6 +68,24 @@ impl AppServices {
             initial_shared_url: None,
         }
     }
+
+    /// Applies the cache limit saved in settings, if one is configured.
+    ///
+    /// The limit used to be applied only when the user changed the setting, so
+    /// new media could grow past it. Call this after saves and at startup.
+    pub async fn enforce_media_cache_limit(&self) -> Result<Option<NativeMediaCacheStats>, String> {
+        let limit = self
+            .settings
+            .get(plasma_store::SettingKey::MEDIA_CACHE_LIMIT)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        if limit <= 0 {
+            return Ok(None);
+        }
+        self.telegram.evict_media_cache(limit).await.map(Some)
+    }
 }
 
 /// Async facade over the native platform extractors.

@@ -5,7 +5,9 @@
 
 use crate::context::{save_album, ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
-use crate::state::{react_to_message, AppServices, ReactionPickerState, UiState};
+use crate::state::{
+    push_toast, react_to_message, AppServices, ReactionPickerState, ToastKind, UiState,
+};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use serde::Deserialize;
@@ -111,6 +113,14 @@ impl TimelineItem {
             TimelineItem::Album(messages) => format!("album-{}", messages[0].id),
         }
     }
+
+    /// Whether this row contains the given Telegram message id.
+    fn contains(&self, message_id: i64) -> bool {
+        match self {
+            TimelineItem::Message(message) => message.id == message_id,
+            TimelineItem::Album(messages) => messages.iter().any(|item| item.id == message_id),
+        }
+    }
 }
 
 /// Measurement keys are scoped by chat: Telegram message ids are only unique
@@ -180,6 +190,15 @@ fn build_layout(
         heights,
         total_height: top,
     }
+}
+
+/// Returns the canvas offset of the row that contains a message, if that
+/// message is part of the loaded page.
+fn message_offset(items: &[TimelineItem], layout: &TimelineLayout, message_id: i64) -> Option<f64> {
+    items
+        .iter()
+        .position(|item| item.contains(message_id))
+        .map(|index| layout.offsets[index])
 }
 
 #[derive(Deserialize)]
@@ -525,6 +544,8 @@ pub fn MessageTimeline(
     };
     let items_memo = use_memo(move || group_albums(&source()));
     let mut measured_heights = use_signal(HashMap::<String, f64>::new);
+    let mut jump_target = use_signal(|| None::<i64>);
+    let mut highlighted_message = use_signal(|| None::<i64>);
     let layout_memo = use_memo(move || build_layout(&items_memo(), &measured_heights(), chat_id));
     // First and newest ids identify what changed between two renders.
     let bounds = use_memo(move || {
@@ -573,6 +594,48 @@ pub fn MessageTimeline(
         };
         previous_bounds.set(Some(current));
         spawn(apply_scroll(intent));
+    });
+
+    // Jump to a replied message. The target row may be outside the currently
+    // rendered window, so first move `scroll_top` to its canvas offset; the
+    // virtualized timeline then renders that row and we scroll the real
+    // container to the same position on the next frames.
+    use_effect(move || {
+        let Some(target) = jump_target() else {
+            return;
+        };
+        jump_target.set(None);
+        let items = items_memo();
+        let layout = layout_memo();
+        let Some(offset) = message_offset(&items, &layout, target) else {
+            push_toast(
+                ui.toasts,
+                "A mensagem original não está carregada nesta página.",
+                ToastKind::Info,
+            );
+            return;
+        };
+        scroll_top.set(offset);
+        highlighted_message.set(Some(target));
+        spawn(async move {
+            let script = format!(
+                r#"
+                requestAnimationFrame(() => requestAnimationFrame(() => {{
+                    const element = document.getElementById("{TIMELINE_ID}");
+                    if (!element) return;
+                    element.scrollTop = {offset};
+                    element.__plasmaBottom =
+                        element.scrollHeight - element.scrollTop - element.clientHeight;
+                }}));
+                true
+                "#
+            );
+            let _ = document::eval(&script).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+            if highlighted_message() == Some(target) {
+                highlighted_message.set(None);
+            }
+        });
     });
 
     // Feed the rendered height of every row back into the layout. Estimates
@@ -673,15 +736,17 @@ pub fn MessageTimeline(
                             match item {
                                 TimelineItem::Message(message) => {
                                     let message = *message;
-                                    let row_class = if message.is_deleted {
-                                        "message-row deleted"
+                                    let mut row_class = String::from("message-row");
+                                    if message.is_deleted {
+                                        row_class.push_str(" deleted");
                                     } else if selected.contains(&message.id) {
-                                        "message-row selected"
+                                        row_class.push_str(" selected");
                                     } else if message.out {
-                                        "message-row own"
-                                    } else {
-                                        "message-row"
-                                    };
+                                        row_class.push_str(" own");
+                                    }
+                                    if highlighted_message() == Some(message.id) {
+                                        row_class.push_str(" highlight");
+                                    }
                                     rsx! {
                                         article {
                                             key: "{key}",
@@ -720,8 +785,17 @@ pub fn MessageTimeline(
                                                         span { class: "pill", "enviada" }
                                                     }
                                                 }
-                                                if message.reply_to_msg_id.is_some() {
-                                                    span { class: "message-reply", "↳ resposta" }
+                                                if let Some(reply_id) = message.reply_to_msg_id {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "message-reply",
+                                                        title: "Ir para a mensagem original",
+                                                        onclick: move |event| {
+                                                            event.stop_propagation();
+                                                            jump_target.set(Some(reply_id));
+                                                        },
+                                                        "↳ resposta"
+                                                    }
                                                 }
                                                 if message.is_deleted {
                                                     p { class: "message-text message-deleted", "Mensagem apagada" }
@@ -870,13 +944,17 @@ pub fn MessageTimeline(
                                     let ids: Vec<i64> = album.iter().map(|message| message.id).collect();
                                     let all_selected =
                                         ids.iter().all(|id| selected.contains(id));
-                                    let row_class = if all_selected {
-                                        "message-row album-row selected"
+                                    let mut row_class = String::from("message-row album-row");
+                                    if all_selected {
+                                        row_class.push_str(" selected");
                                     } else if first.out {
-                                        "message-row album-row own"
-                                    } else {
-                                        "message-row album-row"
-                                    };
+                                        row_class.push_str(" own");
+                                    }
+                                    if album.iter().any(|item| {
+                                        highlighted_message() == Some(item.id)
+                                    }) {
+                                        row_class.push_str(" highlight");
+                                    }
                                     let columns = if album.len() == 1 { 1 } else { 2 };
                                     let span_last = album.len() > 2 && album.len() % 2 == 1;
                                     let grid_class = if span_last {
@@ -1243,6 +1321,31 @@ mod tests {
             scroll_intent((None, None), (Some(1), Some(9))),
             Some(ScrollIntent::Anchor)
         );
+    }
+
+    #[test]
+    fn finds_messages_inside_albums() {
+        let album = TimelineItem::Album(vec![photo(1, "7"), photo(2, "7")]);
+        assert!(album.contains(2));
+        assert!(!album.contains(3));
+        assert!(TimelineItem::Message(Box::new(photo(9, "7"))).contains(9));
+    }
+
+    #[test]
+    fn large_timeline_layout_and_jump_lookup_stay_consistent() {
+        let messages: Vec<_> = (0..10_000)
+            .map(|index| message(index, index as i32, "mensagem de teste"))
+            .collect();
+        let items = group_albums(&messages);
+        let layout = build_layout(&items, &HashMap::new(), 7);
+
+        assert_eq!(items.len(), messages.len());
+        assert_eq!(layout.offsets.len(), messages.len());
+        assert_eq!(
+            message_offset(&items, &layout, 9_999),
+            Some(layout.offsets[9_999])
+        );
+        assert!(layout.total_height > 0.0);
     }
 
     #[test]

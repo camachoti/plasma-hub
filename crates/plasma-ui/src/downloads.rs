@@ -1,8 +1,8 @@
 //! Download queue state, native URL downloads and persisted history.
 //!
-//! The React app keeps its queue in memory and mirrors the history JSON into
-//! SQLite. The Rust shell uses the same table and JSON shape so switching
-//! between the two apps does not lose completed downloads.
+//! The legacy app kept its queue in memory and mirrored the history JSON into
+//! SQLite. The Rust shell uses the same table and JSON shape so data from older
+//! versions is not lost.
 
 use crate::state::{now_millis, push_toast, AppServices, ToastKind, UiState};
 use dioxus::prelude::WritableExt;
@@ -13,8 +13,8 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// A single download item. Unknown fields from the React history are preserved
-/// through `extra` when the shell rewrites the history.
+/// A single download item. Unknown fields from the previous app's history are
+/// preserved through `extra` when the shell rewrites the history.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadRecord {

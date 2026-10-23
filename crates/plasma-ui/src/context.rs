@@ -480,11 +480,14 @@ pub fn save_media(services: AppServices, ui: UiState, chat_id: i64, message: Tdl
             .save_media(chat_id, message_id, None)
             .await
         {
-            Ok(result) if result.success => push_toast(
-                ui.toasts,
-                format!("Mídia salva em {}.", result.file_path.unwrap_or_default()),
-                ToastKind::Success,
-            ),
+            Ok(result) if result.success => {
+                let _ = services.enforce_media_cache_limit().await;
+                push_toast(
+                    ui.toasts,
+                    format!("Mídia salva em {}.", result.file_path.unwrap_or_default()),
+                    ToastKind::Success,
+                )
+            }
             Ok(result) => push_toast(
                 ui.toasts,
                 result
@@ -527,6 +530,9 @@ pub fn save_album(
                     last_path = result.file_path.or(last_path);
                 }
             }
+        }
+        if saved > 0 {
+            let _ = services.enforce_media_cache_limit().await;
         }
         let failed = total - saved;
         let folder = last_path

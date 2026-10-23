@@ -75,6 +75,17 @@ pub fn SettingsView() -> Element {
         .to_string();
     let data_dir = services.env.paths().data_dir().display().to_string();
     let cache_dir = services.env.paths().cache_dir().display().to_string();
+    let crash_log = services
+        .env
+        .paths()
+        .local_data_dir()
+        .join("crash.log")
+        .display()
+        .to_string();
+    let app_version = env!("CARGO_PKG_VERSION");
+    let platform = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
+    let open_data_dir = data_dir.clone();
+    let open_crash_log = crash_log.clone();
 
     rsx! {
         section { class: "settings-view",
@@ -82,8 +93,8 @@ pub fn SettingsView() -> Element {
                 header { class: "settings-heading",
                     h1 { "Ajustes" }
                     p { class: "muted",
-                        "Esta tela já lê e grava no mesmo SQLite usado pelo app React. \
-                         As chaves são idênticas às do localStorage."
+                        "Esta tela lê e grava no mesmo SQLite usado pelo aplicativo. \
+                         As chaves continuam compatíveis com as versões anteriores."
                     }
                 }
 
@@ -292,8 +303,8 @@ pub fn SettingsView() -> Element {
                 section { class: "settings-card",
                     h2 { "Migração do app antigo" }
                     p { class: "hint",
-                        "Lê as chaves globais do localStorage desta WebView e copia para o SQLite. \
-                         A migração real do app Tauri também roda no boot do frontend React."
+                        "Importa chaves antigas que ainda existam no localStorage desta WebView. \
+                         Valores já gravados no SQLite não são sobrescritos."
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
@@ -314,16 +325,48 @@ pub fn SettingsView() -> Element {
                 section { class: "settings-card",
                     h2 { "Diagnóstico" }
                     dl { class: "kv",
+                        dt { "Versão" }
+                        dd { "v{app_version}" }
+                        dt { "Sistema" }
+                        dd { "{platform}" }
                         dt { "Banco" }
                         dd { "{database_path}" }
                         dt { "Dados" }
                         dd { "{data_dir}" }
                         dt { "Cache" }
                         dd { "{cache_dir}" }
+                        dt { "Log de falhas" }
+                        dd { "{crash_log}" }
                         dt { "Schema" }
                         dd { "v{plasma_store::db::SCHEMA_VERSION}" }
                         dt { "Janela" }
                         dd { "Dioxus 0.7.10 / WebView" }
+                    }
+                    div { class: "setting-row",
+                        div { class: "setting-row-copy",
+                            strong { "Pastas e logs" }
+                            span { "Abra o diretório de dados ou o log de falhas para anexar a um relato." }
+                        }
+                        div { class: "settings-inline-actions",
+                            button {
+                                class: "btn small ghost",
+                                onclick: move |_| {
+                                    if let Err(error) = plasma_platform::open_path(&open_data_dir) {
+                                        push_toast(ui.toasts, error, ToastKind::Error);
+                                    }
+                                },
+                                "Abrir dados"
+                            }
+                            button {
+                                class: "btn small ghost",
+                                onclick: move |_| {
+                                    if let Err(error) = plasma_platform::open_path(&open_crash_log) {
+                                        push_toast(ui.toasts, error, ToastKind::Error);
+                                    }
+                                },
+                                "Abrir log de falhas"
+                            }
+                        }
                     }
                 }
             }

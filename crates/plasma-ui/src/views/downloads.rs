@@ -44,6 +44,17 @@ pub fn DownloadsView() -> Element {
         .filter(|item| item.status == "completed")
         .count();
     let current_analysis = analysis();
+    let retryable_failed: Vec<_> = items
+        .iter()
+        .filter(|item| item.status == "failed" && can_retry_record(item))
+        .cloned()
+        .collect();
+    let retry_batch: Vec<_> = retryable_failed.iter().take(5).cloned().collect();
+    let retry_label = if retryable_failed.len() > retry_batch.len() {
+        format!("Tentar 5 de {}", retryable_failed.len())
+    } else {
+        format!("Tentar falhos ({})", retry_batch.len())
+    };
 
     let analyze_enter = {
         let services = services.clone();
@@ -163,6 +174,21 @@ pub fn DownloadsView() -> Element {
                         div {
                             h2 { "Fila e histórico" }
                             p { class: "hint", "Downloads recentes aparecem primeiro." }
+                        }
+                        if !retry_batch.is_empty() {
+                            button {
+                                class: "btn small",
+                                onclick: {
+                                    let services = services.clone();
+                                    let batch = retry_batch.clone();
+                                    move |_| {
+                                        for record in batch.iter().cloned() {
+                                            retry_record(services.clone(), ui, record);
+                                        }
+                                    }
+                                },
+                                "{retry_label}"
+                            }
                         }
                         button {
                             class: "btn small ghost",
@@ -304,9 +330,7 @@ fn DownloadRow(item: DownloadRecord) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
     let id = item.id.clone();
-    let can_retry = matches!(item.platform.as_deref(), None | Some("web"))
-        && (item.can_retry.unwrap_or(false)
-            || matches!(item.status.as_str(), "failed" | "canceled"));
+    let can_retry = can_retry_record(&item);
     let can_cancel = item.is_active();
     let cancel_services = services.clone();
     let retry_services = services.clone();
@@ -562,6 +586,22 @@ fn submit_url(
     error.set(None);
 }
 
+fn can_retry_record(item: &DownloadRecord) -> bool {
+    if !matches!(item.status.as_str(), "failed" | "canceled")
+        || item.source_url.is_none()
+        || item.file_path.is_none()
+    {
+        return false;
+    }
+    match item.platform.as_deref() {
+        None | Some("web") => true,
+        Some("youtube" | "twitter" | "tiktok") => {
+            item.source_page_url.is_some() && item.source_format_id.is_some()
+        }
+        Some(_) => true,
+    }
+}
+
 fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     let Some(url) = item.source_url.clone() else {
         push_toast(
@@ -584,6 +624,7 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     } else {
         item.id.clone()
     };
+    let original = item.clone();
     let mut record = item;
     record.id = id.clone();
     record.status = "downloading".to_string();
@@ -593,12 +634,103 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     record.can_retry = Some(false);
     push_download(services.clone(), ui, record);
     spawn(async move {
-        let result = services
-            .downloads
-            .download_url(id.clone(), url, file_path, None)
-            .await;
+        let result = retry_download(&services, &original, &id, &file_path, &url).await;
         finish_url_download(services, ui, id, result);
     });
+}
+
+/// Retries a failed item. Native extractors re-analyze the original page when
+/// their direct media URL may have expired; direct web downloads keep using the
+/// original file destination so the partial file can be resumed.
+async fn retry_download(
+    services: &AppServices,
+    item: &DownloadRecord,
+    id: &str,
+    file_path: &str,
+    source_url: &str,
+) -> Result<(), String> {
+    let platform = item.platform.as_deref().unwrap_or("web");
+    let file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Destino de download inválido.".to_string())?
+        .to_string();
+
+    match platform {
+        "youtube" | "twitter" | "tiktok" => {
+            let page_url = item
+                .source_page_url
+                .clone()
+                .unwrap_or_else(|| source_url.to_string());
+            let format_id = item
+                .source_format_id
+                .clone()
+                .ok_or_else(|| "Este download não tem formato salvo.".to_string())?;
+            let info = services.extract.analyze(page_url.clone()).await?;
+            let option = info
+                .formats
+                .video
+                .iter()
+                .chain(info.formats.audio.iter())
+                .find(|option| option.id == format_id)
+                .or_else(|| {
+                    info.formats
+                        .video
+                        .iter()
+                        .chain(info.formats.audio.iter())
+                        .find(|option| option.best.unwrap_or(false))
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    "O formato original não está mais disponível. Analise o link novamente."
+                        .to_string()
+                })?;
+            services
+                .extract
+                .download(
+                    id.to_string(),
+                    page_url,
+                    option.id.clone(),
+                    option.url.clone(),
+                    file_name,
+                    option.has_audio,
+                )
+                .await
+        }
+        "instagram" | "reddit" => {
+            let page_url = item
+                .source_page_url
+                .clone()
+                .unwrap_or_else(|| source_url.to_string());
+            let format_id = item
+                .source_format_id
+                .clone()
+                .unwrap_or_else(|| "best".to_string());
+            let has_audio = item.source_mode.as_deref() == Some("audio");
+            services
+                .extract
+                .download(
+                    id.to_string(),
+                    page_url,
+                    format_id,
+                    Some(source_url.to_string()),
+                    file_name,
+                    has_audio,
+                )
+                .await
+        }
+        _ => {
+            services
+                .downloads
+                .download_url(
+                    id.to_string(),
+                    source_url.to_string(),
+                    file_path.to_string(),
+                    None,
+                )
+                .await
+        }
+    }
 }
 
 fn start_record(services: AppServices, ui: UiState, record: DownloadRecord) {
@@ -813,6 +945,26 @@ mod tests {
         assert_eq!(platform_label(Some("twitter")), "X/Twitter");
         assert_eq!(platform_label(None), "Web");
         assert_eq!(status_label("failed"), "Falhou");
+    }
+
+    #[test]
+    fn retries_failed_native_items_only_when_enough_source_data_exists() {
+        let mut item = DownloadRecord::new_url(
+            "1".into(),
+            "video.mp4".into(),
+            "/tmp/video.mp4".into(),
+            "https://cdn.example.com/video.mp4".into(),
+        );
+        item.status = "failed".into();
+        item.platform = Some("youtube".into());
+        assert!(!can_retry_record(&item));
+
+        item.source_page_url = Some("https://youtube.com/watch?v=abc".into());
+        item.source_format_id = Some("137".into());
+        assert!(can_retry_record(&item));
+
+        item.status = "completed".into();
+        assert!(!can_retry_record(&item));
     }
 
     #[test]

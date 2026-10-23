@@ -27,6 +27,7 @@ fn run() -> Result<(), String> {
         bus: events.clone(),
     });
     let env = AppEnv::new(paths, emitter);
+    install_panic_logger(&env);
 
     // WebKitGTK keeps its disk cache in `$XDG_CACHE_HOME/<app-name>`. A cache
     // left behind by an interrupted run can leave the web process spinning
@@ -71,6 +72,13 @@ fn run() -> Result<(), String> {
 
     plasma_telegram::start_plasma_media_http_server(env)
         .map_err(|error| format!("não foi possível iniciar o servidor de mídia: {error}"))?;
+
+    // Apply the configured media cache limit even when the user did not change
+    // the setting in this session.
+    let cache_services = services.clone();
+    runtime.spawn(async move {
+        let _ = cache_services.enforce_media_cache_limit().await;
+    });
 
     // Keep the runtime alive for the whole WebView lifetime. TDLib's receiver
     // and the UI's async calls run on its worker threads.
@@ -165,6 +173,32 @@ fn run_telegram_smoke(
     }
 
     Ok(())
+}
+
+/// Appends panic details to `crash.log` in the app's local data directory.
+///
+/// Dioxus/WebKit panics otherwise only reach stderr, which is usually lost when
+/// the app is launched from a desktop menu or from an APK.
+fn install_panic_logger(env: &AppEnv) {
+    let path = env.paths().local_data_dir().join("crash.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(file, "[{timestamp}] {info}");
+        }
+        eprintln!("plasma: panic: {info}");
+    }));
 }
 
 /// Resolves the app-owned directories.
