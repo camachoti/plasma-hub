@@ -36,7 +36,7 @@ Backlog de melhorias de usabilidade para o Plasma Hub, priorizado por impacto pe
 
 ## Próximo Ciclo (Rust pós-cutover)
 
-- [x] Referência de resposta clicável, com salto para a mensagem original e destaque.
+- [x] Referência de resposta clicável, com salto para a mensagem original e destaque, carregando o contexto quando a original está fora da página.
 - [x] Retry de downloads nativos, reanalisando a página quando a URL direta expirou.
 - [x] Ação “Tentar falhos” para repetir os downloads com origem e destino salvos.
 - [x] Limite de cache de mídia aplicado no startup e depois de salvar mídia.

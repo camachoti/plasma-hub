@@ -40,6 +40,7 @@ fn RealTelegram() -> Element {
     let mut message_query = use_signal(String::new);
     let mut search_active = use_signal(|| false);
     let loading_older = use_signal(|| false);
+    let jump_to = use_signal(|| None::<i64>);
     let mut avatar_chat = use_signal(|| None::<String>);
     let mut composer = use_signal(String::new);
     let sending = use_signal(|| false);
@@ -581,6 +582,20 @@ fn RealTelegram() -> Element {
                                                 }
                                             }
                                             selected_messages.set(current);
+                                        },
+                                        jump_to,
+                                        on_jump_to_message: {
+                                            let services = services.clone();
+                                            move |message_id| {
+                                                jump_to_message(
+                                                    services.clone(),
+                                                    ui,
+                                                    message_id,
+                                                    jump_to,
+                                                    search_active(),
+                                                    loading_older,
+                                                );
+                                            }
                                         },
                                         on_reach_start: {
                                             let services = services.clone();
@@ -1773,6 +1788,125 @@ async fn load_conversation(
     if conversation_matches(ui, &chat, topic.as_ref()) {
         ui.messages_loading.set(false);
     }
+}
+
+/// Scrolls to a reply target, loading the messages between it and the oldest
+/// message currently in the timeline when the original is outside the page.
+fn jump_to_message(
+    services: AppServices,
+    ui: UiState,
+    message_id: i64,
+    mut jump_to: Signal<Option<i64>>,
+    search_active: bool,
+    mut loading: Signal<bool>,
+) {
+    if search_active || ui.messages().iter().any(|message| message.id == message_id) {
+        jump_to.set(Some(message_id));
+        return;
+    }
+    if loading() {
+        push_toast(ui.toasts, "Aguarde o carregamento atual.", ToastKind::Info);
+        return;
+    }
+    let Some(chat) = ui.selected_chat() else {
+        return;
+    };
+    let Some(chat_id) = parse_chat_id(&chat) else {
+        return;
+    };
+    let topic = ui.selected_topic();
+    let topic_id = topic.as_ref().map(|item| item.id);
+    let topic_kind = topic.as_ref().map(|item| item.kind.clone());
+    let cache_key = message_cache_key(&chat.id, topic.as_ref());
+    let oldest_loaded = ui.messages().first().map(|message| message.id);
+    loading.set(true);
+    spawn(async move {
+        // TDLib returns the target, the messages newer than it and one older
+        // message per request. Keep advancing the newest id until the block
+        // connects to the page already on screen.
+        const MAX_CONTEXT_PAGES: usize = 10;
+        let mut collected = Vec::new();
+        let mut anchor = message_id;
+        let mut connected = oldest_loaded.is_none();
+        let mut error = None;
+        for _ in 0..MAX_CONTEXT_PAGES {
+            let result = services
+                .telegram
+                .get_messages(chat_id, 100, anchor, -99, topic_id, topic_kind.clone())
+                .await;
+            match result {
+                Ok(result) if result.success => {
+                    if result.messages.is_empty() {
+                        error = Some("Mensagem original indisponível.".to_string());
+                        break;
+                    }
+                    let newest = result
+                        .messages
+                        .iter()
+                        .map(|message| message.id)
+                        .max()
+                        .unwrap_or(anchor);
+                    collected.extend(result.messages);
+                    if let Some(oldest) = oldest_loaded {
+                        if newest >= oldest {
+                            connected = true;
+                            break;
+                        }
+                    } else {
+                        connected = true;
+                        break;
+                    }
+                    if newest <= anchor {
+                        break;
+                    }
+                    anchor = newest;
+                }
+                Ok(result) => {
+                    error = Some(
+                        result
+                            .error
+                            .unwrap_or_else(|| "Mensagem original indisponível.".to_string()),
+                    );
+                    break;
+                }
+                Err(message) => {
+                    error = Some(message);
+                    break;
+                }
+            }
+        }
+        if !conversation_matches(ui, &chat, topic.as_ref()) {
+            loading.set(false);
+            return;
+        }
+        let has_target = collected.iter().any(|message| message.id == message_id);
+        if !has_target || !connected {
+            loading.set(false);
+            let (message, kind) = match error {
+                Some(error) => (error, ToastKind::Error),
+                None if !has_target => (
+                    "Mensagem original indisponível.".to_string(),
+                    ToastKind::Error,
+                ),
+                None => (
+                    "A mensagem original está muito distante para abrir agora.".to_string(),
+                    ToastKind::Info,
+                ),
+            };
+            push_toast(ui.toasts, message, kind);
+            return;
+        }
+        let mut merged = ui.messages();
+        merge_messages(&mut merged, collected);
+        set_if_changed(ui.messages, merged.clone());
+        let _ = services.telegram.cache_messages(cache_key, merged).await;
+        if !conversation_matches(ui, &chat, topic.as_ref()) {
+            loading.set(false);
+            return;
+        }
+        jump_to.set(Some(message_id));
+        loading.set(false);
+    });
 }
 
 fn load_older(

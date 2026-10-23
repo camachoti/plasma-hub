@@ -573,6 +573,11 @@ pub fn MessageTimeline(
     on_action: EventHandler<(TdlibMessageInfo, MessageAction)>,
     on_toggle_select: EventHandler<i64>,
     on_select_album: EventHandler<Vec<i64>>,
+    /// Parent-controlled jump request. The timeline clears it after scrolling.
+    mut jump_to: Signal<Option<i64>>,
+    /// Called when a reply quote is clicked. The parent can load the original
+    /// when it is outside the currently loaded page, then set `jump_to`.
+    on_jump_to_message: EventHandler<i64>,
     /// Called when the reader scrolls into the oldest loaded messages, so the
     /// caller can fetch the previous page (React parity: `startReached`).
     on_reach_start: EventHandler<()>,
@@ -591,7 +596,6 @@ pub fn MessageTimeline(
     };
     let items_memo = use_memo(move || group_albums(&source()));
     let mut measured_heights = use_signal(HashMap::<String, f64>::new);
-    let mut jump_target = use_signal(|| None::<i64>);
     let mut highlighted_message = use_signal(|| None::<i64>);
     // Replies to messages outside the loaded page are fetched by id and kept
     // here so the quote can still show the original author and text.
@@ -652,10 +656,10 @@ pub fn MessageTimeline(
     // virtualized timeline then renders that row and we scroll the real
     // container to the same position on the next frames.
     use_effect(move || {
-        let Some(target) = jump_target() else {
+        let Some(target) = jump_to() else {
             return;
         };
-        jump_target.set(None);
+        jump_to.set(None);
         let items = items_memo();
         let layout = layout_memo();
         let Some(offset) = message_offset(&items, &layout, target) else {
@@ -689,9 +693,9 @@ pub fn MessageTimeline(
         });
     });
 
-    // Resolve replies whose original message is outside the loaded page. The
-    // timeline still cannot jump to an unloaded row, but the quote becomes the
-    // same author + excerpt users expect from Telegram and WhatsApp.
+    // Resolve replies whose original message is outside the loaded page so the
+    // quote shows the same author + excerpt users expect from Telegram and
+    // WhatsApp. Clicking the quote asks the parent to load the missing context.
     let reply_services = services.clone();
     use_effect(move || {
         let items = items_memo();
@@ -912,7 +916,7 @@ pub fn MessageTimeline(
                                                         title: "Ir para a mensagem original",
                                                         onclick: move |event| {
                                                             event.stop_propagation();
-                                                            jump_target.set(Some(reply_id));
+                                                            on_jump_to_message.call(reply_id);
                                                         },
                                                         span { class: "message-reply-sender", "{reply_sender}" }
                                                         span { class: "message-reply-text", "{reply_text}" }
