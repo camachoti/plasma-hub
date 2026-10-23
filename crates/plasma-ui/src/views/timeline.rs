@@ -201,6 +201,40 @@ fn message_offset(items: &[TimelineItem], layout: &TimelineLayout, message_id: i
         .map(|index| layout.offsets[index])
 }
 
+/// Finds the loaded message quoted by a reply, so the timeline can show a
+/// Telegram-style preview instead of a bare "resposta" label.
+fn reply_preview(items: &[TimelineItem], message_id: i64) -> Option<&TdlibMessageInfo> {
+    items.iter().find_map(|item| match item {
+        TimelineItem::Message(message) => (message.id == message_id).then_some(message.as_ref()),
+        TimelineItem::Album(messages) => messages.iter().find(|message| message.id == message_id),
+    })
+}
+
+fn reply_snippet(message: &TdlibMessageInfo) -> String {
+    let text = message
+        .text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return if message.is_photo {
+            "Foto".to_string()
+        } else if message.is_video {
+            "Vídeo".to_string()
+        } else if message.has_media {
+            "Mídia".to_string()
+        } else {
+            "Mensagem sem texto".to_string()
+        };
+    }
+    let mut characters = text.chars();
+    let mut snippet: String = characters.by_ref().take(110).collect();
+    if characters.next().is_some() {
+        snippet.push('…');
+    }
+    snippet
+}
+
 #[derive(Deserialize)]
 struct RowMeasurements {
     heights: HashMap<String, f64>,
@@ -256,7 +290,8 @@ fn estimate_height(message: &TdlibMessageInfo) -> f64 {
         };
     }
     if message.reply_to_msg_id.is_some() {
-        height += 18.0;
+        // The quoted reply block shows the author and a text snippet.
+        height += 44.0;
     }
     if !message.reactions.is_empty() {
         height += 26.0;
@@ -747,6 +782,23 @@ pub fn MessageTimeline(
                                     if highlighted_message() == Some(message.id) {
                                         row_class.push_str(" highlight");
                                     }
+                                    let reply_quote = message.reply_to_msg_id.map(|reply_id| {
+                                        let (sender, text) = match reply_preview(&items, reply_id) {
+                                            Some(target) => (
+                                                if target.sender_name.trim().is_empty() {
+                                                    "Mensagem".to_string()
+                                                } else {
+                                                    target.sender_name.clone()
+                                                },
+                                                reply_snippet(target),
+                                            ),
+                                            None => (
+                                                "Mensagem original".to_string(),
+                                                "Não carregada nesta página".to_string(),
+                                            ),
+                                        };
+                                        (reply_id, sender, text)
+                                    });
                                     rsx! {
                                         article {
                                             key: "{key}",
@@ -785,7 +837,7 @@ pub fn MessageTimeline(
                                                         span { class: "pill", "enviada" }
                                                     }
                                                 }
-                                                if let Some(reply_id) = message.reply_to_msg_id {
+                                                if let Some((reply_id, reply_sender, reply_text)) = reply_quote {
                                                     button {
                                                         r#type: "button",
                                                         class: "message-reply",
@@ -794,7 +846,8 @@ pub fn MessageTimeline(
                                                             event.stop_propagation();
                                                             jump_target.set(Some(reply_id));
                                                         },
-                                                        "↳ resposta"
+                                                        span { class: "message-reply-sender", "{reply_sender}" }
+                                                        span { class: "message-reply-text", "{reply_text}" }
                                                     }
                                                 }
                                                 if message.is_deleted {
@@ -1229,6 +1282,30 @@ mod tests {
         base.has_media = true;
         base.reply_to_msg_id = Some(0);
         assert!(estimate_height(&base) > base_height);
+    }
+
+    #[test]
+    fn reply_preview_finds_messages_inside_albums() {
+        let original = message(1, 1, "mensagem original");
+        let items = group_albums(&[original, photo(3, "7"), photo(4, "7")]);
+        let target = reply_preview(&items, 1).expect("mensagem original");
+        assert_eq!(target.sender_name, "Ana");
+        assert_eq!(reply_snippet(target), "mensagem original");
+        assert!(reply_preview(&items, 3).is_some());
+        assert!(reply_preview(&items, 99).is_none());
+    }
+
+    #[test]
+    fn reply_snippet_truncates_and_describes_media() {
+        let long = message(1, 1, &"a".repeat(200));
+        let snippet = reply_snippet(&long);
+        assert_eq!(snippet.chars().count(), 111);
+        assert!(snippet.ends_with('…'));
+
+        let mut photo = message(2, 2, "");
+        photo.has_media = true;
+        photo.is_photo = true;
+        assert_eq!(reply_snippet(&photo), "Foto");
     }
 
     #[test]
