@@ -210,6 +210,17 @@ fn reply_preview(items: &[TimelineItem], message_id: i64) -> Option<&TdlibMessag
     })
 }
 
+fn reply_sender(message: &TdlibMessageInfo) -> String {
+    let name = message.sender_name.trim();
+    if !name.is_empty() {
+        name.to_string()
+    } else if message.out {
+        "Você".to_string()
+    } else {
+        "Mensagem".to_string()
+    }
+}
+
 fn reply_snippet(message: &TdlibMessageInfo) -> String {
     let text = message
         .text
@@ -784,14 +795,9 @@ pub fn MessageTimeline(
                                     }
                                     let reply_quote = message.reply_to_msg_id.map(|reply_id| {
                                         let (sender, text) = match reply_preview(&items, reply_id) {
-                                            Some(target) => (
-                                                if target.sender_name.trim().is_empty() {
-                                                    "Mensagem".to_string()
-                                                } else {
-                                                    target.sender_name.clone()
-                                                },
-                                                reply_snippet(target),
-                                            ),
+                                            Some(target) => {
+                                                (reply_sender(target), reply_snippet(target))
+                                            }
                                             None => (
                                                 "Mensagem original".to_string(),
                                                 "Não carregada nesta página".to_string(),
@@ -1306,6 +1312,18 @@ mod tests {
         photo.has_media = true;
         photo.is_photo = true;
         assert_eq!(reply_snippet(&photo), "Foto");
+    }
+
+    #[test]
+    fn reply_sender_labels_outgoing_messages_as_you() {
+        let mut outgoing = message(1, 1, "/mystatus");
+        outgoing.out = true;
+        outgoing.sender_name.clear();
+        assert_eq!(reply_sender(&outgoing), "Você");
+
+        let mut incoming = message(2, 2, "oi");
+        incoming.sender_name.clear();
+        assert_eq!(reply_sender(&incoming), "Mensagem");
     }
 
     #[test]
