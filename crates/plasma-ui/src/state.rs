@@ -248,6 +248,20 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    /// Fetches one message, used to resolve replies whose original is outside
+    /// the loaded timeline page.
+    pub async fn get_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<TdlibMessageInfo, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_get_message(&manager, chat_id, message_id).await
+        });
+        self.join(handle).await?
+    }
+
     pub async fn get_messages(
         &self,
         chat_id: i64,

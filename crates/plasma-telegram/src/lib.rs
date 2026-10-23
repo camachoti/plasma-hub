@@ -2632,6 +2632,38 @@ pub async fn tdlib_read_all_chats(state: &TdlibManager) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetches a single message by its app-level id.
+///
+/// The timeline uses this to show the quoted message behind a reply when the
+/// original is outside the currently loaded page.
+pub async fn tdlib_get_message(
+    state: &TdlibManager,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<TdlibMessageInfo, String> {
+    let client_id = match ready_client_id(state).await {
+        Ok(client_id) => client_id,
+        Err(status) => return Err(status.error.unwrap_or(status.state)),
+    };
+    let tdlib_id = tdlib_message_id_from_app_id(message_id);
+    let raw = match functions::get_message(chat_id, tdlib_id, client_id).await {
+        Ok(tdlib_rs::enums::Message::Message(message)) => message,
+        Err(_) if tdlib_id != message_id => {
+            match functions::get_message(chat_id, message_id, client_id).await {
+                Ok(tdlib_rs::enums::Message::Message(message)) => message,
+                Err(error) => return Err(error.message),
+            }
+        }
+        Err(error) => return Err(error.message),
+    };
+    let mut message = tdlib_message_to_app(raw);
+    let sender_name = resolve_sender_name(client_id, &message.sender_id).await;
+    if !sender_name.trim().is_empty() {
+        message.sender_name = sender_name;
+    }
+    Ok(message)
+}
+
 pub async fn tdlib_get_messages(
     state: &TdlibManager,
     chat_id: i64,

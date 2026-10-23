@@ -11,7 +11,7 @@ use crate::state::{
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use time::OffsetDateTime;
 
 const OVERSCAN: usize = 6;
@@ -211,13 +211,14 @@ fn reply_preview(items: &[TimelineItem], message_id: i64) -> Option<&TdlibMessag
 }
 
 fn reply_sender(message: &TdlibMessageInfo) -> String {
+    if message.out {
+        return "Você".to_string();
+    }
     let name = message.sender_name.trim();
-    if !name.is_empty() {
-        name.to_string()
-    } else if message.out {
-        "Você".to_string()
-    } else {
+    if name.is_empty() {
         "Mensagem".to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -592,6 +593,10 @@ pub fn MessageTimeline(
     let mut measured_heights = use_signal(HashMap::<String, f64>::new);
     let mut jump_target = use_signal(|| None::<i64>);
     let mut highlighted_message = use_signal(|| None::<i64>);
+    // Replies to messages outside the loaded page are fetched by id and kept
+    // here so the quote can still show the original author and text.
+    let reply_cache = use_signal(HashMap::<(i64, i64), (String, String)>::new);
+    let mut requested_replies = use_hook(|| CopyValue::new(HashSet::<(i64, i64)>::new()));
     let layout_memo = use_memo(move || build_layout(&items_memo(), &measured_heights(), chat_id));
     // First and newest ids identify what changed between two renders.
     let bounds = use_memo(move || {
@@ -682,6 +687,53 @@ pub fn MessageTimeline(
                 highlighted_message.set(None);
             }
         });
+    });
+
+    // Resolve replies whose original message is outside the loaded page. The
+    // timeline still cannot jump to an unloaded row, but the quote becomes the
+    // same author + excerpt users expect from Telegram and WhatsApp.
+    let reply_services = services.clone();
+    use_effect(move || {
+        let items = items_memo();
+        let cached = reply_cache
+            .peek()
+            .keys()
+            .copied()
+            .collect::<HashSet<(i64, i64)>>();
+        let mut missing = Vec::new();
+        for item in &items {
+            let messages: &[TdlibMessageInfo] = match item {
+                TimelineItem::Message(message) => std::slice::from_ref(message.as_ref()),
+                TimelineItem::Album(messages) => messages.as_slice(),
+            };
+            for message in messages {
+                let Some(reply_id) = message.reply_to_msg_id else {
+                    continue;
+                };
+                let key = (chat_id, reply_id);
+                if reply_preview(&items, reply_id).is_some()
+                    || cached.contains(&key)
+                    || !requested_replies.write().insert(key)
+                {
+                    continue;
+                }
+                missing.push(reply_id);
+            }
+        }
+        for reply_id in missing {
+            let services = reply_services.clone();
+            let mut cache = reply_cache;
+            spawn(async move {
+                let preview = match services.telegram.get_message(chat_id, reply_id).await {
+                    Ok(message) => (reply_sender(&message), reply_snippet(&message)),
+                    Err(_) => (
+                        "Mensagem original".to_string(),
+                        "Não disponível".to_string(),
+                    ),
+                };
+                cache.write().insert((chat_id, reply_id), preview);
+            });
+        }
     });
 
     // Feed the rendered height of every row back into the layout. Estimates
@@ -794,16 +846,26 @@ pub fn MessageTimeline(
                                         row_class.push_str(" highlight");
                                     }
                                     let reply_quote = message.reply_to_msg_id.map(|reply_id| {
-                                        let (sender, text) = match reply_preview(&items, reply_id) {
-                                            Some(target) => {
-                                                (reply_sender(target), reply_snippet(target))
-                                            }
-                                            None => (
-                                                "Mensagem original".to_string(),
-                                                "Não carregada nesta página".to_string(),
-                                            ),
+                                        if let Some(target) = reply_preview(&items, reply_id) {
+                                            return (
+                                                reply_id,
+                                                reply_sender(target),
+                                                reply_snippet(target),
+                                            );
+                                        }
+                                        let cached = {
+                                            let cache = reply_cache.read();
+                                            cache.get(&(chat_id, reply_id)).cloned()
                                         };
-                                        (reply_id, sender, text)
+                                        if let Some((sender, text)) = cached {
+                                            (reply_id, sender, text)
+                                        } else {
+                                            (
+                                                reply_id,
+                                                "Mensagem original".to_string(),
+                                                "Carregando…".to_string(),
+                                            )
+                                        }
                                     });
                                     rsx! {
                                         article {
@@ -1318,7 +1380,7 @@ mod tests {
     fn reply_sender_labels_outgoing_messages_as_you() {
         let mut outgoing = message(1, 1, "/mystatus");
         outgoing.out = true;
-        outgoing.sender_name.clear();
+        outgoing.sender_name = "Tiago".to_string();
         assert_eq!(reply_sender(&outgoing), "Você");
 
         let mut incoming = message(2, 2, "oi");
