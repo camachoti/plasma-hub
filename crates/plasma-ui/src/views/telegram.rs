@@ -115,6 +115,8 @@ fn RealTelegram() -> Element {
     let mut search_active = use_signal(|| false);
     let mut global_search = use_signal(|| false);
     let mut global_results = use_signal(Vec::<TdlibGlobalSearchMessage>::new);
+    let mut global_offset = use_signal(String::new);
+    let mut global_loading_more = use_signal(|| false);
     let mut pending_search_jump = use_signal(|| None::<PendingSearchJump>);
     let loading_older = use_signal(|| false);
     let jump_to = use_signal(|| None::<i64>);
@@ -690,6 +692,8 @@ fn RealTelegram() -> Element {
                                     search_active.set(false);
                                     message_query.set(String::new());
                                     global_results.set(Vec::new());
+                                    global_offset.set(String::new());
+                                    global_loading_more.set(false);
                                     pending_search_jump.set(None);
                                     chat_list::open_chat(services.clone(), ui, selected);
                                 }
@@ -818,6 +822,8 @@ fn RealTelegram() -> Element {
                                     global_search.set(next);
                                     search_active.set(false);
                                     global_results.set(Vec::new());
+                                    global_offset.set(String::new());
+                                    global_loading_more.set(false);
                                     ui.search_results.set(Vec::new());
                                     ui.search_error.set(None);
                                     ui.search_loading.set(false);
@@ -843,6 +849,8 @@ fn RealTelegram() -> Element {
                                         if query.is_empty() {
                                             search_active.set(false);
                                             global_results.set(Vec::new());
+                                            global_offset.set(String::new());
+                                            global_loading_more.set(false);
                                             ui.search_results.set(Vec::new());
                                             ui.search_error.set(None);
                                             ui.search_loading.set(false);
@@ -851,10 +859,12 @@ fn RealTelegram() -> Element {
                                         search_active.set(true);
                                         if global_search() {
                                             ui.search_results.set(Vec::new());
+                                            global_loading_more.set(false);
                                             run_global_search(
                                                 services.clone(),
                                                 ui,
                                                 global_results,
+                                                global_offset,
                                                 query,
                                             );
                                         } else {
@@ -862,6 +872,8 @@ fn RealTelegram() -> Element {
                                                 return;
                                             };
                                             global_results.set(Vec::new());
+                                            global_offset.set(String::new());
+                                            global_loading_more.set(false);
                                             run_message_search(
                                                 services.clone(),
                                                 ui,
@@ -881,6 +893,8 @@ fn RealTelegram() -> Element {
                                         search_active.set(false);
                                         message_query.set(String::new());
                                         global_results.set(Vec::new());
+                                        global_offset.set(String::new());
+                                        global_loading_more.set(false);
                                         ui.search_results.set(Vec::new());
                                         ui.search_error.set(None);
                                         ui.search_loading.set(false);
@@ -980,42 +994,72 @@ fn RealTelegram() -> Element {
                                 GlobalSearchResults {
                                     query: message_query(),
                                     results: global_search_results,
+                                    has_more: !global_offset().is_empty(),
+                                    loading_more: global_loading_more(),
                                     on_open: {
                                         let services = services.clone();
                                         move |item: TdlibGlobalSearchMessage| {
-                                            let chat = ui
-                                                .chats()
-                                                .into_iter()
-                                                .find(|chat| chat.id == item.chat_id)
-                                                .unwrap_or_else(|| chat_from_global_result(&item));
+                                            let services = services.clone();
+                                            let chat_id = item.chat_id.clone();
                                             let topic_id = item.message.topic_id;
                                             let topic_kind = item.message.topic_kind.clone();
+                                            let message_id = item.message.id;
                                             search_active.set(false);
                                             message_query.set(String::new());
                                             global_results.set(Vec::new());
+                                            global_offset.set(String::new());
+                                            global_loading_more.set(false);
                                             ui.search_error.set(None);
                                             ui.search_loading.set(false);
-                                            chat_list::open_chat(services.clone(), ui, chat);
-                                            let topic = topic_id.map(|id| {
-                                                let kind = topic_kind
-                                                    .clone()
-                                                    .unwrap_or_else(|| "forum".to_string());
-                                                TdlibForumTopicInfo {
-                                                    id,
-                                                    title: search_topic_title(&kind).to_string(),
-                                                    kind,
-                                                    is_closed: false,
-                                                    is_pinned: false,
-                                                    unread_count: 0,
-                                                }
+                                            spawn(async move {
+                                                // Resolve the real chat so a result outside
+                                                // the loaded list still gets a working
+                                                // composer and the correct capabilities.
+                                                let chat = match chat_id.parse::<i64>() {
+                                                    Ok(id) => services
+                                                        .telegram
+                                                        .get_chat(id)
+                                                        .await
+                                                        .unwrap_or_else(|_| {
+                                                            chat_from_global_result(&item)
+                                                        }),
+                                                    Err(_) => chat_from_global_result(&item),
+                                                };
+                                                chat_list::open_chat(services.clone(), ui, chat);
+                                                let topic = topic_id.map(|id| {
+                                                    let kind = topic_kind
+                                                        .clone()
+                                                        .unwrap_or_else(|| "forum".to_string());
+                                                    TdlibForumTopicInfo {
+                                                        id,
+                                                        title: search_topic_title(&kind).to_string(),
+                                                        kind,
+                                                        is_closed: false,
+                                                        is_pinned: false,
+                                                        unread_count: 0,
+                                                    }
+                                                });
+                                                ui.selected_topic.set(topic);
+                                                pending_search_jump.set(Some(PendingSearchJump {
+                                                    chat_id,
+                                                    topic_id,
+                                                    topic_kind,
+                                                    message_id,
+                                                }));
                                             });
-                                            ui.selected_topic.set(topic);
-                                            pending_search_jump.set(Some(PendingSearchJump {
-                                                chat_id: item.chat_id,
-                                                topic_id,
-                                                topic_kind,
-                                                message_id: item.message.id,
-                                            }));
+                                        }
+                                    },
+                                    on_load_more: {
+                                        let services = services.clone();
+                                        move |_| {
+                                            run_global_search_more(
+                                                services.clone(),
+                                                ui,
+                                                global_results,
+                                                global_offset,
+                                                global_loading_more,
+                                                message_query(),
+                                            );
                                         }
                                     },
                                 }
@@ -2879,37 +2923,55 @@ fn run_message_search(
     });
 }
 
+fn fill_missing_chat_titles(
+    ui: UiState,
+    messages: Vec<TdlibGlobalSearchMessage>,
+) -> Vec<TdlibGlobalSearchMessage> {
+    let titles: std::collections::HashMap<String, String> = ui
+        .chats()
+        .into_iter()
+        .map(|chat| (chat.id, chat.title))
+        .collect();
+    messages
+        .into_iter()
+        .map(|mut item| {
+            if item.chat_title.trim().is_empty() {
+                item.chat_title = titles
+                    .get(&item.chat_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Conversa".to_string());
+            }
+            item
+        })
+        .collect()
+}
+
+fn sort_global_results(results: &mut [TdlibGlobalSearchMessage]) {
+    results.sort_by(|left, right| {
+        right
+            .message
+            .date
+            .cmp(&left.message.date)
+            .then_with(|| right.message.id.cmp(&left.message.id))
+    });
+}
+
 fn run_global_search(
     services: AppServices,
     mut ui: UiState,
     mut results: Signal<Vec<TdlibGlobalSearchMessage>>,
+    mut offset: Signal<String>,
     query: String,
 ) {
     ui.search_loading.set(true);
     ui.search_error.set(None);
     results.set(Vec::new());
+    offset.set(String::new());
     spawn(async move {
         match services.telegram.search_messages(query, 100, None).await {
             Ok(result) if result.success => {
-                let titles: std::collections::HashMap<String, String> = ui
-                    .chats()
-                    .into_iter()
-                    .map(|chat| (chat.id, chat.title))
-                    .collect();
-                let messages = result
-                    .messages
-                    .into_iter()
-                    .map(|mut item| {
-                        if item.chat_title.trim().is_empty() {
-                            item.chat_title = titles
-                                .get(&item.chat_id)
-                                .cloned()
-                                .unwrap_or_else(|| "Conversa".to_string());
-                        }
-                        item
-                    })
-                    .collect();
-                results.set(messages);
+                results.set(fill_missing_chat_titles(ui, result.messages));
+                offset.set(result.next_offset);
             }
             Ok(result) => ui.search_error.set(
                 result
@@ -2919,6 +2981,50 @@ fn run_global_search(
             Err(error) => ui.search_error.set(Some(error)),
         }
         ui.search_loading.set(false);
+    });
+}
+
+fn run_global_search_more(
+    services: AppServices,
+    mut ui: UiState,
+    mut results: Signal<Vec<TdlibGlobalSearchMessage>>,
+    mut offset: Signal<String>,
+    mut loading_more: Signal<bool>,
+    query: String,
+) {
+    let next_offset = offset();
+    if next_offset.is_empty() || loading_more() {
+        return;
+    }
+    loading_more.set(true);
+    spawn(async move {
+        match services
+            .telegram
+            .search_messages(query, 100, Some(next_offset))
+            .await
+        {
+            Ok(result) if result.success => {
+                let mut merged = results();
+                for item in fill_missing_chat_titles(ui, result.messages) {
+                    let duplicate = merged.iter().any(|existing| {
+                        existing.chat_id == item.chat_id && existing.message.id == item.message.id
+                    });
+                    if !duplicate {
+                        merged.push(item);
+                    }
+                }
+                sort_global_results(&mut merged);
+                results.set(merged);
+                offset.set(result.next_offset);
+            }
+            Ok(result) => ui.search_error.set(
+                result
+                    .error
+                    .or_else(|| Some("Busca não retornou resultados.".into())),
+            ),
+            Err(error) => ui.search_error.set(Some(error)),
+        }
+        loading_more.set(false);
     });
 }
 

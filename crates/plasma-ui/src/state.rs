@@ -249,6 +249,16 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    /// Fetches one chat, used to open a global search result whose
+    /// conversation is not in the loaded chat list.
+    pub async fn get_chat(&self, chat_id: i64) -> Result<TdlibChatInfo, String> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_get_chat(&manager, chat_id).await });
+        self.join(handle).await?
+    }
+
     /// Fetches one message, used to resolve replies whose original is outside
     /// the loaded timeline page.
     pub async fn get_message(

@@ -15,7 +15,10 @@ struct GlobalSearchGroup {
 pub fn GlobalSearchResults(
     query: String,
     results: Vec<TdlibGlobalSearchMessage>,
+    has_more: bool,
+    loading_more: bool,
     on_open: EventHandler<TdlibGlobalSearchMessage>,
+    on_load_more: EventHandler<()>,
 ) -> Element {
     let total = results.len();
     let groups = group_by_chat(results);
@@ -84,6 +87,20 @@ pub fn GlobalSearchResults(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                if has_more {
+                    div { class: "global-search-more",
+                        button {
+                            class: "btn small ghost",
+                            disabled: loading_more,
+                            onclick: move |_| on_load_more.call(()),
+                            if loading_more {
+                                "Carregando..."
+                            } else {
+                                "Carregar mais resultados"
                             }
                         }
                     }

@@ -1666,6 +1666,57 @@ async fn resolve_message_sender_names(client_id: i32, messages: &mut [TdlibMessa
     }
 }
 
+/// Fills the chat title of cross-chat search hits.
+///
+/// Search results only carry the chat id. Resolving the titles here keeps the
+/// UI from showing "Conversa" for every chat that is not in the loaded list.
+async fn resolve_chat_titles(client_id: i32, entries: &mut [TdlibGlobalSearchMessage]) {
+    let chat_ids = entries
+        .iter()
+        .filter(|entry| entry.chat_title.trim().is_empty())
+        .map(|entry| entry.chat_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if chat_ids.is_empty() {
+        return;
+    }
+
+    let mut titles = HashMap::<String, String>::new();
+    for batch in chat_ids.chunks(SENDER_NAME_RESOLUTION_CONCURRENCY) {
+        let mut tasks = JoinSet::new();
+        for chat_id in batch {
+            let chat_id = chat_id.clone();
+            tasks.spawn(async move {
+                let title = match chat_id.parse::<i64>() {
+                    Ok(id) => match functions::get_chat(id, client_id).await {
+                        Ok(tdlib_rs::enums::Chat::Chat(chat)) => chat.title,
+                        _ => String::new(),
+                    },
+                    Err(_) => String::new(),
+                };
+                (chat_id, title)
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            if let Ok((chat_id, title)) = result {
+                if !title.trim().is_empty() {
+                    titles.insert(chat_id, title);
+                }
+            }
+        }
+    }
+
+    for entry in entries {
+        if entry.chat_title.trim().is_empty() {
+            if let Some(title) = titles.get(&entry.chat_id) {
+                entry.chat_title = title.clone();
+            }
+        }
+    }
+}
+
 fn plain_formatted_text(text: impl Into<String>) -> FormattedText {
     FormattedText {
         text: text.into(),
@@ -2791,6 +2842,21 @@ pub async fn tdlib_get_chats(
     })
 }
 
+/// Fetches one chat as the UI DTO, including capabilities and topic support.
+///
+/// Global search can return messages from conversations outside the loaded
+/// chat list. Opening one of those results needs the real chat metadata,
+/// otherwise the composer would be disabled by the fallback DTO.
+pub async fn tdlib_get_chat(state: &TdlibManager, chat_id: i64) -> Result<TdlibChatInfo, String> {
+    let client_id = ready_client_id(state)
+        .await
+        .map_err(|status| status.error.unwrap_or(status.state))?;
+    match functions::get_chat(chat_id, client_id).await {
+        Ok(tdlib_rs::enums::Chat::Chat(chat)) => Ok(tdlib_chat_to_app(chat)),
+        Err(error) => Err(error.message),
+    }
+}
+
 pub async fn tdlib_read_chat(state: &TdlibManager, chat_id: i64) -> Result<(), String> {
     let client_id = ready_client_id(state)
         .await
@@ -3177,6 +3243,7 @@ pub async fn tdlib_search_messages(
             for (entry, message) in entries.iter_mut().zip(messages) {
                 entry.message = message;
             }
+            resolve_chat_titles(client_id, &mut entries).await;
             entries.sort_by(|left, right| {
                 right
                     .message

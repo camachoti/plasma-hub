@@ -710,6 +710,11 @@ h1, h2, h3, p { margin: 0; }
   color: var(--text-2);
   overflow-wrap: anywhere;
 }
+.global-search-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 12px;
+}
 .timeline-error { margin: 10px 14px 0; }
 .error-banner {
   margin-top: 8px;
