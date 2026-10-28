@@ -42,6 +42,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks", "document"] }
 dirs = "6"
 base64 = "0.22"
+time = { version = "0.3", features = ["local-offset"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -2420,15 +2420,37 @@ fn emit_native_media_progress(
     );
 }
 
+fn missing_tdlib_config(field: &str) -> tdlib_rs::types::Error {
+    tdlib_rs::types::Error {
+        code: 400,
+        message: format!("Configuração do TDLib incompleta: {field}."),
+    }
+}
+
 async fn configure_if_needed(inner: &Arc<Mutex<TdlibInner>>) -> Result<(), tdlib_rs::types::Error> {
     let (client_id, api_id, api_hash, database_directory, files_directory) = {
         let guard = inner.lock().await;
+        let Some(client_id) = guard.client_id else {
+            return Err(missing_tdlib_config("client_id"));
+        };
+        let Some(api_id) = guard.api_id else {
+            return Err(missing_tdlib_config("api_id"));
+        };
+        let Some(api_hash) = guard.api_hash.clone() else {
+            return Err(missing_tdlib_config("api_hash"));
+        };
+        let Some(database_directory) = guard.database_directory.clone() else {
+            return Err(missing_tdlib_config("database_directory"));
+        };
+        let Some(files_directory) = guard.files_directory.clone() else {
+            return Err(missing_tdlib_config("files_directory"));
+        };
         (
-            guard.client_id.unwrap(),
-            guard.api_id.unwrap(),
-            guard.api_hash.clone().unwrap(),
-            guard.database_directory.clone().unwrap(),
-            guard.files_directory.clone().unwrap(),
+            client_id,
+            api_id,
+            api_hash,
+            database_directory,
+            files_directory,
         )
     };
 

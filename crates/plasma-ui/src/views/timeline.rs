@@ -13,6 +13,7 @@ use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use time::OffsetDateTime;
 
 const OVERSCAN: usize = 6;
@@ -392,6 +393,13 @@ fn visible_range(
     (start.min(end), end)
 }
 
+/// Resolving the local offset reads the OS time zone configuration, which is
+/// too expensive to repeat for every visible message. Cache it for the session.
+fn local_offset() -> time::UtcOffset {
+    static OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
+    *OFFSET.get_or_init(|| time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+}
+
 pub(crate) fn format_timestamp(timestamp: i32) -> String {
     if timestamp <= 0 {
         return String::new();
@@ -399,7 +407,7 @@ pub(crate) fn format_timestamp(timestamp: i32) -> String {
     let Ok(utc) = OffsetDateTime::from_unix_timestamp(timestamp as i64) else {
         return String::new();
     };
-    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let offset = local_offset();
     let local = utc.to_offset(offset);
     let now = OffsetDateTime::now_utc().to_offset(offset);
     if local.date() == now.date() {
