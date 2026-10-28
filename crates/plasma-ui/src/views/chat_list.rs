@@ -140,6 +140,7 @@ pub fn open_chat(services: AppServices, mut ui: UiState, chat: TdlibChatInfo) {
     ui.search_error.set(None);
     ui.search_loading.set(false);
     ui.reply_to.set(None);
+    ui.user_media.set(None);
     if let Ok(chat_id) = selected.id.parse::<i64>() {
         spawn(async move {
             let _ = services.telegram.read_chat(chat_id).await;

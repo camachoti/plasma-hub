@@ -8,8 +8,8 @@
 use crate::downloads::DownloadRecord;
 use crate::icons::IconName;
 use crate::state::{
-    push_toast, toggle_topic_hidden, AppServices, LightboxState, ReactionPickerState, ToastKind,
-    UiState,
+    push_toast, toggle_topic_hidden, AppServices, LightboxMedia, LightboxState,
+    ReactionPickerState, ToastKind, UiState, UserMediaState,
 };
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibForumTopicInfo, TdlibMessageInfo};
@@ -94,6 +94,13 @@ pub enum ContextTarget {
     },
     Download {
         record: Box<DownloadRecord>,
+    },
+    /// A message sender (avatar or name). Used in groups to browse only the
+    /// photos and videos sent by that user.
+    User {
+        chat_id: i64,
+        sender_id: String,
+        sender_name: String,
     },
 }
 
@@ -200,6 +207,18 @@ impl ContextTarget {
                 }
                 entries
             }
+            ContextTarget::User {
+                sender_name,
+                sender_id,
+                ..
+            } => {
+                let label = if sender_name.trim().is_empty() {
+                    format!("Buscar mídias do usuário {sender_id}")
+                } else {
+                    format!("Buscar mídias de {sender_name}")
+                };
+                vec![ContextMenuEntry::new("user.media", label).icon(IconName::Search)]
+            }
             ContextTarget::Download { record } => {
                 let mut entries = Vec::new();
                 if record.status == "completed" && record.file_path.is_some() {
@@ -275,6 +294,7 @@ pub fn handle_context_action(
                 ui.hidden_topics.set(Vec::new());
                 ui.topic_browser_open.set(false);
                 ui.reply_to.set(None);
+                ui.user_media.set(None);
             }
         }
         (ContextTarget::Chat { id: chat_id }, "chat.read") => {
@@ -348,13 +368,10 @@ pub fn handle_context_action(
             });
         }
         (ContextTarget::Message { chat_id, message }, "message.media") => {
-            ui.lightbox.set(Some(LightboxState {
-                chat_id: *chat_id,
-                message_id: message.id,
-                is_video: message.is_video,
-                is_photo: message.is_photo,
-                title: message.sender_name.clone(),
-            }));
+            ui.lightbox.set(Some(LightboxState::from_message(
+                *chat_id,
+                message.as_ref(),
+            )));
         }
         (ContextTarget::Message { chat_id, message }, "message.save") => {
             save_media(services, ui, *chat_id, message.as_ref().clone());
@@ -368,13 +385,9 @@ pub fn handle_context_action(
             "album.open",
         ) => {
             if let Some(message) = messages.iter().find(|message| message.id == *anchor_id) {
-                ui.lightbox.set(Some(LightboxState {
-                    chat_id: *chat_id,
-                    message_id: message.id,
-                    is_video: message.is_video,
-                    is_photo: message.is_photo,
-                    title: message.sender_name.clone(),
-                }));
+                let album = messages.iter().map(LightboxMedia::from_message).collect();
+                ui.lightbox
+                    .set(Some(LightboxState::from_album(*chat_id, message, album)));
             }
         }
         (
@@ -428,6 +441,20 @@ pub fn handle_context_action(
                     message: message.clone(),
                 }));
             }
+        }
+        (
+            ContextTarget::User {
+                chat_id,
+                sender_id,
+                sender_name,
+            },
+            "user.media",
+        ) => {
+            ui.user_media.set(Some(UserMediaState {
+                chat_id: *chat_id,
+                sender_id: sender_id.clone(),
+                sender_name: sender_name.clone(),
+            }));
         }
         (ContextTarget::Download { record }, "download.open") => {
             if let Some(path) = record.file_path.clone() {
@@ -596,5 +623,36 @@ pub async fn copy_to_clipboard(text: String) -> bool {
     match document::eval(&script).await {
         Ok(value) => value.as_bool().unwrap_or(false),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_context_menu_offers_sent_media_search() {
+        let target = ContextTarget::User {
+            chat_id: -100,
+            sender_id: "42".to_string(),
+            sender_name: "Ana".to_string(),
+        };
+        let entries = target.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "user.media");
+        assert_eq!(entries[0].label, "Buscar mídias de Ana");
+        assert_eq!(entries[0].icon, Some(IconName::Search));
+    }
+
+    #[test]
+    fn user_context_menu_falls_back_to_sender_id() {
+        let target = ContextTarget::User {
+            chat_id: -100,
+            sender_id: "42".to_string(),
+            sender_name: String::new(),
+        };
+        let entries = target.entries();
+        assert_eq!(entries[0].id, "user.media");
+        assert!(entries[0].label.contains("42"));
     }
 }

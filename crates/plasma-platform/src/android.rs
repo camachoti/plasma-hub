@@ -206,7 +206,7 @@ pub async fn pick_media_file() -> Option<PathBuf> {
             .map_err(|error| format!("Falha ao abrir seletor de arquivos: {error}"))
     });
     if let Err(error) = started {
-        eprintln!("plasma: {error}");
+        tracing::error!(%error, "Android file picker failed to start");
         if let Ok(mut slot) = PICK_TX.lock() {
             slot.take();
         }

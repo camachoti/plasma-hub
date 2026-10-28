@@ -16,7 +16,7 @@ Rust, com UI em Dioxus e um núcleo de domínio independente de UI.
 | Async | Tokio |
 | Rede/downloads | `reqwest` + extratores nativos por plataforma |
 | Mídia | cache próprio; thumbnails com `ffmpeg` no desktop e `MediaMetadataRetriever` no Android |
-| Estilo | CSS embutido (`include_str!`) e ícones SVG próprios |
+| Estilo | CSS embutido (`include_str!`) e ícones SVG do Tabler |
 | Empacotamento | Dioxus CLI 0.7.10 (`dx bundle`) → `.deb` + diretório portátil |
 | Frontend legado | React/TypeScript em `reference/react-frontend/` (somente consulta; não é compilado) |
 
@@ -73,6 +73,30 @@ Build otimizado:
 ```bash
 cargo build -p plasma --release
 ```
+
+## Logs
+
+O app escreve logs compactos em `stderr`, com nível `info` por padrão. Para
+investigar um problema sem poluir o terminal:
+
+```bash
+# logs detalhados de todos os módulos do app
+PLASMA_LOG=debug cargo run -p plasma
+
+# foco em um módulo específico
+PLASMA_LOG=plasma_telegram=debug cargo run -p plasma
+```
+
+`RUST_LOG` também é aceito quando `PLASMA_LOG` não está definido.
+
+Os logs internos do TDLib são redirecionados para
+`<data_dir>/tdlib/tdlib.log` e rotacionados automaticamente em 10 MB. Assim o
+terminal mostra apenas a inicialização e os eventos úteis do app. Panics
+continuam sendo registrados em `<local_data_dir>/crash.log`.
+
+Em builds de desenvolvimento, o backend de janela (`tao`) pode imprimir
+`Couldn't get key from code` ao usar algumas teclas. É uma mensagem interna do
+tao, não um erro do Plasma Hub, e não aparece em builds release.
 
 ## Checks
 
@@ -163,6 +187,7 @@ O script usa o `adb` de `ANDROID_HOME`, `ANDROID_SDK_ROOT` ou
 - `reference/react-frontend`: código React/TypeScript mantido como referência
   para funcionalidades ainda não portadas. Não é compilado nem testado.
 - `docs/rust-rewrite-plan.md`: plano e histórico da migração para Rust.
+- `THIRD_PARTY_NOTICES.md`: licenças de ícones e materiais de terceiros.
 - `scripts/bundle-dioxus-desktop.sh`: empacotamento desktop.
 - `scripts/build-dioxus-android.sh`: empacotamento Android.
 - `scripts/check-android-toolchain.sh`: validação do ambiente Android.

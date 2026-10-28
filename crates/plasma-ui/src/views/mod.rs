@@ -4,6 +4,7 @@ pub mod chat_list;
 pub mod context_menu;
 pub mod downloads;
 pub mod duplicate_search;
+pub mod global_search;
 pub mod login;
 pub mod palette;
 pub mod reaction_picker;

@@ -81,7 +81,7 @@ pub fn start_server(app: AppEnv) -> Result<(), String> {
         .collect();
     let _ = PLASMA_MEDIA_HTTP_TOKEN.set(token);
     let _ = PLASMA_MEDIA_HTTP_PORT.set(port);
-    println!("[plasma-media-http] listening on http://127.0.0.1:{port}");
+    tracing::info!(port, "media server listening on loopback");
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -91,7 +91,7 @@ pub fn start_server(app: AppEnv) -> Result<(), String> {
                     std::thread::spawn(move || handle_stream(app, stream));
                 }
                 Err(error) => {
-                    println!("[plasma-media-http] accept error={error}");
+                    tracing::warn!(%error, "media server accept failed");
                 }
             }
         }
@@ -106,7 +106,7 @@ fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     let cloned = match stream.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
-            println!("[plasma-media-http] clone stream error={error}");
+            tracing::debug!(%error, "media server could not clone stream");
             return;
         }
     };
@@ -153,7 +153,7 @@ fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     }
 
     if let Err(error) = write_response(&app, &mut stream, method, path, range_header.as_deref()) {
-        println!("[plasma-media-http] write error={error}");
+        tracing::debug!(%error, "media server write failed");
     }
 }
 

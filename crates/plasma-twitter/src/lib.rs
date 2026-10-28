@@ -155,10 +155,10 @@ pub async fn analyze_twitter_profile_native(
     cookies: Option<String>,
 ) -> Result<NativeProfileInfo, String> {
     let username = extract_twitter_profile_username(&url)?;
-    eprintln!("[twitter_native] analyzing profile username={}", username);
+    tracing::debug!(username = %username, "analyzing Twitter profile");
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;
     if cookie_header.is_some() {
-        eprintln!("[twitter_native] using Twitter cookies for profile analyzer");
+        tracing::debug!("using Twitter cookies for profile analyzer");
     }
     let client = build_twitter_client(cookie_header.as_deref())?;
     let profile = fetch_twitter_profile_graphql(&client, &username).await?;
@@ -204,10 +204,10 @@ pub async fn analyze_twitter_tweet_native(
     cookies: Option<String>,
 ) -> Result<NativeMediaInfo, String> {
     let tweet_id = extract_twitter_id(&url)?;
-    eprintln!("[twitter_native] analyzing tweet id={}", tweet_id);
+    tracing::debug!(tweet_id = %tweet_id, "analyzing Twitter tweet");
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;
     if cookie_header.is_some() {
-        eprintln!("[twitter_native] using Twitter cookies for analyzer");
+        tracing::debug!("using Twitter cookies for tweet analyzer");
     }
     let client = build_twitter_client(cookie_header.as_deref())?;
 
@@ -215,9 +215,10 @@ pub async fn analyze_twitter_tweet_native(
         match analyze_twitter_tweet_graphql(&client, &tweet_id, &url).await {
             Ok(info) => return Ok(info),
             Err(graphql_error) => {
-                eprintln!(
-                    "[twitter_native] authenticated GraphQL analyzer failed for id={}: {}",
-                    tweet_id, graphql_error
+                tracing::debug!(
+                    tweet_id = %tweet_id,
+                    error = %graphql_error,
+                    "authenticated GraphQL analyzer failed"
                 );
             }
         }
@@ -225,9 +226,10 @@ pub async fn analyze_twitter_tweet_native(
         match analyze_twitter_tweet_page(&client, &tweet_id, &url).await {
             Ok(info) => return Ok(info),
             Err(page_error) => {
-                eprintln!(
-                    "[twitter_native] authenticated page analyzer failed for id={}: {}",
-                    tweet_id, page_error
+                tracing::debug!(
+                    tweet_id = %tweet_id,
+                    error = %page_error,
+                    "authenticated page analyzer failed"
                 );
             }
         }
@@ -236,16 +238,18 @@ pub async fn analyze_twitter_tweet_native(
     match analyze_twitter_tweet_v1(&client, &tweet_id, &url).await {
         Ok(info) => Ok(info),
         Err(v1_error) => {
-            eprintln!(
-                "[twitter_native] v1 analyzer failed for id={}: {}. Trying syndication.",
-                tweet_id, v1_error
+            tracing::debug!(
+                tweet_id = %tweet_id,
+                error = %v1_error,
+                "v1 analyzer failed; trying syndication"
             );
             analyze_twitter_tweet_syndication(&client, &tweet_id, &url)
                 .await
                 .map_err(|syndication_error| {
-                    eprintln!(
-                        "[twitter_native] syndication analyzer failed for id={}: {}",
-                        tweet_id, syndication_error
+                    tracing::debug!(
+                        tweet_id = %tweet_id,
+                        error = %syndication_error,
+                        "syndication analyzer failed"
                     );
                     format!(
                         "Twitter API falhou: {}. Syndication falhou: {}",
@@ -311,10 +315,7 @@ async fn fetch_twitter_profile_graphql(
     client: &reqwest::Client,
     username: &str,
 ) -> Result<Value, String> {
-    eprintln!(
-        "[twitter_native] fetching profile GraphQL username={}",
-        username
-    );
+    tracing::debug!(username = %username, "fetching Twitter profile GraphQL");
     let variables = json!({ "screenName": username });
     let url = format!(
         "https://x.com/i/api/graphql/SBM-5B0LqR_VAFawpkwGRQ/UserByScreenName?variables={}",
@@ -329,15 +330,13 @@ async fn fetch_twitter_profile_media_graphql(
     cursor: Option<&str>,
 ) -> Result<Value, String> {
     if cursor.is_some() {
-        eprintln!(
-            "[twitter_native] fetching profile media GraphQL username={} cursor=next",
-            username
+        tracing::debug!(
+            username = %username,
+            cursor = "next",
+            "fetching Twitter profile media GraphQL"
         );
     } else {
-        eprintln!(
-            "[twitter_native] fetching profile media GraphQL username={}",
-            username
-        );
+        tracing::debug!(username = %username, "fetching Twitter profile media GraphQL");
     }
     let variables = json!({
         "screenName": username,
@@ -379,17 +378,17 @@ async fn fetch_twitter_profile_media_pages(
         cursor = Some(next_cursor);
 
         if page == 24 {
-            eprintln!(
-                "[twitter_native] profile media pagination stopped at safety limit username={}",
-                username
+            tracing::debug!(
+                username = %username,
+                "Twitter profile media pagination stopped at safety limit"
             );
         }
     }
 
-    eprintln!(
-        "[twitter_native] profile media collected username={} items={}",
-        username,
-        collection.items.len()
+    tracing::debug!(
+        username = %username,
+        items = collection.items.len(),
+        "Twitter profile media collected"
     );
     Ok(collection)
 }
@@ -451,10 +450,7 @@ async fn analyze_twitter_tweet_graphql(
     tweet_id: &str,
     original_url: &str,
 ) -> Result<NativeMediaInfo, String> {
-    eprintln!(
-        "[twitter_native] fetching authenticated GraphQL tweet id={}",
-        tweet_id
-    );
+    tracing::debug!(tweet_id = %tweet_id, "fetching authenticated GraphQL tweet");
     let variables = json!({ "restId": tweet_id });
     let url = format!(
         "https://x.com/i/api/graphql/qJh6Id-hd5uVVGXofFCT4w/TweetResultByRestId?variables={}",
@@ -499,10 +495,7 @@ async fn analyze_twitter_tweet_page(
     tweet_id: &str,
     original_url: &str,
 ) -> Result<NativeMediaInfo, String> {
-    eprintln!(
-        "[twitter_native] fetching authenticated tweet page id={}",
-        tweet_id
-    );
+    tracing::debug!(tweet_id = %tweet_id, "fetching authenticated tweet page");
     let response = client
         .get(original_url)
         .send()
@@ -550,10 +543,7 @@ async fn analyze_twitter_tweet_syndication(
     original_url: &str,
 ) -> Result<NativeMediaInfo, String> {
     let token = syndication_token(tweet_id)?;
-    eprintln!(
-        "[twitter_native] fetching syndication tweet id={} token={}",
-        tweet_id, token
-    );
+    tracing::debug!(tweet_id = %tweet_id, "fetching syndication tweet");
     let response = client
         .get(format!(
             "https://cdn.syndication.twimg.com/tweet-result?id={}&token={}&lang=pt",
@@ -564,10 +554,10 @@ async fn analyze_twitter_tweet_syndication(
         .map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
-        eprintln!(
-            "[twitter_native] syndication HTTP status for id={}: {}",
-            tweet_id,
-            response.status()
+        tracing::debug!(
+            tweet_id = %tweet_id,
+            status = %response.status(),
+            "syndication returned a non-success status"
         );
         return Err(format!("Twitter syndication HTTP {}", response.status()));
     }
@@ -740,7 +730,7 @@ async fn download_twitter_native_inner(
 
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;
     if cookie_header.is_some() {
-        eprintln!("[twitter_native] using Twitter cookies for media download");
+        tracing::debug!("using Twitter cookies for media download");
     }
     let client = build_twitter_client(cookie_header.as_deref())?;
     let mut response = tokio::select! {

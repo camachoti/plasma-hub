@@ -13,14 +13,50 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn main() {
+    init_logging();
     if let Err(error) = run() {
-        eprintln!("plasma: {error}");
+        report_fatal(&error);
         std::process::exit(1);
+    }
+}
+
+/// Initializes compact stderr logging.
+///
+/// `PLASMA_LOG` is preferred over `RUST_LOG` so development commands can opt
+/// into verbose module logs without changing the whole process environment.
+fn init_logging() {
+    use std::io::IsTerminal;
+
+    let filter = std::env::var("PLASMA_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    let filter = tracing_subscriber::EnvFilter::try_new(filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_writer(std::io::stderr)
+        .compact()
+        .try_init();
+}
+
+fn report_fatal(error: &str) {
+    if tracing::dispatcher::has_been_set() {
+        tracing::error!(%error, "plasma failed to start");
+    } else {
+        eprintln!("plasma: {error}");
     }
 }
 
 fn run() -> Result<(), String> {
     let paths = build_paths()?;
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        data_dir = %paths.data_dir().display(),
+        "Plasma Hub starting"
+    );
 
     let events = EventBus::default();
     let emitter: Arc<dyn EventEmitter> = Arc::new(BusEmitter {
@@ -45,14 +81,13 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("não foi possível iniciar o runtime Tokio: {error}"))?;
     let telegram = TelegramHandle::new(env.clone(), runtime.handle().clone());
     let credentials = telegram_credentials();
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "plasma: telegram credentials {}",
-        if credentials.is_some() {
+    tracing::debug!(
+        credentials = if credentials.is_some() {
             "configured"
         } else {
             "missing"
-        }
+        },
+        "Telegram credentials"
     );
     let mut services = AppServices::new(env.clone(), settings, events, telegram, credentials);
     services.initial_shared_url = plasma_platform::take_initial_shared_url()
@@ -197,7 +232,11 @@ fn install_panic_logger(env: &AppEnv) {
         {
             let _ = writeln!(file, "[{timestamp}] {info}");
         }
-        eprintln!("plasma: panic: {info}");
+        if tracing::dispatcher::has_been_set() {
+            tracing::error!(panic = %info, "panic");
+        } else {
+            eprintln!("plasma: panic: {info}");
+        }
     }));
 }
 

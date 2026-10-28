@@ -17,14 +17,15 @@ use downloads::{
     apply_download_done, apply_download_error, apply_download_progress, persist_downloads,
     DownloadRecord,
 };
+use icons::Icon;
 use plasma_core::AppEvent;
 use plasma_duplicates::SearchMatch;
 use plasma_store::SettingKey;
 use plasma_telegram::{TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo};
 use state::{
-    apply_auth_error, apply_auth_status, bump_telegram_tick, mark_deleted_messages, AppServices,
-    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress,
-    ReactionPickerState, Tab, UiState,
+    apply_auth_error, apply_auth_status, bump_message_tick, bump_telegram_tick,
+    mark_deleted_messages, AppServices, DuplicateSearchProgress, ForwardState, LightboxState,
+    MassDownloadProgress, ReactionPickerState, Tab, UiState, UserMediaState,
 };
 use theme::{Density, Palette};
 use views::{
@@ -96,6 +97,7 @@ pub fn App() -> Element {
     let search_error = use_signal(|| None::<String>);
 
     let telegram_tick = use_signal(|| 0u64);
+    let message_tick = use_signal(|| 0u64);
     let downloads = use_signal(Vec::<DownloadRecord>::new);
     let mass_download_running = use_signal(|| false);
     let mass_download_stopping = use_signal(|| false);
@@ -107,6 +109,7 @@ pub fn App() -> Element {
     let reply_to = use_signal(|| None::<TdlibMessageInfo>);
     let forward_state = use_signal(|| None::<ForwardState>);
     let lightbox = use_signal(|| None::<LightboxState>);
+    let user_media = use_signal(|| None::<UserMediaState>);
     let reaction_picker = use_signal(|| None::<ReactionPickerState>);
     let shared_url = use_signal(|| services.initial_shared_url.clone());
 
@@ -142,6 +145,7 @@ pub fn App() -> Element {
         search_loading,
         search_error,
         telegram_tick,
+        message_tick,
         downloads,
         mass_download_running,
         mass_download_stopping,
@@ -153,6 +157,7 @@ pub fn App() -> Element {
         reply_to,
         forward_state,
         lightbox,
+        user_media,
         reaction_picker,
         shared_url,
     });
@@ -226,13 +231,19 @@ pub fn App() -> Element {
                             ui.logged_in.set(true);
                             ui.preview_mode.set(false);
                             bump_telegram_tick(ui);
+                            bump_message_tick(ui);
                             refresh_identity(event_services.clone(), ui).await;
                         } else if matches!(state.as_str(), "closed" | "logging_out") {
                             ui.logged_in.set(false);
                         }
                     }
-                    Ok(AppEvent::TelegramNewMessage { .. }) => {
+                    Ok(AppEvent::TelegramNewMessage { chat_id, .. }) => {
+                        // The chat list always needs a refresh, but the open
+                        // timeline only changes when the message belongs to it.
                         bump_telegram_tick(ui);
+                        if selected_chat_id(ui) == Some(chat_id) {
+                            bump_message_tick(ui);
+                        }
                     }
                     Ok(AppEvent::TelegramMessagesDeleted {
                         chat_id,
@@ -248,6 +259,9 @@ pub fn App() -> Element {
                                 .mark_messages_deleted(chat_id.to_string(), message_ids)
                                 .await;
                             bump_telegram_tick(ui);
+                            if selected_chat_id(ui) == Some(chat_id) {
+                                bump_message_tick(ui);
+                            }
                         });
                     }
                     Ok(AppEvent::TelegramDownloadProgress {
@@ -340,11 +354,23 @@ pub fn App() -> Element {
                 );
                 document.addEventListener("keydown", (event) => {
                     const key = event.key.toLowerCase();
+                    const target = event.target;
+                    const typing = target &&
+                        (target.tagName === "INPUT" ||
+                         target.tagName === "TEXTAREA" ||
+                         target.isContentEditable);
                     if ((event.ctrlKey || event.metaKey) && key === "k") {
                         event.preventDefault();
                         dioxus.send("toggle");
                     } else if (event.key === "Escape") {
                         dioxus.send("close");
+                    } else if (
+                        !typing &&
+                        (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+                        document.querySelector(".lightbox-carousel")
+                    ) {
+                        event.preventDefault();
+                        dioxus.send(event.key === "ArrowLeft" ? "lightbox-prev" : "lightbox-next");
                     }
                 });
                 "#,
@@ -359,6 +385,22 @@ pub fn App() -> Element {
                     "close" => {
                         ui.show_palette.set(false);
                         ui.context_menu.set(None);
+                        ui.user_media.set(None);
+                        ui.lightbox.set(None);
+                    }
+                    "lightbox-prev" => {
+                        if let Some(state) = ui.lightbox() {
+                            if let Some(previous) = state.previous_album() {
+                                ui.lightbox.set(Some(previous));
+                            }
+                        }
+                    }
+                    "lightbox-next" => {
+                        if let Some(state) = ui.lightbox() {
+                            if let Some(next) = state.next_album() {
+                                ui.lightbox.set(Some(next));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -421,6 +463,14 @@ pub fn App() -> Element {
     }
 }
 
+/// Numeric id of the conversation currently open in the timeline.
+fn selected_chat_id(ui: UiState) -> Option<i64> {
+    ui.selected_chat
+        .peek()
+        .as_ref()
+        .and_then(|chat| chat.id.parse::<i64>().ok())
+}
+
 async fn refresh_identity(services: AppServices, mut ui: UiState) {
     match services.telegram.get_me().await {
         Ok(me) if me.success => {
@@ -463,9 +513,10 @@ fn Shell() -> Element {
                         key: "{item.label()}",
                         class: if tab == item { "rail-item active" } else { "rail-item" },
                         title: "{item.label()}",
+                        aria_label: "{item.label()}",
                         "data-tip": "{item.label()}",
                         onclick: move |_| ui.tab.set(item),
-                        "{item.rail_label()}"
+                        Icon { name: item.rail_icon(), size: 20, class: "icon" }
                     }
                 }
                 div { class: "rail-spacer" }

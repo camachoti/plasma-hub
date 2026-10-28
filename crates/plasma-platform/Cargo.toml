@@ -8,6 +8,7 @@ description = "Filesystem, dialogs and OS integration helpers"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+tracing = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

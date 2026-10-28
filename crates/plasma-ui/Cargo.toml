@@ -11,6 +11,7 @@ plasma-core = { path = "../plasma-core" }
 plasma-platform = { path = "../plasma-platform" }
 plasma-store = { path = "../plasma-store" }
 plasma-telegram = { path = "../plasma-telegram" }
+plasma-media = { path = "../plasma-media" }
 plasma-download = { path = "../plasma-download" }
 plasma-duplicates = { path = "../plasma-duplicates" }
 plasma-twitter = { path = "../plasma-twitter" }

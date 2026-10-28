@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use plasma_core::AppEnv;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -6,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, LazyLock, Mutex as StdMutex,
 };
 #[cfg(debug_assertions)]
 use std::time::Instant;
@@ -14,20 +15,42 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tdlib_rs::{
     enums::{
         AuthorizationState, ChatList, ChatMemberStatus, ChatType, ConnectionState, InputFile,
-        InputMessageContent, InputMessageReplyTo, MessageContent, MessageReplyTo, MessageSender,
-        MessageTopic, ReactionType, Update,
+        InputMessageContent, InputMessageReplyTo, LogStream, MessageContent, MessageReplyTo,
+        MessageSender, MessageTopic, ReactionType, Update,
     },
     functions,
     types::{
         ChatPermissions, File, FormattedText, InputFileLocal, InputMessageDocument,
         InputMessagePhoto, InputMessageReplyToMessage, InputMessageText, InputMessageVideo,
-        MessageTopicForum, MessageTopicThread, Photo, ReactionTypeEmoji,
+        LogStreamFile, MessageTopicForum, MessageTopicThread, Photo, ReactionTypeEmoji,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
 
 const STALE_NATIVE_PARTIAL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SENDER_NAME_RESOLUTION_CONCURRENCY: usize = 8;
+const TDLIB_LOG_MAX_BYTES: i64 = 10 * 1024 * 1024;
+
+#[cfg(debug_assertions)]
+static STARTUP_TIMING_LOGGED: AtomicBool = AtomicBool::new(false);
+static TDLIB_LOG_NOTICE: AtomicBool = AtomicBool::new(false);
+static THUMBNAIL_FAILURES: LazyLock<StdMutex<HashSet<(i64, i64)>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+
+fn log_thumbnail_failure(chat_id: i64, message_id: i64) {
+    let should_log = THUMBNAIL_FAILURES
+        .lock()
+        .map(|mut failures| {
+            if failures.len() >= 1024 {
+                failures.clear();
+            }
+            failures.insert((chat_id, message_id))
+        })
+        .unwrap_or(true);
+    if should_log {
+        tracing::debug!(chat_id, message_id, "Telegram thumbnail unavailable");
+    }
+}
 
 mod media_http;
 pub use media_http::avatar_url as chat_avatar_url;
@@ -276,6 +299,25 @@ pub struct TdlibSearchMessagesResult {
     pub error: Option<String>,
 }
 
+/// One message returned by a cross-chat search.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibGlobalSearchMessage {
+    pub chat_id: String,
+    pub chat_title: String,
+    pub message: TdlibMessageInfo,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TdlibGlobalSearchResult {
+    pub success: bool,
+    pub messages: Vec<TdlibGlobalSearchMessage>,
+    pub total_count: i32,
+    pub next_offset: String,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibSharedMediaItem {
@@ -434,7 +476,13 @@ fn state_label(state: &AuthorizationState) -> &'static str {
 }
 
 fn mime_extension(mime_type: &str, fallback: &str) -> String {
-    match mime_type {
+    let mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    match mime_type.as_str() {
         "image/jpeg" => ".jpg".to_string(),
         "image/png" => ".png".to_string(),
         "image/webp" => ".webp".to_string(),
@@ -447,6 +495,33 @@ fn mime_extension(mime_type: &str, fallback: &str) -> String {
         "audio/ogg" => ".ogg".to_string(),
         _ => fallback.to_string(),
     }
+}
+
+/// Whether a document is a video that the lightbox can preview and play.
+///
+/// Telegram sends some videos (notably `.mov`/QuickTime) as documents instead
+/// of `MessageVideo`. They still need a thumbnail and the video player.
+fn document_is_video(mime_type: &str, file_name: &str) -> bool {
+    let mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    if mime_type.starts_with("video/") {
+        return true;
+    }
+    if !mime_type.is_empty() && mime_type != "application/octet-stream" {
+        return false;
+    }
+
+    Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(extension.as_str(), "mov" | "qt" | "mp4" | "m4v" | "webm")
+        })
 }
 
 fn playback_extension(mime_type: Option<&str>, file_name: Option<&str>) -> String {
@@ -470,10 +545,10 @@ fn normalize_playback_mime_type(
     file_name: Option<&str>,
 ) -> Option<String> {
     let mime_type = mime_type
-        .map(str::trim)
+        .map(|value| value.split(';').next().unwrap_or(value).trim())
         .filter(|value| !value.is_empty() && *value != "application/octet-stream");
     if let Some(mime_type) = mime_type {
-        return Some(mime_type.to_string());
+        return Some(mime_type.to_ascii_lowercase());
     }
 
     match playback_extension(None, file_name).as_str() {
@@ -617,7 +692,7 @@ pub fn get_plasma_media_response(
     request: http::Request<Vec<u8>>,
 ) -> Result<http::Response<Cow<'static, [u8]>>, String> {
     let Some((chat_id, message_id)) = parse_plasma_media_path(request.uri().path()) else {
-        println!("[plasma-media] invalid path={}", request.uri().path());
+        tracing::debug!(path = %request.uri().path(), "invalid media path");
         return Ok(media_protocol_error(
             http::StatusCode::BAD_REQUEST,
             "URL de mídia inválida.",
@@ -625,10 +700,7 @@ pub fn get_plasma_media_response(
     };
 
     let Some(meta) = complete_native_media_meta(app, chat_id, message_id)? else {
-        println!(
-            "[plasma-media] missing complete cache chat_id={} message_id={}",
-            chat_id, message_id
-        );
+        tracing::debug!(chat_id, message_id, "media missing from cache");
         return Ok(media_protocol_error(
             http::StatusCode::NOT_FOUND,
             "Mídia não encontrada no cache.",
@@ -656,9 +728,12 @@ pub fn get_plasma_media_response(
         .and_then(|value| value.to_str().ok())
     {
         let Some((start, mut end)) = parse_range_header(range_header, len) else {
-            println!(
-                "[plasma-media] invalid range chat_id={} message_id={} range={} len={}",
-                chat_id, message_id, range_header, len
+            tracing::debug!(
+                chat_id,
+                message_id,
+                range = %range_header,
+                len,
+                "invalid media range"
             );
             return http::Response::builder()
                 .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
@@ -1225,6 +1300,33 @@ fn message_thumbnail_file(content: MessageContent) -> Option<File> {
     }
 }
 
+/// Small embedded JPEG thumbnail provided by TDLib when no regular thumbnail
+/// is available (common for documents such as `.mov` files).
+fn message_minithumbnail(content: &MessageContent) -> Option<&str> {
+    let minithumbnail = match content {
+        MessageContent::MessageAnimation(content) => content.animation.minithumbnail.as_ref(),
+        MessageContent::MessageAudio(content) => content.audio.album_cover_minithumbnail.as_ref(),
+        MessageContent::MessageDocument(content) => content.document.minithumbnail.as_ref(),
+        MessageContent::MessagePhoto(content) => content.photo.minithumbnail.as_ref(),
+        MessageContent::MessageVideo(content) => content.video.minithumbnail.as_ref(),
+        MessageContent::MessageVideoNote(content) => content.video_note.minithumbnail.as_ref(),
+        _ => None,
+    }?;
+    (!minithumbnail.data.is_empty()).then_some(minithumbnail.data.as_str())
+}
+
+fn write_minithumbnail(data: &str, media_dir: &Path) -> Option<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let path = media_dir.join("thumbnail.jpg");
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
 fn local_thumbnail_path(thumbnail: Option<File>) -> Option<String> {
     let thumbnail = thumbnail?;
     if thumbnail.local.is_downloading_completed && !thumbnail.local.path.is_empty() {
@@ -1390,6 +1492,22 @@ fn is_likely_album_separator_text(text: &str) -> bool {
         })
 }
 
+/// Local file path of a playable video, including videos sent as documents.
+fn local_video_path(content: &MessageContent) -> Option<String> {
+    let path = match content {
+        MessageContent::MessageAnimation(content) => &content.animation.animation.local.path,
+        MessageContent::MessageVideo(content) => &content.video.video.local.path,
+        MessageContent::MessageVideoNote(content) => &content.video_note.video.local.path,
+        MessageContent::MessageDocument(content)
+            if document_is_video(&content.document.mime_type, &content.document.file_name) =>
+        {
+            &content.document.document.local.path
+        }
+        _ => return None,
+    };
+    (!path.is_empty()).then(|| path.clone())
+}
+
 fn content_media_flags(content: &MessageContent) -> (bool, bool, bool, Option<i32>, Option<i64>) {
     match content {
         MessageContent::MessageAnimation(content) => (
@@ -1409,7 +1527,7 @@ fn content_media_flags(content: &MessageContent) -> (bool, bool, bool, Option<i3
         MessageContent::MessageDocument(content) => (
             true,
             false,
-            false,
+            document_is_video(&content.document.mime_type, &content.document.file_name),
             None,
             Some(effective_file_size(&content.document.document)),
         ),
@@ -2280,6 +2398,8 @@ pub async fn tdlib_init(
     api_id: i32,
     api_hash: String,
 ) -> TdlibCommandResult {
+    // Requests are completed by `tdlib_rs::receive`; start the receiver before
+    // sending the logging requests below, otherwise they time out.
     start_receiver(app.clone(), state);
     let _init_guard = state.init_lock.lock().await;
 
@@ -2316,15 +2436,55 @@ pub async fn tdlib_init(
         client_id
     };
 
+    // Keep TDLib's internal chatter out of the terminal. The file is rotated
+    // by TDLib and is the first place to look when Telegram misbehaves.
+    let tdlib_log_path = app_data_dir.join("tdlib").join("tdlib.log");
+    let log_stream = LogStream::File(LogStreamFile {
+        path: tdlib_log_path.to_string_lossy().to_string(),
+        max_file_size: TDLIB_LOG_MAX_BYTES,
+        redirect_stderr: false,
+    });
     match tokio::time::timeout(
         Duration::from_secs(4),
-        functions::set_log_verbosity_level(2, client_id),
+        functions::set_log_stream(log_stream, client_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            if !TDLIB_LOG_NOTICE.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    path = %tdlib_log_path.display(),
+                    "TDLib internal logs redirected to file"
+                );
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error.message,
+                "could not redirect TDLib logs to file; keeping stderr"
+            );
+        }
+        Err(_) => {
+            tracing::warn!("TDLib timed out while configuring its log file");
+        }
+    }
+
+    // Level 1 keeps errors and warnings in the file without flooding it with
+    // session/socket details. Failures here must not prevent Telegram startup.
+    match tokio::time::timeout(
+        Duration::from_secs(4),
+        functions::set_log_verbosity_level(1, client_id),
     )
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return Ok(td_error(error)),
-        Err(_) => return Ok(td_timeout("TDLib demorou para configurar logs.")),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error.message,
+                "could not set TDLib log verbosity"
+            );
+        }
+        Err(_) => tracing::warn!("TDLib timed out while setting log verbosity"),
     }
 
     match tokio::time::timeout(Duration::from_secs(8), configure_if_needed(&state.inner)).await {
@@ -2577,16 +2737,37 @@ pub async fn tdlib_get_chats(
         }
     }
     #[cfg(debug_assertions)]
-    eprintln!(
-        "[Startup] TDLib conversas: carregar={}ms, listar={}ms, resolver={}ms, contatos={}ms, total={}ms, chats={}, contatos={}",
-        loaded_at.duration_since(started_at).as_millis(),
-        listed_at.duration_since(loaded_at).as_millis(),
-        chats_resolved_at.duration_since(listed_at).as_millis(),
-        chats_resolved_at.elapsed().as_millis(),
-        started_at.elapsed().as_millis(),
-        resolved_chats,
-        dialogs.len().saturating_sub(resolved_chats),
-    );
+    {
+        let load_ms = loaded_at.duration_since(started_at).as_millis() as u64;
+        let list_ms = listed_at.duration_since(loaded_at).as_millis() as u64;
+        let resolve_ms = chats_resolved_at.duration_since(listed_at).as_millis() as u64;
+        let contacts_ms = chats_resolved_at.elapsed().as_millis() as u64;
+        let total_ms = started_at.elapsed().as_millis() as u64;
+        let contacts = dialogs.len().saturating_sub(resolved_chats);
+        if STARTUP_TIMING_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::debug!(
+                load_ms,
+                list_ms,
+                resolve_ms,
+                contacts_ms,
+                total_ms,
+                chats = resolved_chats,
+                contacts,
+                "Telegram chats refreshed"
+            );
+        } else {
+            tracing::info!(
+                load_ms,
+                list_ms,
+                resolve_ms,
+                contacts_ms,
+                total_ms,
+                chats = resolved_chats,
+                contacts,
+                "Telegram chats loaded"
+            );
+        }
+    }
 
     Ok(TdlibChatsResult {
         success: true,
@@ -2913,6 +3094,96 @@ pub async fn tdlib_search_chat_messages(
             messages: Vec::new(),
             total_count: 0,
             next_from_message_id: None,
+            error: Some(error.message),
+        }),
+    }
+}
+
+/// Searches messages across every chat visible to the current account.
+pub async fn tdlib_search_messages(
+    state: &TdlibManager,
+    query: String,
+    limit: Option<i32>,
+    offset: Option<String>,
+) -> Result<TdlibGlobalSearchResult, String> {
+    let client_id = match ready_client_id(state).await {
+        Ok(client_id) => client_id,
+        Err(status) => {
+            return Ok(TdlibGlobalSearchResult {
+                success: false,
+                messages: Vec::new(),
+                total_count: 0,
+                next_offset: String::new(),
+                error: status.error.or(Some(status.state)),
+            });
+        }
+    };
+
+    let trimmed_query = query.trim().to_string();
+    if trimmed_query.is_empty() {
+        return Ok(TdlibGlobalSearchResult {
+            success: true,
+            messages: Vec::new(),
+            total_count: 0,
+            next_offset: String::new(),
+            error: None,
+        });
+    }
+
+    let requested_limit = limit.unwrap_or(50).clamp(1, 100);
+    let search_offset = offset.unwrap_or_default();
+    match functions::search_messages(
+        None,
+        trimmed_query,
+        search_offset,
+        requested_limit,
+        Some(tdlib_rs::enums::SearchMessagesFilter::Empty),
+        None,
+        0,
+        0,
+        client_id,
+    )
+    .await
+    {
+        Ok(tdlib_rs::enums::FoundMessages::FoundMessages(found)) => {
+            let mut entries: Vec<TdlibGlobalSearchMessage> = found
+                .messages
+                .into_iter()
+                .filter(|message| !is_hidden_membership_service_message(&message.content))
+                .map(|message| TdlibGlobalSearchMessage {
+                    chat_id: message.chat_id.to_string(),
+                    chat_title: String::new(),
+                    message: tdlib_message_to_app(message),
+                })
+                .collect();
+
+            let mut messages: Vec<TdlibMessageInfo> =
+                entries.iter().map(|entry| entry.message.clone()).collect();
+            resolve_message_sender_names(client_id, &mut messages).await;
+            for (entry, message) in entries.iter_mut().zip(messages) {
+                entry.message = message;
+            }
+            entries.sort_by(|left, right| {
+                right
+                    .message
+                    .date
+                    .cmp(&left.message.date)
+                    .then_with(|| right.message.id.cmp(&left.message.id))
+            });
+
+            Ok(TdlibGlobalSearchResult {
+                success: true,
+                messages: entries,
+                total_count: found.total_count,
+                next_offset: found.next_offset,
+                error: None,
+            })
+        }
+        Err(error) => Ok(TdlibGlobalSearchResult {
+            success: false,
+            messages: Vec::new(),
+            total_count: 0,
+            next_offset: String::new(),
             error: Some(error.message),
         }),
     }
@@ -4125,14 +4396,8 @@ pub async fn tdlib_download_message_thumbnail(
         },
     };
 
-    let local_video_path = match &message.content {
-        MessageContent::MessageVideo(content) => Some(content.video.video.local.path.clone()),
-        MessageContent::MessageVideoNote(content) => {
-            Some(content.video_note.video.local.path.clone())
-        }
-        _ => None,
-    }
-    .filter(|path| !path.is_empty());
+    let local_video_path = local_video_path(&message.content);
+    let minithumbnail = message_minithumbnail(&message.content).map(str::to_string);
     let thumbnail = message_thumbnail_file(message.content);
 
     let media_dir = match native_media_dir(app, chat_id, message_id) {
@@ -4150,9 +4415,11 @@ pub async fn tdlib_download_message_thumbnail(
         Some(thumbnail) => {
             download_thumbnail_to_cache(client_id, Some(thumbnail), &media_dir).await
         }
-        None => local_video_path.and_then(|path| {
-            generate_video_thumbnail_to_cache(&path, &media_dir.join("thumbnail.jpg"))
-        }),
+        None => local_video_path
+            .and_then(|path| {
+                generate_video_thumbnail_to_cache(&path, &media_dir.join("thumbnail.jpg"))
+            })
+            .or_else(|| minithumbnail.and_then(|data| write_minithumbnail(&data, &media_dir))),
     };
 
     match thumbnail_path {
@@ -4169,10 +4436,7 @@ pub async fn tdlib_download_message_thumbnail(
             })
         }
         None => {
-            println!(
-                "[telegram-thumb] failed chat_id={} message_id={}",
-                chat_id, message_id
-            );
+            log_thumbnail_failure(chat_id, message_id);
             Ok(TdlibThumbnailResult {
                 success: false,
                 file_path: None,
@@ -4239,7 +4503,7 @@ pub async fn tdlib_download_chat_avatar(
             error: None,
         }),
         None => {
-            println!("[telegram-avatar] failed chat_id={}", chat_id);
+            tracing::debug!(chat_id, "Telegram avatar unavailable");
             Ok(TdlibAvatarResult {
                 success: false,
                 file_path: None,
@@ -4654,5 +4918,91 @@ mod tests {
     #[test]
     fn oversized_forum_topic_ids_are_rejected() {
         assert!(message_topic_from_id(Some(i64::from(i32::MAX) + 1), Some("forum")).is_none());
+    }
+
+    #[test]
+    fn quicktime_documents_are_detected_as_video() {
+        assert!(document_is_video("video/quicktime", "clip.mov"));
+        assert!(document_is_video(
+            "video/quicktime; codecs=h264",
+            "clip.mov"
+        ));
+        assert!(document_is_video("application/octet-stream", "clip.MOV"));
+        assert!(document_is_video("application/octet-stream", "clip.qt"));
+        assert!(!document_is_video("application/pdf", "document.pdf"));
+        assert!(!document_is_video("audio/webm", "clip.webm"));
+        assert!(!document_is_video("application/octet-stream", "notes.txt"));
+    }
+
+    #[test]
+    fn quicktime_playback_uses_mov_extension_and_mime() {
+        assert_eq!(
+            mime_extension("video/quicktime; codecs=h264", ".bin"),
+            ".mov"
+        );
+        assert_eq!(
+            playback_extension(Some("video/quicktime"), Some("clip.mov")),
+            ".mov"
+        );
+        assert_eq!(
+            normalize_playback_mime_type(None, Some("clip.MOV")),
+            Some("video/quicktime".to_string())
+        );
+    }
+
+    #[test]
+    fn minithumbnail_is_written_as_jpeg() {
+        let root = std::env::temp_dir().join(format!("plasma-minithumb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bytes = [0xff, 0xd8, 0xff, 0xd9];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let path = write_minithumbnail(&encoded, &root).unwrap();
+        assert!(path.ends_with("thumbnail.jpg"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quicktime_media_prepares_a_playback_file() {
+        let root = std::env::temp_dir().join(format!("plasma-mov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = plasma_core::AppPaths::new(
+            root.join("data"),
+            root.join("local"),
+            root.join("cache"),
+            None,
+        )
+        .unwrap();
+        let app = plasma_core::AppEnv::headless(paths);
+        let chat_id = 1;
+        let message_id = 2;
+        let media_dir = native_media_dir(&app, chat_id, message_id).unwrap();
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let source = media_dir.join("clip.mov");
+        let bytes = b"fake quicktime payload";
+        std::fs::write(&source, bytes).unwrap();
+        let meta = NativeMediaAssetMeta {
+            success: true,
+            state: "complete".to_string(),
+            chat_id,
+            message_id,
+            total_bytes: Some(bytes.len() as i64),
+            downloaded_bytes: Some(bytes.len() as i64),
+            mime_type: Some("video/quicktime".to_string()),
+            file_name: Some("clip.mov".to_string()),
+            native_file_path: Some(source.to_string_lossy().to_string()),
+            thumbnail_path: None,
+            completed_at: None,
+            updated_at: 0,
+            error: None,
+        };
+
+        let (path, mime_type) = ensure_native_playback_file(&app, &meta).unwrap();
+        assert_eq!(mime_type.as_deref(), Some("video/quicktime"));
+        assert!(path.ends_with("playback.mov"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

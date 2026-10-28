@@ -134,7 +134,7 @@ fn format_size(bytes: u64) -> String {
 }
 
 pub async fn analyze_tiktok_with_tikwm(url: &str) -> Result<TikTokMediaInfo, String> {
-    eprintln!("[tiktok_native] analyzing with TikWM fallback");
+    tracing::debug!("analyzing TikTok with TikWM fallback");
     let client = reqwest::Client::builder()
         .user_agent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -257,7 +257,7 @@ async fn download_tiktok_direct(
     let mut response = request_tiktok_media(&client, media_url, cancellation).await?;
 
     if response.status() == reqwest::StatusCode::FORBIDDEN {
-        eprintln!("[tiktok_native] direct URL expired; refreshing with TikWM");
+        tracing::debug!("TikTok direct URL expired; refreshing with TikWM");
         let refreshed = analyze_tiktok_with_tikwm(source_url).await?;
         let refreshed_url = if format_id.contains("audio") {
             refreshed
@@ -341,7 +341,7 @@ pub async fn analyze_tiktok_native(
         } else {
             format!("TikTok nativo: {}", error)
         };
-        eprintln!("[tiktok_native] yt-dlp analyzer failed: {}", native_error);
+        tracing::debug!(error = %native_error, "yt-dlp TikTok analyzer failed");
         return analyze_tiktok_with_tikwm(&url)
             .await
             .map_err(|fallback_error| format!("{}. Fallback: {}", native_error, fallback_error));
@@ -350,7 +350,7 @@ pub async fn analyze_tiktok_native(
     let data: Value = match serde_json::from_slice(&output.stdout) {
         Ok(data) => data,
         Err(error) => {
-            eprintln!("[tiktok_native] invalid yt-dlp response: {}", error);
+            tracing::debug!(%error, "invalid yt-dlp TikTok response");
             return analyze_tiktok_with_tikwm(&url).await;
         }
     };

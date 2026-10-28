@@ -6,7 +6,8 @@
 use crate::context::{save_album, ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
 use crate::state::{
-    push_toast, react_to_message, AppServices, ReactionPickerState, ToastKind, UiState,
+    push_toast, react_to_message, set_if_changed, AppServices, LightboxMedia, ReactionPickerState,
+    ToastKind, UiState,
 };
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
@@ -19,6 +20,9 @@ const DEFAULT_VIEWPORT: f64 = 620.0;
 const TIMELINE_ID: &str = "plasma-timeline-scroll";
 const ALBUM_CELL_HEIGHT: f64 = 104.0;
 const ALBUM_GAP: f64 = 4.0;
+/// Reply previews are secondary to the timeline itself. Fetching every missing
+/// quote at once can queue dozens of TDLib requests and delay the visible page.
+const REPLY_FETCH_CONCURRENCY: usize = 4;
 
 /// Observes the rendered rows and reports their real height to Rust.
 ///
@@ -29,25 +33,71 @@ const ALBUM_GAP: f64 = 4.0;
 /// changed rows, so the measurement converges after one render.
 const MEASURE_ROWS_SCRIPT: &str = r#"
 (() => {
+    // A remounted timeline would otherwise leave the previous observers alive.
+    if (window.__plasmaTimelineMeasureCleanup) {
+        window.__plasmaTimelineMeasureCleanup();
+    }
+    const TIMELINE_ID = "plasma-timeline-scroll";
+    const ROW_SELECTOR = "article.message-row[data-key]";
+    let container = null;
+    let frame = 0;
+    let measureAll = true;
+    const dirty = new Set();
+
+    const closestRow = (node) => {
+        if (!node) return null;
+        const element = node.nodeType === 1 ? node : node.parentElement;
+        return element?.closest?.(ROW_SELECTOR) ?? null;
+    };
+
+    const markRow = (node) => {
+        const row = closestRow(node);
+        if (row?.dataset.key) dirty.add(row.dataset.key);
+    };
+
+    const onMutations = (records) => {
+        for (const record of records) {
+            if (record.type === "childList") {
+                for (const node of record.addedNodes) markRow(node);
+                markRow(record.target);
+            } else if (record.type === "characterData") {
+                markRow(record.target);
+            }
+        }
+        schedule();
+    };
+
     const measure = () => {
-        const element = document.getElementById("plasma-timeline-scroll");
+        const element = document.getElementById(TIMELINE_ID);
         if (!element) return;
         const scrollTop = element.scrollTop;
+        const rows = [];
+        for (const row of element.querySelectorAll(ROW_SELECTOR)) {
+            if (measureAll || dirty.has(row.dataset.key)) rows.push(row);
+        }
+        dirty.clear();
+        measureAll = false;
+        if (rows.length === 0) return;
+
+        const oldHeights = rows.map((row) => row.offsetHeight);
+        const previous = rows.map((row) => row.style.height);
+        // Batch the writes and natural-height reads: two layout passes for the
+        // whole batch instead of one forced reflow per visible row.
+        for (const row of rows) row.style.height = "auto";
+        const measured = rows.map((row) => Math.ceil(row.offsetHeight));
+        for (let index = 0; index < rows.length; index += 1) {
+            rows[index].style.height = previous[index];
+        }
+
         const heights = {};
         let deltaAbove = 0;
-        for (const row of element.querySelectorAll("article.message-row[data-key]")) {
+        for (let index = 0; index < rows.length; index += 1) {
+            const row = rows[index];
             const key = row.dataset.key;
-            if (!key) continue;
-            const oldHeight = row.offsetHeight;
+            const height = measured[index];
+            if (!key || height <= 0) continue;
+            const oldHeight = oldHeights[index];
             const top = parseFloat(row.style.top) || 0;
-            const previous = row.style.height;
-            // Reading the natural height is independent of the estimated
-            // height currently assigned to the row, and the style is restored
-            // before the frame is painted.
-            row.style.height = "auto";
-            const height = Math.ceil(row.offsetHeight);
-            row.style.height = previous;
-            if (height <= 0) continue;
             heights[key] = height;
             if (top + oldHeight <= scrollTop + 0.5) {
                 deltaAbove += height - oldHeight;
@@ -60,7 +110,6 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
         });
     };
 
-    let frame = 0;
     const schedule = () => {
         if (frame) return;
         frame = requestAnimationFrame(() => {
@@ -69,33 +118,48 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
         });
     };
 
-    let container = null;
-    const mutations = new MutationObserver(schedule);
-    const resizes = new ResizeObserver(schedule);
+    const markAll = () => {
+        measureAll = true;
+        schedule();
+    };
+
+    const mutations = new MutationObserver(onMutations);
+    const resizes = new ResizeObserver(markAll);
     const bind = () => {
-        const element = document.getElementById("plasma-timeline-scroll");
+        const element = document.getElementById(TIMELINE_ID);
         if (!element) return false;
         if (container === element) return true;
         container = element;
         mutations.disconnect();
-        mutations.observe(element, { childList: true, subtree: true });
+        mutations.observe(element, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+        });
         resizes.disconnect();
         resizes.observe(element);
-        schedule();
+        markAll();
         return true;
     };
 
     // The timeline may appear after messages are loaded, and switching chats
     // can replace the scroll container entirely. Rebind when that happens.
     const watcher = new MutationObserver(() => {
-        const element = document.getElementById("plasma-timeline-scroll");
+        const element = document.getElementById(TIMELINE_ID);
         if (element && element !== container) bind();
     });
     watcher.observe(document.body, { childList: true, subtree: true });
+    window.__plasmaTimelineMeasureCleanup = () => {
+        mutations.disconnect();
+        resizes.disconnect();
+        watcher.disconnect();
+        window.removeEventListener("resize", markAll);
+        if (frame) cancelAnimationFrame(frame);
+    };
     bind();
-    window.addEventListener("resize", schedule);
-    schedule();
-    setTimeout(schedule, 300);
+    window.addEventListener("resize", markAll);
+    markAll();
+    setTimeout(markAll, 300);
 })();
 "#;
 
@@ -210,7 +274,7 @@ fn reply_preview(items: &[TimelineItem], message_id: i64) -> Option<&TdlibMessag
     })
 }
 
-fn reply_sender(message: &TdlibMessageInfo) -> String {
+pub(crate) fn reply_sender(message: &TdlibMessageInfo) -> String {
     if message.out {
         return "Você".to_string();
     }
@@ -222,7 +286,7 @@ fn reply_sender(message: &TdlibMessageInfo) -> String {
     }
 }
 
-fn reply_snippet(message: &TdlibMessageInfo) -> String {
+pub(crate) fn reply_snippet(message: &TdlibMessageInfo) -> String {
     let text = message
         .text
         .split_whitespace()
@@ -392,10 +456,11 @@ fn media_label(message: &TdlibMessageInfo) -> Option<String> {
     Some(format!("{kind}{duration}{size}"))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     Reply,
     OpenMedia,
+    OpenAlbumMedia(Vec<LightboxMedia>),
     Forward,
 }
 
@@ -613,7 +678,10 @@ pub fn MessageTimeline(
     // Plain hook value: writing it must not wake the effect again.
     let mut previous_bounds = use_hook(|| CopyValue::new(None::<(Option<i64>, Option<i64>)>));
     let mut scroll_top = use_signal(|| 0.0);
-    let mut viewport_height = use_signal(|| DEFAULT_VIEWPORT);
+    let viewport_height = use_signal(|| DEFAULT_VIEWPORT);
+    // Scroll events fire far more often than the visible window changes. Keep
+    // the rendered range stable until the reader moved enough to matter.
+    let mut last_scroll = use_hook(|| CopyValue::new((0.0, 0.0)));
 
     let items = items_memo();
     let layout = layout_memo();
@@ -724,20 +792,37 @@ pub fn MessageTimeline(
                 missing.push(reply_id);
             }
         }
-        for reply_id in missing {
-            let services = reply_services.clone();
-            let mut cache = reply_cache;
-            spawn(async move {
-                let preview = match services.telegram.get_message(chat_id, reply_id).await {
-                    Ok(message) => (reply_sender(&message), reply_snippet(&message)),
-                    Err(_) => (
-                        "Mensagem original".to_string(),
-                        "Não disponível".to_string(),
-                    ),
-                };
-                cache.write().insert((chat_id, reply_id), preview);
-            });
+        if missing.is_empty() {
+            return;
         }
+        let services = reply_services.clone();
+        let mut cache = reply_cache;
+        spawn(async move {
+            let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(REPLY_FETCH_CONCURRENCY));
+            let mut tasks = tokio::task::JoinSet::new();
+            for reply_id in missing {
+                let Ok(permit) = permits.clone().acquire_owned().await else {
+                    break;
+                };
+                let services = services.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let preview = match services.telegram.get_message(chat_id, reply_id).await {
+                        Ok(message) => (reply_sender(&message), reply_snippet(&message)),
+                        Err(_) => (
+                            "Mensagem original".to_string(),
+                            "Não disponível".to_string(),
+                        ),
+                    };
+                    (reply_id, preview)
+                });
+            }
+            while let Some(result) = tasks.join_next().await {
+                if let Ok((reply_id, preview)) = result {
+                    cache.write().insert((chat_id, reply_id), preview);
+                }
+            }
+        });
     });
 
     // Feed the rendered height of every row back into the layout. Estimates
@@ -821,8 +906,15 @@ pub fn MessageTimeline(
                 class: "message-scroll",
                 onscroll: move |event| {
                     let top = event.scroll_top();
-                    scroll_top.set(top);
-                    viewport_height.set(event.client_height() as f64);
+                    let height = event.client_height() as f64;
+                    let (last_top, last_height) = *last_scroll.read();
+                    // Overscan keeps the viewport covered while the window lags
+                    // by a few pixels, so avoid re-rendering for every event.
+                    if (top - last_top).abs() >= 24.0 || (height - last_height).abs() > 0.5 {
+                        last_scroll.set((top, height));
+                        set_if_changed(scroll_top, top);
+                        set_if_changed(viewport_height, height);
+                    }
                     // The caller ignores this while a page is in flight or when
                     // there is nothing older to fetch.
                     if top < 220.0 {
@@ -892,21 +984,74 @@ pub fn MessageTimeline(
                                                     )));
                                                 }
                                             },
-                                            div { class: "avatar",
-                                                "{message.sender_name.chars().next().unwrap_or('?')}"
+                                            if !message.out {
+                                                div {
+                                                    class: "avatar",
+                                                    oncontextmenu: {
+                                                        let message = message.clone();
+                                                        move |event: Event<MouseData>| {
+                                                            if message.sender_id.trim().is_empty() {
+                                                                return;
+                                                            }
+                                                            event.prevent_default();
+                                                            event.stop_propagation();
+                                                            let point = event.data().client_coordinates();
+                                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                                point.x,
+                                                                point.y,
+                                                                ContextTarget::User {
+                                                                    chat_id,
+                                                                    sender_id: message.sender_id.clone(),
+                                                                    sender_name: message.sender_name.clone(),
+                                                                },
+                                                            )));
+                                                        }
+                                                    },
+                                                    "{message.sender_name.chars().next().unwrap_or('?')}"
+                                                }
                                             }
                                             div { class: "message-bubble",
-                                                div { class: "message-meta",
-                                                    strong {
-                                                        if message.sender_name.trim().is_empty() {
-                                                            "Mensagem"
-                                                        } else {
-                                                            "{message.sender_name}"
+                                                if !message.out {
+                                                    div { class: "message-meta",
+                                                        strong {
+                                                            oncontextmenu: {
+                                                                let message = message.clone();
+                                                                move |event: Event<MouseData>| {
+                                                                    if message
+                                                                        .sender_id
+                                                                        .trim()
+                                                                        .is_empty()
+                                                                    {
+                                                                        return;
+                                                                    }
+                                                                    event.prevent_default();
+                                                                    event.stop_propagation();
+                                                                    let point = event
+                                                                        .data()
+                                                                        .client_coordinates();
+                                                                    ui.context_menu.set(Some(
+                                                                        ContextMenuState::new(
+                                                                            point.x,
+                                                                            point.y,
+                                                                            ContextTarget::User {
+                                                                                chat_id,
+                                                                                sender_id: message
+                                                                                    .sender_id
+                                                                                    .clone(),
+                                                                                sender_name: message
+                                                                                    .sender_name
+                                                                                    .clone(),
+                                                                            },
+                                                                        ),
+                                                                    ));
+                                                                }
+                                                            },
+                                                            if message.sender_name.trim().is_empty() {
+                                                                "Mensagem"
+                                                            } else {
+                                                                "{message.sender_name}"
+                                                            }
                                                         }
-                                                    }
-                                                    span { "{format_timestamp(message.date)}" }
-                                                    if message.out {
-                                                        span { class: "pill", "enviada" }
                                                     }
                                                 }
                                                 if let Some((reply_id, reply_sender, reply_text)) = reply_quote {
@@ -975,6 +1120,17 @@ pub fn MessageTimeline(
                                                                 span { "{reaction.emoji}" }
                                                                 span { class: "reaction-chip-count", "{reaction.count}" }
                                                             }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "message-footer",
+                                                    span { class: "message-time", "{format_timestamp(message.date)}" }
+                                                    if message.out {
+                                                        span {
+                                                            class: "message-sent",
+                                                            title: "Enviada",
+                                                            aria_label: "Enviada",
+                                                            Icon { name: IconName::Check, size: 13, class: "icon" }
                                                         }
                                                     }
                                                 }
@@ -1088,6 +1244,10 @@ pub fn MessageTimeline(
                                         "album-grid"
                                     };
                                     let count = album.len();
+                                    let album_lightbox: Vec<LightboxMedia> = album
+                                        .iter()
+                                        .map(LightboxMedia::from_message)
+                                        .collect();
                                     rsx! {
                                         article {
                                             key: "{key}",
@@ -1111,23 +1271,76 @@ pub fn MessageTimeline(
                                                     )));
                                                 }
                                             },
-                                            div { class: "avatar",
-                                                "{first.sender_name.chars().next().unwrap_or('?')}"
+                                            if !first.out {
+                                                div {
+                                                    class: "avatar",
+                                                    oncontextmenu: {
+                                                        let first = first.clone();
+                                                        move |event: Event<MouseData>| {
+                                                            if first.sender_id.trim().is_empty() {
+                                                                return;
+                                                            }
+                                                            event.prevent_default();
+                                                            event.stop_propagation();
+                                                            let point = event.data().client_coordinates();
+                                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                                point.x,
+                                                                point.y,
+                                                                ContextTarget::User {
+                                                                    chat_id,
+                                                                    sender_id: first.sender_id.clone(),
+                                                                    sender_name: first.sender_name.clone(),
+                                                                },
+                                                            )));
+                                                        }
+                                                    },
+                                                    "{first.sender_name.chars().next().unwrap_or('?')}"
+                                                }
                                             }
                                             div { class: "message-bubble album-bubble",
                                                 div { class: "message-meta",
-                                                    strong {
-                                                        if first.sender_name.trim().is_empty() {
-                                                            "Mensagem"
-                                                        } else {
-                                                            "{first.sender_name}"
+                                                    if !first.out {
+                                                        strong {
+                                                            oncontextmenu: {
+                                                                let first = first.clone();
+                                                                move |event: Event<MouseData>| {
+                                                                    if first
+                                                                        .sender_id
+                                                                        .trim()
+                                                                        .is_empty()
+                                                                    {
+                                                                        return;
+                                                                    }
+                                                                    event.prevent_default();
+                                                                    event.stop_propagation();
+                                                                    let point = event
+                                                                        .data()
+                                                                        .client_coordinates();
+                                                                    ui.context_menu.set(Some(
+                                                                        ContextMenuState::new(
+                                                                            point.x,
+                                                                            point.y,
+                                                                            ContextTarget::User {
+                                                                                chat_id,
+                                                                                sender_id: first
+                                                                                    .sender_id
+                                                                                    .clone(),
+                                                                                sender_name: first
+                                                                                    .sender_name
+                                                                                    .clone(),
+                                                                            },
+                                                                        ),
+                                                                    ));
+                                                                }
+                                                            },
+                                                            if first.sender_name.trim().is_empty() {
+                                                                "Mensagem"
+                                                            } else {
+                                                                "{first.sender_name}"
+                                                            }
                                                         }
                                                     }
-                                                    span { "{format_timestamp(first.date)}" }
                                                     span { class: "pill", "álbum · {count}" }
-                                                    if first.out {
-                                                        span { class: "pill", "enviada" }
-                                                    }
                                                 }
                                                 if let Some(caption) = caption.as_ref() {
                                                     if !caption.text.trim().is_empty() {
@@ -1175,7 +1388,15 @@ pub fn MessageTimeline(
                                                                         is_video: media.is_video,
                                                                         on_open: {
                                                                             let media = media.clone();
-                                                                            move |_| on_action.call((media.clone(), MessageAction::OpenMedia))
+                                                                            let album_lightbox = album_lightbox.clone();
+                                                                            move |_| {
+                                                                                on_action.call((
+                                                                                    media.clone(),
+                                                                                    MessageAction::OpenAlbumMedia(
+                                                                                        album_lightbox.clone(),
+                                                                                    ),
+                                                                                ))
+                                                                            }
                                                                         },
                                                                     }
                                                                     button {
@@ -1198,6 +1419,17 @@ pub fn MessageTimeline(
                                                                     }
                                                                 }
                                                             }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "message-footer",
+                                                    span { class: "message-time", "{format_timestamp(first.date)}" }
+                                                    if first.out {
+                                                        span {
+                                                            class: "message-sent",
+                                                            title: "Enviada",
+                                                            aria_label: "Enviada",
+                                                            Icon { name: IconName::Check, size: 13, class: "icon" }
                                                         }
                                                     }
                                                 }

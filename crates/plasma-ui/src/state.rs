@@ -2,6 +2,7 @@
 
 use crate::context::ContextMenuState;
 use crate::downloads::{DownloadHandle, DownloadRecord};
+use crate::icons::IconName;
 use crate::theme::{Density, Palette};
 use crate::twitter::TwitterHandle;
 use crate::views::select::SelectPortal;
@@ -15,9 +16,9 @@ use plasma_telegram::{
     NativeMediaAssetMeta, NativeMediaCacheStats, NativePlaybackSource, NativeSavedMedia,
     TdlibChatCapabilitiesResult, TdlibChatInfo, TdlibChatsResult, TdlibCommandResult,
     TdlibDownloadItem, TdlibForumTopicInfo, TdlibForumTopicsResult, TdlibForwardResult,
-    TdlibManager, TdlibMassDownloadRequest, TdlibMassDownloadResult, TdlibMessageInfo,
-    TdlibMessagesResult, TdlibSearchMessagesResult, TdlibSendResult, TdlibSharedMediaResult,
-    TdlibStatus, TdlibUserInfo,
+    TdlibGlobalSearchResult, TdlibManager, TdlibMassDownloadRequest, TdlibMassDownloadResult,
+    TdlibMessageInfo, TdlibMessagesResult, TdlibSearchMessagesResult, TdlibSendResult,
+    TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -312,6 +313,19 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    pub async fn search_messages(
+        &self,
+        query: String,
+        limit: i32,
+        offset: Option<String>,
+    ) -> Result<TdlibGlobalSearchResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_search_messages(&manager, query, Some(limit), offset).await
+        });
+        self.join(handle).await?
+    }
+
     pub async fn get_forum_topics(
         &self,
         chat_id: i64,
@@ -418,6 +432,21 @@ impl TelegramHandle {
         self.join(handle).await?
     }
 
+    /// Photos and videos sent by one user inside a conversation.
+    pub async fn user_media(
+        &self,
+        chat_id: i64,
+        sender_id: String,
+        limit: i32,
+    ) -> Result<TdlibSharedMediaResult, String> {
+        let manager = self.manager.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_telegram::tdlib_search_user_media(&manager, chat_id, sender_id, Some(limit))
+                .await
+        });
+        self.join(handle).await?
+    }
+
     /// Adds or removes an emoji reaction. Returns an error message on failure.
     pub async fn toggle_reaction(
         &self,
@@ -462,6 +491,51 @@ impl TelegramHandle {
             return Ok(None);
         };
         read_path_data_url(PathBuf::from(path)).await.map(Some)
+    }
+
+    /// Builds a small data URL for a media file dragged into the composer.
+    /// Videos use the cached poster frame; images are capped so a huge photo
+    /// does not turn the preview modal into a multi-megabyte data URL.
+    pub async fn media_preview_data_url(
+        &self,
+        file_path: String,
+        is_video: bool,
+    ) -> Result<Option<String>, String> {
+        if is_video {
+            let env = self.env.clone();
+            let handle = self.runtime.spawn(async move {
+                let poster = tokio::task::spawn_blocking(move || {
+                    plasma_media::generate_video_thumbnail(&env, &file_path)
+                })
+                .await
+                .map_err(|error| format!("Miniatura do vídeo falhou: {error}"))??;
+                read_path_data_url(PathBuf::from(poster)).await.map(Some)
+            });
+            return self.join(handle).await?;
+        }
+
+        let path = PathBuf::from(file_path);
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // WebKitGTK has no HEIC decoder; show the generic media tile instead of
+        // a broken image in the drop preview.
+        if matches!(extension.as_str(), "heic" | "heif") {
+            return Ok(None);
+        }
+        let size_path = path.clone();
+        let size = tokio::task::spawn_blocking(move || {
+            std::fs::metadata(size_path).map(|metadata| metadata.len())
+        })
+        .await
+        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?
+        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?;
+        if size > 12 * 1024 * 1024 {
+            return Ok(None);
+        }
+        read_path_data_url(path).await.map(Some)
     }
 
     pub async fn prepare_playback(
@@ -719,6 +793,8 @@ fn avatar_mime(path: &std::path::Path) -> &'static str {
         "png" => "image/png",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
         "jpg" | "jpeg" => "image/jpeg",
         _ => "image/jpeg",
     }
@@ -757,12 +833,12 @@ impl Tab {
         }
     }
 
-    pub const fn rail_label(self) -> &'static str {
+    pub const fn rail_icon(self) -> IconName {
         match self {
-            Self::Telegram => "TG",
-            Self::Downloads => "DL",
-            Self::Twitter => "X",
-            Self::Settings => "CF",
+            Self::Telegram => IconName::BrandTelegram,
+            Self::Downloads => IconName::ProgressDown,
+            Self::Twitter => IconName::BrandTwitter,
+            Self::Settings => IconName::Settings,
         }
     }
 }
@@ -840,6 +916,24 @@ pub struct ReactionPickerState {
     pub y: f64,
 }
 
+/// One item in an album opened in the lightbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightboxMedia {
+    pub message_id: i64,
+    pub is_video: bool,
+    pub is_photo: bool,
+}
+
+impl LightboxMedia {
+    pub fn from_message(message: &TdlibMessageInfo) -> Self {
+        Self {
+            message_id: message.id,
+            is_video: message.is_video,
+            is_photo: message.is_photo,
+        }
+    }
+}
+
 /// Media opened in the lightbox.
 #[derive(Clone, PartialEq)]
 pub struct LightboxState {
@@ -848,6 +942,86 @@ pub struct LightboxState {
     pub is_video: bool,
     pub is_photo: bool,
     pub title: String,
+    /// Every media item in the album, in timeline order. Empty for a single
+    /// message. When non-empty, `message_id` identifies the active item.
+    pub album: Vec<LightboxMedia>,
+}
+
+impl LightboxState {
+    pub fn from_message(chat_id: i64, message: &TdlibMessageInfo) -> Self {
+        Self {
+            chat_id,
+            message_id: message.id,
+            is_video: message.is_video,
+            is_photo: message.is_photo,
+            title: message.sender_name.clone(),
+            album: Vec::new(),
+        }
+    }
+
+    pub fn from_album(chat_id: i64, message: &TdlibMessageInfo, album: Vec<LightboxMedia>) -> Self {
+        Self {
+            album,
+            ..Self::from_message(chat_id, message)
+        }
+    }
+
+    /// Position of the active media in the album, as `(current, total)`.
+    pub fn album_position(&self) -> Option<(usize, usize)> {
+        let index = self.album_index()?;
+        Some((index + 1, self.album.len()))
+    }
+
+    pub fn with_album_index(&self, index: usize) -> Option<Self> {
+        let item = self.album.get(index)?;
+        Some(Self {
+            chat_id: self.chat_id,
+            message_id: item.message_id,
+            is_video: item.is_video,
+            is_photo: item.is_photo,
+            title: self.title.clone(),
+            album: self.album.clone(),
+        })
+    }
+
+    pub fn next_album(&self) -> Option<Self> {
+        let index = self.album_index()?;
+        self.with_album_index((index + 1) % self.album.len())
+    }
+
+    pub fn previous_album(&self) -> Option<Self> {
+        let index = self.album_index()?;
+        self.with_album_index((index + self.album.len() - 1) % self.album.len())
+    }
+
+    fn album_index(&self) -> Option<usize> {
+        if self.album.len() <= 1 {
+            return None;
+        }
+        self.album
+            .iter()
+            .position(|item| item.message_id == self.message_id)
+    }
+}
+
+/// User whose sent media is being browsed from the timeline context menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserMediaState {
+    pub chat_id: i64,
+    pub sender_id: String,
+    pub sender_name: String,
+}
+
+impl UserMediaState {
+    /// Name shown in the panel header, with a neutral fallback when TDLib
+    /// could not resolve the sender.
+    pub fn display_name(&self) -> &str {
+        if self.sender_name.trim().is_empty() {
+            "este usuário"
+        } else {
+            self.sender_name.as_str()
+        }
+    }
 }
 
 /// Signal bundle shared through context.
@@ -897,6 +1071,10 @@ pub struct UiState {
     pub search_error: Signal<Option<String>>,
 
     pub telegram_tick: Signal<u64>,
+    /// Bumped only for messages/deletions in the open conversation. The chat
+    /// list keeps using `telegram_tick`, so unrelated chats no longer force a
+    /// TDLib reload of the visible timeline.
+    pub message_tick: Signal<u64>,
 
     pub downloads: Signal<Vec<DownloadRecord>>,
 
@@ -915,6 +1093,8 @@ pub struct UiState {
     pub forward_state: Signal<Option<ForwardState>>,
     /// Media opened in the lightbox.
     pub lightbox: Signal<Option<LightboxState>>,
+    /// User media panel opened from the sender context menu.
+    pub user_media: Signal<Option<UserMediaState>>,
     /// Emoji picker for message reactions.
     pub reaction_picker: Signal<Option<ReactionPickerState>>,
 
@@ -1085,12 +1265,20 @@ impl UiState {
         (self.lightbox)()
     }
 
+    pub fn user_media(self) -> Option<UserMediaState> {
+        (self.user_media)()
+    }
+
     pub fn reaction_picker(self) -> Option<ReactionPickerState> {
         (self.reaction_picker)()
     }
 
     pub fn telegram_tick(self) -> u64 {
         (self.telegram_tick)()
+    }
+
+    pub fn message_tick(self) -> u64 {
+        (self.message_tick)()
     }
 }
 
@@ -1220,6 +1408,7 @@ pub fn apply_auth_status(mut ui: UiState, status: TdlibStatus) {
         ui.logged_in.set(true);
         ui.preview_mode.set(false);
         bump_telegram_tick(ui);
+        bump_message_tick(ui);
     }
 }
 
@@ -1231,6 +1420,11 @@ pub fn apply_auth_error(mut ui: UiState, error: String) {
 pub fn bump_telegram_tick(mut ui: UiState) {
     let next = ui.telegram_tick().wrapping_add(1);
     (ui.telegram_tick).set(next);
+}
+
+pub fn bump_message_tick(mut ui: UiState) {
+    let next = ui.message_tick().wrapping_add(1);
+    (ui.message_tick).set(next);
 }
 
 /// Cache key compatible with the React app (`chatId` or
@@ -1438,6 +1632,36 @@ mod tests {
             is_deleted: false,
             reactions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn lightbox_album_navigation_wraps() {
+        let mut first = message(1, 10);
+        first.sender_name = "Alice".to_string();
+        first.is_photo = true;
+        let mut second = message(2, 20);
+        second.is_video = true;
+        let mut third = message(3, 30);
+        third.is_photo = true;
+        let album = [&first, &second, &third]
+            .into_iter()
+            .map(LightboxMedia::from_message)
+            .collect::<Vec<_>>();
+        let state = LightboxState::from_album(-100, &first, album);
+        assert_eq!(state.album_position(), Some((1, 3)));
+
+        let next = state.next_album().expect("next album item");
+        assert_eq!(next.message_id, 2);
+        assert!(next.is_video);
+        assert_eq!(next.album_position(), Some((2, 3)));
+
+        let previous = state.previous_album().expect("previous album item");
+        assert_eq!(previous.message_id, 3);
+        assert_eq!(previous.album_position(), Some((3, 3)));
+
+        let single = LightboxState::from_message(-100, &first);
+        assert_eq!(single.album_position(), None);
+        assert!(single.next_album().is_none());
     }
 
     #[test]
