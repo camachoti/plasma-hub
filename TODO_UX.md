@@ -41,7 +41,7 @@ Backlog de melhorias de usabilidade para o Plasma Hub, priorizado por impacto pe
 - [x] Ação “Tentar falhos” para repetir os downloads com origem e destino salvos.
 - [x] Limite de cache de mídia aplicado no startup e depois de salvar mídia.
 - [x] Diagnóstico com versão, sistema, schema, pasta de dados e log de panes.
-- [ ] Busca global entre conversas, com salto para o contexto do resultado.
+- [x] Busca global entre conversas, com salto para o contexto do resultado e paginação.
 - [ ] Estados offline explícitos e fila de envio durante queda do TDLib.
 - [ ] Teste de carga da timeline com 10 mil mensagens em device real.
 - [ ] Validação Android em device, assinatura release e foreground service.
