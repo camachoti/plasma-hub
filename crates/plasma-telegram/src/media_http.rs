@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use plasma_core::AppEnv;
@@ -12,6 +12,11 @@ use super::{
 
 static PLASMA_MEDIA_HTTP_PORT: OnceLock<u16> = OnceLock::new();
 static PLASMA_MEDIA_HTTP_TOKEN: OnceLock<String> = OnceLock::new();
+
+// Loopback playback needs very little concurrency. A bounded pool keeps a
+// misbehaving local client from spawning an unbounded number of threads.
+const MEDIA_SERVER_WORKERS: usize = 8;
+const MEDIA_SERVER_QUEUE: usize = 32;
 
 /// URL of the avatar of a chat, served by the local media server.
 pub fn avatar_url(chat_id: i64) -> String {
@@ -45,6 +50,20 @@ fn avatar_content_type(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Compares two byte strings without short-circuiting on the first mismatch.
+/// The session token is random and fixed-length, so leaking the length is not
+/// a concern; leaking the matching prefix would be.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (left, right) in left.iter().zip(right) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
 fn request_has_token(target: &str, expected: &str) -> bool {
     target
         .split_once('?')
@@ -53,7 +72,7 @@ fn request_has_token(target: &str, expected: &str) -> bool {
                 .split('&')
                 .find_map(|parameter| parameter.strip_prefix("token="))
         })
-        .is_some_and(|provided| provided == expected)
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
 }
 
 pub fn playback_url(chat_id: i64, message_id: i64) -> String {
@@ -83,12 +102,32 @@ pub fn start_server(app: AppEnv) -> Result<(), String> {
     let _ = PLASMA_MEDIA_HTTP_PORT.set(port);
     tracing::info!(port, "media server listening on loopback");
 
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(MEDIA_SERVER_QUEUE);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for _ in 0..MEDIA_SERVER_WORKERS {
+        let receiver = receiver.clone();
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            let stream = {
+                let receiver = receiver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                receiver.recv()
+            };
+            match stream {
+                Ok(stream) => handle_stream(app.clone(), stream),
+                Err(_) => break,
+            }
+        });
+    }
+
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let app = app.clone();
-                    std::thread::spawn(move || handle_stream(app, stream));
+                    if sender.send(stream).is_err() {
+                        break;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, "media server accept failed");
@@ -379,12 +418,22 @@ fn write_response(
 
 #[cfg(test)]
 mod tests {
-    use super::request_has_token;
+    use super::{constant_time_eq, request_has_token};
 
     #[test]
     fn local_media_requires_the_session_token() {
         assert!(request_has_token("/telegram/1/2?token=secret", "secret"));
         assert!(!request_has_token("/telegram/1/2", "secret"));
         assert!(!request_has_token("/telegram/1/2?token=wrong", "secret"));
+        assert!(!request_has_token("/telegram/1/2?token=secret2", "secret"));
+    }
+
+    #[test]
+    fn token_comparison_checks_every_byte() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret "));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 }
