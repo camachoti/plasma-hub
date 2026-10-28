@@ -7,32 +7,33 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
-};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::watch;
 
 pub const DOWNLOAD_CANCELED_ERROR: &str = "Download cancelado pelo usuário.";
 
 // The UI writes in 256–512 KiB chunks. Keep a single request bounded so a
 // malformed or compromised renderer cannot allocate unbounded buffers.
 const MAX_DOWNLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 
-fn active_downloads() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    static ACTIVE_DOWNLOADS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+fn active_downloads() -> &'static Mutex<HashMap<String, watch::Sender<bool>>> {
+    static ACTIVE_DOWNLOADS: OnceLock<Mutex<HashMap<String, watch::Sender<bool>>>> =
+        OnceLock::new();
     ACTIVE_DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub struct DownloadCancellation {
     id: String,
-    canceled: Arc<AtomicBool>,
+    canceled: watch::Sender<bool>,
 }
 
 impl DownloadCancellation {
     pub fn register(id: impl Into<String>) -> Self {
         let id = id.into();
-        let canceled = Arc::new(AtomicBool::new(false));
+        let (canceled, _receiver) = watch::channel(false);
         active_downloads()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -41,13 +42,17 @@ impl DownloadCancellation {
     }
 
     pub fn is_canceled(&self) -> bool {
-        self.canceled.load(Ordering::Relaxed)
+        *self.canceled.borrow()
     }
 
+    /// Resolves as soon as the download is cancelled. `watch` keeps the wait
+    /// race-free without the 100 ms polling loop this used to run.
     pub async fn wait(&self) {
-        while !self.is_canceled() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut receiver = self.canceled.subscribe();
+        if *receiver.borrow() {
+            return;
         }
+        let _ = receiver.changed().await;
     }
 }
 
@@ -67,7 +72,9 @@ pub fn cancel_download(id: &str) -> bool {
         .get(id)
         .cloned();
     if let Some(canceled) = canceled {
-        canceled.store(true, Ordering::Relaxed);
+        // `send` fails when no waiter is subscribed yet; `send_replace` always
+        // updates the shared value, so a later `wait()` still observes it.
+        canceled.send_replace(true);
         true
     } else {
         false
@@ -108,10 +115,71 @@ struct NativeFileDownloadProgress {
     total_bytes: Option<u64>,
 }
 
-fn validate_download_url(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "URL de download inválida.".to_string())?;
+/// Internal download failure. The public API still returns `String` so the
+/// extractors and the webview bridge stay unchanged; classification is what
+/// lets the retry loop decide whether a partial file is worth keeping.
+#[derive(Debug, thiserror::Error)]
+enum DownloadError {
+    #[error("{DOWNLOAD_CANCELED_ERROR}")]
+    Cancelled,
+    #[error("URL de download inválida.")]
+    InvalidUrl,
+    #[error("Downloads nativos aceitam apenas URLs HTTPS válidas.")]
+    InsecureUrl,
+    #[error("Download HTTP {0}")]
+    Http(reqwest::StatusCode),
+    #[error("Servidor retornou um intervalo de download inesperado.")]
+    UnexpectedRange,
+    #[error("Header inválido: {0}")]
+    InvalidHeader(String),
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+impl DownloadError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(status) => {
+                status.is_server_error()
+                    || *status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            }
+            // A range mismatch usually means the partial file is stale or the
+            // server lost support for resume; starting over is safe.
+            Self::UnexpectedRange => true,
+            Self::Request(error) => {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_body()
+                    || error.is_request()
+                    || error.is_decode()
+            }
+            Self::Io(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ),
+            _ => false,
+        }
+    }
+
+    fn keeps_partial(&self) -> bool {
+        self.is_retryable() || matches!(self, Self::Cancelled)
+    }
+}
+
+fn validate_download_url(url: &str) -> Result<(), DownloadError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| DownloadError::InvalidUrl)?;
     if parsed.scheme() != "https" || parsed.host_str().is_none() {
-        return Err("Downloads nativos aceitam apenas URLs HTTPS válidas.".to_string());
+        return Err(DownloadError::InsecureUrl);
     }
     Ok(())
 }
@@ -212,6 +280,9 @@ pub fn abort_download_file(file_path: &str) -> Result<(), String> {
 
 /// Streams a remote HTTPS resource straight to disk, resuming from a previous
 /// partial file when the server supports `Range` and the ETag still matches.
+///
+/// Transient failures are retried with exponential backoff and keep the
+/// partial file, so a flaky connection resumes instead of starting over.
 pub async fn download_url_to_file(
     app: &AppEnv,
     id: &str,
@@ -219,7 +290,7 @@ pub async fn download_url_to_file(
     file_path: &str,
     headers: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
-    validate_download_url(url)?;
+    validate_download_url(url).map_err(|error| error.to_string())?;
     let destination = Path::new(file_path);
     let partial = partial_path(file_path)?;
     let partial_meta = partial_meta_path(&partial);
@@ -228,145 +299,206 @@ pub async fn download_url_to_file(
     }
 
     let cancellation = DownloadCancellation::register(id);
-    let result = async {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent("Plasma Hub/0.1")
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() > 5 {
-                    attempt.error("Redirecionamentos demais durante o download.")
-                } else if attempt.url().scheme() != "https" {
-                    attempt.stop()
-                } else {
-                    attempt.follow()
-                }
-            }))
-            .build()
-            .map_err(|error| error.to_string())?;
-        let stored_meta = std::fs::read(&partial_meta)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PartialDownloadMeta>(&bytes).ok())
-            .filter(|meta| meta.source_key == source_key(url));
-        let resume_from = if stored_meta.is_some() {
-            std::fs::metadata(&partial)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-        } else {
+    let result = download_with_retries(
+        app,
+        id,
+        url,
+        destination,
+        &partial,
+        &partial_meta,
+        &headers,
+        &cancellation,
+    )
+    .await;
+
+    if let Err(error) = &result {
+        if !error.keeps_partial() {
             let _ = std::fs::remove_file(&partial);
             let _ = std::fs::remove_file(&partial_meta);
-            0
-        };
-        let mut request = client.get(url);
-        if let Some(headers) = headers {
-            for (name, value) in headers {
-                let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| format!("Header inválido: {error}"))?;
-                let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-                    .map_err(|error| format!("Valor de header inválido: {error}"))?;
-                request = request.header(name, value);
-            }
         }
-        if resume_from > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
-            if let Some(meta) = &stored_meta {
-                request = request.header(reqwest::header::IF_RANGE, meta.etag.as_str());
-            }
-        }
-        let mut response = tokio::select! {
-            result = request.send() => result.map_err(|error| error.to_string())?,
-            _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
-        };
-        if !response.status().is_success() {
-            return Err(format!("Download HTTP {}", response.status()));
-        }
+    }
 
-        let resumed = resume_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-        if response.status() == reqwest::StatusCode::PARTIAL_CONTENT
-            && content_range_start(&response) != Some(resume_from)
+    result.map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_with_retries(
+    app: &AppEnv,
+    id: &str,
+    url: &str,
+    destination: &Path,
+    partial: &Path,
+    partial_meta: &Path,
+    headers: &Option<HashMap<String, String>>,
+    cancellation: &DownloadCancellation,
+) -> Result<(), DownloadError> {
+    let mut attempt = 0_u32;
+    loop {
+        attempt += 1;
+        match download_once(
+            app,
+            id,
+            url,
+            destination,
+            partial,
+            partial_meta,
+            headers,
+            cancellation,
+        )
+        .await
         {
-            return Err("Servidor retornou um intervalo de download inesperado.".to_string());
-        }
-        let etag = response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.starts_with("W/"));
-        if let Some(etag) = etag {
-            let meta = PartialDownloadMeta {
-                source_key: source_key(url),
-                etag: etag.to_string(),
-            };
-            std::fs::write(
-                &partial_meta,
-                serde_json::to_vec(&meta).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        } else {
-            let _ = std::fs::remove_file(&partial_meta);
-        }
-        let total_bytes = if resumed {
-            content_range_total(&response)
-                .or_else(|| response.content_length().map(|length| length + resume_from))
-        } else {
-            response.content_length()
-        };
-        let mut downloaded_bytes = if resumed { resume_from } else { 0 };
-        let mut file = if resumed {
-            std::fs::OpenOptions::new().append(true).open(&partial)
-        } else {
-            std::fs::File::create(&partial)
-        }
-        .map_err(|error| error.to_string())?;
-
-        while let Some(chunk) = tokio::select! {
-            result = response.chunk() => result.map_err(|error| error.to_string())?,
-            _ = cancellation.wait() => {
-                drop(file);
-                return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+            Ok(()) => return Ok(()),
+            Err(error) if matches!(error, DownloadError::Cancelled) => return Err(error),
+            Err(error) if error.is_retryable() && attempt < MAX_DOWNLOAD_ATTEMPTS => {
+                if matches!(error, DownloadError::UnexpectedRange) {
+                    let _ = std::fs::remove_file(partial);
+                    let _ = std::fs::remove_file(partial_meta);
+                }
+                let delay = RETRY_BASE_DELAY.saturating_mul(1_u32 << (attempt - 1));
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancellation.wait() => return Err(DownloadError::Cancelled),
+                }
             }
-        } {
-            file.write_all(&chunk).map_err(|error| error.to_string())?;
-            downloaded_bytes += chunk.len() as u64;
-            let progress = total_bytes
-                .map(|total| ((downloaded_bytes as f64 / total as f64) * 100.0).min(99.0))
-                .unwrap_or(50.0);
-            app.emit(
-                "native-file-download-progress",
-                NativeFileDownloadProgress {
-                    id: id.to_string(),
-                    percent: progress,
-                    downloaded_bytes,
-                    total_bytes,
-                },
-            );
+            Err(error) => return Err(error),
         }
+    }
+}
 
-        file.sync_all().map_err(|error| error.to_string())?;
-        drop(file);
-        std::fs::rename(&partial, destination).map_err(|error| error.to_string())?;
-        let _ = std::fs::remove_file(&partial_meta);
+#[allow(clippy::too_many_arguments)]
+async fn download_once(
+    app: &AppEnv,
+    id: &str,
+    url: &str,
+    destination: &Path,
+    partial: &Path,
+    partial_meta: &Path,
+    headers: &Option<HashMap<String, String>>,
+    cancellation: &DownloadCancellation,
+) -> Result<(), DownloadError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent("Plasma Hub/0.1")
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 5 {
+                attempt.error("Redirecionamentos demais durante o download.")
+            } else if attempt.url().scheme() != "https" {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()?;
+    let stored_meta = std::fs::read(partial_meta)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PartialDownloadMeta>(&bytes).ok())
+        .filter(|meta| meta.source_key == source_key(url));
+    let resume_from = if stored_meta.is_some() {
+        std::fs::metadata(partial)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+    } else {
+        let _ = std::fs::remove_file(partial);
+        let _ = std::fs::remove_file(partial_meta);
+        0
+    };
+    let mut request = client.get(url);
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| DownloadError::InvalidHeader(error.to_string()))?;
+            let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+                .map_err(|error| DownloadError::InvalidHeader(error.to_string()))?;
+            request = request.header(name, value);
+        }
+    }
+    if resume_from > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+        if let Some(meta) = &stored_meta {
+            request = request.header(reqwest::header::IF_RANGE, meta.etag.as_str());
+        }
+    }
+    let mut response = tokio::select! {
+        result = request.send() => result?,
+        _ = cancellation.wait() => return Err(DownloadError::Cancelled),
+    };
+    if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        return Err(DownloadError::UnexpectedRange);
+    }
+    if !response.status().is_success() {
+        return Err(DownloadError::Http(response.status()));
+    }
+
+    let resumed = resume_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+        && content_range_start(&response) != Some(resume_from)
+    {
+        return Err(DownloadError::UnexpectedRange);
+    }
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.starts_with("W/"));
+    if let Some(etag) = etag {
+        let meta = PartialDownloadMeta {
+            source_key: source_key(url),
+            etag: etag.to_string(),
+        };
+        std::fs::write(partial_meta, serde_json::to_vec(&meta)?)?;
+    } else {
+        let _ = std::fs::remove_file(partial_meta);
+    }
+    let total_bytes = if resumed {
+        content_range_total(&response)
+            .or_else(|| response.content_length().map(|length| length + resume_from))
+    } else {
+        response.content_length()
+    };
+    let mut downloaded_bytes = if resumed { resume_from } else { 0 };
+    let mut file = if resumed {
+        std::fs::OpenOptions::new().append(true).open(partial)?
+    } else {
+        std::fs::File::create(partial)?
+    };
+
+    while let Some(chunk) = tokio::select! {
+        result = response.chunk() => result?,
+        _ = cancellation.wait() => {
+            drop(file);
+            return Err(DownloadError::Cancelled);
+        }
+    } {
+        file.write_all(&chunk)?;
+        downloaded_bytes += chunk.len() as u64;
+        let progress = total_bytes
+            .map(|total| ((downloaded_bytes as f64 / total as f64) * 100.0).min(99.0))
+            .unwrap_or(50.0);
         app.emit(
             "native-file-download-progress",
             NativeFileDownloadProgress {
                 id: id.to_string(),
-                percent: 100.0,
+                percent: progress,
                 downloaded_bytes,
-                total_bytes: total_bytes.or(Some(downloaded_bytes)),
+                total_bytes,
             },
         );
-        Ok(())
     }
-    .await;
 
-    if result
-        .as_ref()
-        .err()
-        .is_some_and(|error| !is_cancellation_error(error))
-    {
-        let _ = std::fs::remove_file(&partial);
-        let _ = std::fs::remove_file(&partial_meta);
-    }
-    result
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(partial, destination)?;
+    let _ = std::fs::remove_file(partial_meta);
+    app.emit(
+        "native-file-download-progress",
+        NativeFileDownloadProgress {
+            id: id.to_string(),
+            percent: 100.0,
+            downloaded_bytes,
+            total_bytes: total_bytes.or(Some(downloaded_bytes)),
+        },
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -386,6 +518,38 @@ mod tests {
         let cancellation = DownloadCancellation::register("download-2");
         drop(cancellation);
         assert!(!cancel_download("download-2"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_waiters_without_polling() {
+        let cancellation = DownloadCancellation::register("download-wait");
+        let waiter = tokio::spawn(async move {
+            cancellation.wait().await;
+            cancellation.is_canceled()
+        });
+        tokio::task::yield_now().await;
+        assert!(cancel_download("download-wait"));
+        let canceled = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("wait timed out")
+            .expect("join waiter");
+        assert!(canceled);
+    }
+
+    #[test]
+    fn classifies_transient_and_permanent_download_errors() {
+        assert!(DownloadError::Http(reqwest::StatusCode::SERVICE_UNAVAILABLE).is_retryable());
+        assert!(DownloadError::Http(reqwest::StatusCode::TOO_MANY_REQUESTS).is_retryable());
+        assert!(DownloadError::Http(reqwest::StatusCode::REQUEST_TIMEOUT).is_retryable());
+        assert!(!DownloadError::Http(reqwest::StatusCode::NOT_FOUND).is_retryable());
+        assert!(DownloadError::UnexpectedRange.is_retryable());
+        assert!(
+            DownloadError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+                .is_retryable()
+        );
+        assert!(!DownloadError::InvalidUrl.is_retryable());
+        assert!(DownloadError::Cancelled.keeps_partial());
+        assert!(!DownloadError::InsecureUrl.keeps_partial());
     }
 
     #[test]
