@@ -72,15 +72,20 @@ pub enum Platform {
 
 impl Platform {
     pub fn detect(url: &str) -> Self {
-        let lower = url.to_ascii_lowercase();
-        let host = lower
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .unwrap_or(&lower)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches("www.");
+        let trimmed = url.trim();
+        // Accept both full URLs and bare hosts pasted from share sheets. Parsing
+        // also normalizes ports, trailing dots, userinfo and percent-encoding,
+        // which the previous string split mishandled.
+        let parsed = reqwest::Url::parse(trimmed)
+            .or_else(|_| reqwest::Url::parse(&format!("https://{trimmed}")));
+        let Ok(parsed) = parsed else {
+            return Self::Web;
+        };
+        let Some(host) = parsed.host_str() else {
+            return Self::Web;
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let host = host.strip_prefix("www.").unwrap_or(&host);
         if host == "x.com" || host == "twitter.com" {
             Self::Twitter
         } else if host == "youtube.com"
@@ -1160,6 +1165,37 @@ mod tests {
             Platform::detect("https://cdn.example.com/video.mp4"),
             Platform::Web
         );
+    }
+
+    #[test]
+    fn detects_platforms_from_normalized_urls() {
+        assert_eq!(
+            Platform::detect("https://x.com:443/user/status/1"),
+            Platform::Twitter
+        );
+        assert_eq!(
+            Platform::detect("https://WWW.YouTube.com./watch?v=1"),
+            Platform::YouTube
+        );
+        assert_eq!(
+            Platform::detect("https://m.youtube.com/watch?v=1"),
+            Platform::YouTube
+        );
+        assert_eq!(Platform::detect("youtu.be/dQw4w9WgXcQ"), Platform::YouTube);
+        assert_eq!(
+            Platform::detect("https://www.reddit.com:8443/r/rust"),
+            Platform::Reddit
+        );
+        assert_eq!(
+            Platform::detect("https://youtube.com.evil.test/watch"),
+            Platform::Web
+        );
+        assert_eq!(
+            Platform::detect("https://x.com@evil.test/status/1"),
+            Platform::Web
+        );
+        assert_eq!(Platform::detect(""), Platform::Web);
+        assert_eq!(Platform::detect("not a url"), Platform::Web);
     }
 
     #[test]
