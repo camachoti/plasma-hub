@@ -3,7 +3,7 @@ use plasma_core::AppEnv;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -25,7 +25,11 @@ use tdlib_rs::{
         LogStreamFile, MessageTopicForum, MessageTopicThread, Photo, ReactionTypeEmoji,
     },
 };
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    sync::Mutex,
+    task::JoinSet,
+};
 
 const STALE_NATIVE_PARTIAL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SENDER_NAME_RESOLUTION_CONCURRENCY: usize = 8;
@@ -2141,13 +2145,15 @@ async fn download_media_file_to_path(
     let partial_destination = partial_file_path(destination);
     let _ = std::fs::remove_file(&partial_destination);
 
-    if let Err(error) = copy_file_with_progress(
+    let copy_result = copy_file_with_progress(
         Path::new(&downloaded_file.local.path),
         &partial_destination,
         effective_file_size(&downloaded_file),
         &mut on_progress,
         &should_abort,
-    ) {
+    )
+    .await;
+    if let Err(error) = copy_result {
         let _ = std::fs::remove_file(&partial_destination);
         return Err(error);
     }
@@ -2159,7 +2165,7 @@ async fn download_media_file_to_path(
     Ok((effective_file_size(&downloaded_file), false))
 }
 
-fn copy_file_with_progress(
+async fn copy_file_with_progress(
     source: &Path,
     destination: &Path,
     total_size: i64,
@@ -2167,8 +2173,12 @@ fn copy_file_with_progress(
     should_abort: &impl Fn() -> bool,
 ) -> Result<(), String> {
     on_progress(96, "saving");
-    let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
-    let mut output = std::fs::File::create(destination).map_err(|error| error.to_string())?;
+    let mut input = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut output = tokio::fs::File::create(destination)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut copied = 0_i64;
     let mut last_percent = 96_u8;
@@ -2177,12 +2187,16 @@ fn copy_file_with_progress(
         if should_abort() {
             return Err("STOP_ABORTED".to_string());
         }
-        let read = input.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read = input
+            .read(&mut buffer)
+            .await
+            .map_err(|error| error.to_string())?;
         if read == 0 {
             break;
         }
         output
             .write_all(&buffer[..read])
+            .await
             .map_err(|error| error.to_string())?;
         copied = copied.saturating_add(read as i64);
 
@@ -2195,7 +2209,7 @@ fn copy_file_with_progress(
         }
     }
 
-    output.flush().map_err(|error| error.to_string())?;
+    output.flush().await.map_err(|error| error.to_string())?;
     on_progress(100, "saving");
     Ok(())
 }
@@ -4114,6 +4128,7 @@ pub async fn telegram_media_save(
             &mut on_progress,
             &|| save_abort_flag.load(Ordering::SeqCst),
         )
+        .await
         .inspect_err(|_error| {
             let _ = std::fs::remove_file(&tmp_path);
         })?;
@@ -4415,11 +4430,26 @@ pub async fn tdlib_download_message_thumbnail(
         Some(thumbnail) => {
             download_thumbnail_to_cache(client_id, Some(thumbnail), &media_dir).await
         }
-        None => local_video_path
-            .and_then(|path| {
-                generate_video_thumbnail_to_cache(&path, &media_dir.join("thumbnail.jpg"))
-            })
-            .or_else(|| minithumbnail.and_then(|data| write_minithumbnail(&data, &media_dir))),
+        None => {
+            // ffmpeg blocks; keep it off the async worker that serves TDLib.
+            let generated = match local_video_path {
+                Some(path) => {
+                    let thumbnail_dir = media_dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        generate_video_thumbnail_to_cache(
+                            &path,
+                            &thumbnail_dir.join("thumbnail.jpg"),
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                }
+                None => None,
+            };
+            generated
+                .or_else(|| minithumbnail.and_then(|data| write_minithumbnail(&data, &media_dir)))
+        }
     };
 
     match thumbnail_path {
