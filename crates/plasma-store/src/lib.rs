@@ -12,6 +12,42 @@ use serde_json::Value;
 
 const MAX_DOWNLOAD_HISTORY_ITEMS: usize = 300;
 const MAX_DOWNLOAD_HISTORY_BYTES: usize = 2 * 1024 * 1024;
+// The message cache is an offline convenience, not the source of truth. Keep
+// the most recent pages and drop anything older than a month so a long-lived
+// install does not grow without bound.
+const MAX_MESSAGE_CACHE_PAGES: i64 = 500;
+const MESSAGE_CACHE_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+fn prune_message_cache(
+    connection: &Connection,
+    now: i64,
+    page_limit: i64,
+    max_age_ms: i64,
+) -> Result<()> {
+    let cutoff = now.saturating_sub(max_age_ms);
+    let stale = r#"
+        SELECT cache_key FROM telegram_message_pages
+        WHERE updated_at < ?1
+           OR cache_key NOT IN (
+               SELECT cache_key FROM telegram_message_pages
+               ORDER BY updated_at DESC
+               LIMIT ?2
+           )
+    "#;
+    connection
+        .execute(
+            &format!("DELETE FROM telegram_messages WHERE cache_key IN ({stale})"),
+            params![cutoff, page_limit],
+        )
+        .map_err(db_error)?;
+    connection
+        .execute(
+            &format!("DELETE FROM telegram_message_pages WHERE cache_key IN ({stale})"),
+            params![cutoff, page_limit],
+        )
+        .map_err(db_error)?;
+    Ok(())
+}
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -303,6 +339,13 @@ pub fn telegram_message_cache_save(
             .map_err(db_error)?;
     }
 
+    prune_message_cache(
+        &transaction,
+        updated_at,
+        MAX_MESSAGE_CACHE_PAGES,
+        MESSAGE_CACHE_MAX_AGE_MS,
+    )?;
+
     transaction.commit().map_err(db_error)?;
 
     Ok(MessageCacheSaveResult {
@@ -471,6 +514,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(env.paths().data_dir().parent().unwrap());
+    }
+
+    #[test]
+    fn prunes_message_cache_by_age_and_page_limit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        db::migrate(&mut connection).unwrap();
+        let now = 10_000_000_i64;
+        for (key, updated_at) in [("old", 1_i64), ("new", now), ("newer", now + 1)] {
+            connection
+                .execute(
+                    "INSERT INTO telegram_message_pages (cache_key, last_fetched_at, updated_at) VALUES (?1, NULL, ?2)",
+                    params![key, updated_at],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO telegram_messages (cache_key, message_id, raw_json, updated_at) VALUES (?1, 1, '{}', ?2)",
+                    params![key, updated_at],
+                )
+                .unwrap();
+        }
+
+        // The old page is past the age cutoff even though the limit is large.
+        prune_message_cache(&connection, now, 10, 1_000).unwrap();
+        assert_eq!(count_rows(&connection, "telegram_message_pages"), 2);
+        assert_eq!(count_rows(&connection, "telegram_messages"), 2);
+
+        // With room for a single page, only the most recently updated one stays.
+        prune_message_cache(&connection, now, 1, 1_000).unwrap();
+        assert_eq!(count_rows(&connection, "telegram_message_pages"), 1);
+        assert_eq!(count_rows(&connection, "telegram_messages"), 1);
+        let newest: String = connection
+            .query_row("SELECT cache_key FROM telegram_message_pages", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(newest, "newer");
+    }
+
+    fn count_rows(connection: &Connection, table: &str) -> i64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
     }
 
     #[test]
