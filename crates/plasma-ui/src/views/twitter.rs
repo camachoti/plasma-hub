@@ -583,11 +583,6 @@ fn finish_twitter_download(
             );
         }
         Err(error) => {
-            push_toast(
-                ui.toasts,
-                format!("Download do X falhou: {error}"),
-                ToastKind::Error,
-            );
             update_download(
                 services,
                 ui,

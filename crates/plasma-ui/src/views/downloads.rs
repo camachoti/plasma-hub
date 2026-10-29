@@ -4,7 +4,7 @@ use crate::context::{ContextMenuState, ContextTarget};
 use crate::downloads::{
     new_download_id, push_download, sanitize_filename, update_download, DownloadRecord,
 };
-use crate::state::{push_toast, AppServices, ToastKind, UiState};
+use crate::state::{AppServices, UiState};
 use dioxus::prelude::*;
 use plasma_extract::{FormatOption, MediaInfo};
 use std::path::Path;
@@ -166,7 +166,7 @@ pub fn DownloadsView() -> Element {
                             "Limpar"
                         }
                     }
-                    AnalysisCard { info }
+                    AnalysisCard { info, error }
                 }
 
                 section { class: "download-card downloads-list-card",
@@ -201,7 +201,6 @@ pub fn DownloadsView() -> Element {
                                 dioxus::prelude::spawn(async move {
                                     let _ = downloads.save_history(next).await;
                                 });
-                                push_toast(ui.toasts, "Itens finalizados removidos do histórico.", ToastKind::Info);
                             },
                             "Limpar finalizados"
                         }
@@ -228,7 +227,7 @@ pub fn DownloadsView() -> Element {
 }
 
 #[component]
-fn AnalysisCard(info: MediaInfo) -> Element {
+fn AnalysisCard(info: MediaInfo, error: Signal<Option<String>>) -> Element {
     let services = use_context::<AppServices>();
     let ui = use_context::<UiState>();
     let mut formats = info.formats.video.clone();
@@ -311,6 +310,7 @@ fn AnalysisCard(info: MediaInfo) -> Element {
                                                 &info_for_click,
                                                 &option_for_click,
                                                 is_audio,
+                                                error,
                                             );
                                         },
                                         "Baixar"
@@ -397,7 +397,6 @@ fn DownloadRow(item: DownloadRecord) -> Element {
                                         },
                                         true,
                                     );
-                                    push_toast(ui.toasts, "Download cancelado.", ToastKind::Info);
                                 }
                             }
                         },
@@ -421,9 +420,7 @@ fn DownloadRow(item: DownloadRecord) -> Element {
                             onclick: {
                                 let path = path.clone();
                                 move |_| {
-                                    if let Err(message) = plasma_platform::open_path(&path) {
-                                        push_toast(ui.toasts, message, ToastKind::Error);
-                                    }
+                                    let _ = plasma_platform::open_path(&path);
                                 }
                             },
                             "Abrir"
@@ -433,9 +430,7 @@ fn DownloadRow(item: DownloadRecord) -> Element {
                             onclick: {
                                 let path = path.clone();
                                 move |_| {
-                                    if let Err(message) = plasma_platform::reveal_path(&path) {
-                                        push_toast(ui.toasts, message, ToastKind::Error);
-                                    }
+                                    let _ = plasma_platform::reveal_path(&path);
                                 }
                             },
                             "Mostrar"
@@ -497,15 +492,15 @@ fn download_media(
     info: &MediaInfo,
     option: &FormatOption,
     is_audio: bool,
+    mut error: Signal<Option<String>>,
 ) {
     if option.url.is_none() && info.platform != "youtube" {
-        push_toast(
-            ui.toasts,
-            "Este formato não tem URL direta para download.",
-            ToastKind::Error,
-        );
+        error.set(Some(
+            "Este formato não tem URL direta para download.".to_string(),
+        ));
         return;
     }
+    error.set(None);
     let extension = media_extension(option, is_audio);
     let title = sanitize_filename(&info.title.chars().take(60).collect::<String>());
     let label = sanitize_filename(&option.label.chars().take(40).collect::<String>());
@@ -604,19 +599,11 @@ fn can_retry_record(item: &DownloadRecord) -> bool {
 
 fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     let Some(url) = item.source_url.clone() else {
-        push_toast(
-            ui.toasts,
-            "Este item não tem URL de origem.",
-            ToastKind::Error,
-        );
+        mark_retry_error(services, ui, &item, "Este item não tem URL de origem.");
         return;
     };
     let Some(file_path) = item.file_path.clone() else {
-        push_toast(
-            ui.toasts,
-            "Este item não tem destino salvo.",
-            ToastKind::Error,
-        );
+        mark_retry_error(services, ui, &item, "Este item não tem destino salvo.");
         return;
     };
     let id = if item.id.is_empty() {
@@ -637,6 +624,24 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
         let result = retry_download(&services, &original, &id, &file_path, &url).await;
         finish_url_download(services, ui, id, result);
     });
+}
+
+fn mark_retry_error(services: AppServices, ui: UiState, item: &DownloadRecord, message: &str) {
+    if item.id.is_empty() {
+        return;
+    }
+    update_download(
+        services,
+        ui,
+        &item.id,
+        |record| {
+            record.status = "failed".to_string();
+            record.error = Some(message.to_string());
+            record.can_cancel = Some(false);
+            record.can_retry = Some(false);
+        },
+        true,
+    );
 }
 
 /// Retries a failed item. Native extractors re-analyze the original page when
@@ -785,11 +790,6 @@ fn finish_url_download(services: AppServices, ui: UiState, id: String, result: R
             );
         }
         Err(error) => {
-            push_toast(
-                ui.toasts,
-                format!("Download falhou: {error}"),
-                ToastKind::Error,
-            );
             update_download(
                 services,
                 ui,

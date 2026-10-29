@@ -1869,6 +1869,7 @@ fn MassDownloadPanel(
     let mut split_by_user = use_signal(|| false);
     let mut split_by_album = use_signal(|| false);
     let mut album_split_mode = use_signal(|| "separator".to_string());
+    let mut panel_error = use_signal(|| None::<String>);
 
     let topic_options = {
         let mut options = vec![SelectOption::new("all", "Todos os tópicos")];
@@ -1896,16 +1897,12 @@ fn MassDownloadPanel(
             return;
         }
         let Some(chat_id) = parse_chat_id(&chat_for_start) else {
-            push_toast(
-                ui.toasts,
-                "Chat inválido para download em massa.",
-                ToastKind::Error,
-            );
+            panel_error.set(Some("Chat inválido para download em massa.".to_string()));
             return;
         };
         let folder_path = folder().trim().to_string();
         if folder_path.is_empty() {
-            push_toast(ui.toasts, "Escolha uma pasta de destino.", ToastKind::Error);
+            panel_error.set(Some("Escolha uma pasta de destino.".to_string()));
             return;
         }
         let topic = topics_for_start
@@ -1925,32 +1922,18 @@ fn MassDownloadPanel(
         ui.mass_download_running.set(true);
         ui.mass_download_stopping.set(false);
         ui.mass_download_progress.set(None);
+        panel_error.set(None);
         let services = start_services.clone();
         spawn(async move {
             let outcome = services.telegram.start_mass_download(request).await;
             match outcome {
-                Ok(result) if result.success => {
-                    let message = if result.aborted {
-                        format!(
-                            "Download em massa interrompido: {} baixados, {} ignorados.",
-                            result.downloaded_count, result.skipped_count
-                        )
-                    } else {
-                        format!(
-                            "Download em massa concluído: {} baixados, {} ignorados, {} falharam.",
-                            result.downloaded_count, result.skipped_count, result.failed_count
-                        )
-                    };
-                    push_toast(ui.toasts, message, ToastKind::Success);
-                }
-                Ok(result) => push_toast(
-                    ui.toasts,
+                Ok(result) if result.success => {}
+                Ok(result) => panel_error.set(Some(
                     result
                         .error
                         .unwrap_or_else(|| "Falha no download em massa.".to_string()),
-                    ToastKind::Error,
-                ),
-                Err(error) => push_toast(ui.toasts, error, ToastKind::Error),
+                )),
+                Err(error) => panel_error.set(Some(error)),
             }
             ui.mass_download_running.set(false);
             ui.mass_download_stopping.set(false);
@@ -1966,7 +1949,7 @@ fn MassDownloadPanel(
         let services = stop_services.clone();
         spawn(async move {
             if let Err(error) = services.telegram.stop_mass_download().await {
-                push_toast(ui.toasts, error, ToastKind::Error);
+                panel_error.set(Some(error));
                 ui.mass_download_stopping.set(false);
             }
         });
@@ -2013,6 +1996,9 @@ fn MassDownloadPanel(
                     }
                 }
                 div { class: "mass-download-body",
+                    if let Some(message) = panel_error() {
+                        p { class: "error-banner", "{message}" }
+                    }
                     label { class: "mass-download-field",
                         span { "Pasta de destino" }
                         div { class: "mass-download-folder-row",
