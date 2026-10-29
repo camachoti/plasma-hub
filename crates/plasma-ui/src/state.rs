@@ -448,11 +448,18 @@ impl TelegramHandle {
         chat_id: i64,
         sender_id: String,
         limit: i32,
+        from_message_id: Option<i64>,
     ) -> Result<TdlibSharedMediaResult, String> {
         let manager = self.manager.clone();
         let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_search_user_media(&manager, chat_id, sender_id, Some(limit))
-                .await
+            plasma_telegram::tdlib_search_user_media(
+                &manager,
+                chat_id,
+                sender_id,
+                Some(limit),
+                from_message_id,
+            )
+            .await
         });
         self.join(handle).await?
     }

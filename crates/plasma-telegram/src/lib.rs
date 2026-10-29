@@ -341,6 +341,10 @@ pub struct TdlibSharedMediaItem {
 pub struct TdlibSharedMediaResult {
     pub success: bool,
     pub media: Vec<TdlibSharedMediaItem>,
+    /// Cursor for the next page, expressed in app message ids. Zero when there
+    /// is nothing left to fetch.
+    pub next_from_message_id: i64,
+    pub has_more: bool,
     pub error: Option<String>,
 }
 
@@ -3371,6 +3375,8 @@ pub async fn tdlib_get_shared_media(
             return Ok(TdlibSharedMediaResult {
                 success: false,
                 media: Vec::new(),
+                next_from_message_id: 0,
+                has_more: false,
                 error: status.error.or(Some(status.state)),
             });
         }
@@ -3380,6 +3386,7 @@ pub async fn tdlib_get_shared_media(
     let mut from_message_id = 0;
     let mut scanned = 0usize;
     let mut media = Vec::new();
+    let mut exhausted = false;
 
     while media.len() < requested_limit && scanned < 1000 {
         let history =
@@ -3391,12 +3398,15 @@ pub async fn tdlib_get_shared_media(
                     return Ok(TdlibSharedMediaResult {
                         success: false,
                         media,
+                        next_from_message_id: app_message_id_from_tdlib(from_message_id),
+                        has_more: from_message_id != 0,
                         error: Some(error.message),
                     });
                 }
             };
 
         if history.messages.is_empty() {
+            exhausted = true;
             break;
         }
 
@@ -3430,6 +3440,7 @@ pub async fn tdlib_get_shared_media(
         }
 
         if next_from_message_id == from_message_id {
+            exhausted = true;
             break;
         }
         from_message_id = next_from_message_id;
@@ -3438,6 +3449,8 @@ pub async fn tdlib_get_shared_media(
     Ok(TdlibSharedMediaResult {
         success: true,
         media,
+        next_from_message_id: app_message_id_from_tdlib(from_message_id),
+        has_more: !exhausted && from_message_id != 0,
         error: None,
     })
 }
@@ -3447,6 +3460,7 @@ pub async fn tdlib_search_user_media(
     chat_id: i64,
     user_id: String,
     limit: Option<i32>,
+    from_message_id: Option<i64>,
 ) -> Result<TdlibSharedMediaResult, String> {
     let client_id = match ready_client_id(state).await {
         Ok(client_id) => client_id,
@@ -3454,21 +3468,32 @@ pub async fn tdlib_search_user_media(
             return Ok(TdlibSharedMediaResult {
                 success: false,
                 media: Vec::new(),
+                next_from_message_id: 0,
+                has_more: false,
                 error: status.error.or(Some(status.state)),
             });
         }
     };
 
-    let requested_limit = limit.unwrap_or(100).clamp(1, 200) as usize;
+    let requested_limit = limit.unwrap_or(30).clamp(1, 100) as usize;
     let target_user_id = user_id
         .chars()
         .filter(|ch| ch.is_ascii_digit() || *ch == '-')
         .collect::<String>();
-    let mut from_message_id = 0;
+    // The cursor travels as an app message id so the UI can pass it back
+    // opaquely; TDLib needs its own id space.
+    let mut from_message_id = from_message_id
+        .filter(|cursor| *cursor > 0)
+        .map(tdlib_message_id_from_app_id)
+        .unwrap_or(0);
     let mut scanned = 0usize;
     let mut media = Vec::new();
+    let mut exhausted = false;
 
-    while media.len() < requested_limit && scanned < 5000 {
+    // Scan a bounded chunk per page. The panel renders the first page as soon
+    // as it arrives and keeps requesting pages in the background, so a sender
+    // with media deep in the history no longer blocks the first result.
+    while media.len() < requested_limit && scanned < 600 {
         let history =
             match functions::get_chat_history(chat_id, from_message_id, 0, 100, false, client_id)
                 .await
@@ -3478,12 +3503,15 @@ pub async fn tdlib_search_user_media(
                     return Ok(TdlibSharedMediaResult {
                         success: false,
                         media,
+                        next_from_message_id: app_message_id_from_tdlib(from_message_id),
+                        has_more: from_message_id != 0,
                         error: Some(error.message),
                     });
                 }
             };
 
         if history.messages.is_empty() {
+            exhausted = true;
             break;
         }
 
@@ -3521,6 +3549,7 @@ pub async fn tdlib_search_user_media(
         }
 
         if next_from_message_id == 0 || next_from_message_id == from_message_id {
+            exhausted = true;
             break;
         }
         from_message_id = next_from_message_id;
@@ -3529,6 +3558,8 @@ pub async fn tdlib_search_user_media(
     Ok(TdlibSharedMediaResult {
         success: true,
         media,
+        next_from_message_id: app_message_id_from_tdlib(from_message_id),
+        has_more: !exhausted && from_message_id != 0,
         error: None,
     })
 }

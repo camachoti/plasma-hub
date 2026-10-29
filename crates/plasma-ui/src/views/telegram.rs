@@ -143,8 +143,10 @@ fn RealTelegram() -> Element {
     let mut shared_error = use_signal(|| None::<String>);
     let mut user_media_items = use_signal(Vec::<TdlibSharedMediaItem>::new);
     let mut user_media_loading = use_signal(|| false);
+    let mut user_media_loading_more = use_signal(|| false);
     let mut user_media_error = use_signal(|| None::<String>);
     let mut user_media_key = use_signal(|| None::<(i64, String)>);
+    let mut user_media_generation = use_signal(|| 0u64);
     let mut user_media_cache = use_hook(|| CopyValue::new(UserMediaCache::new()));
     let mut forwarding = use_signal(|| false);
     // The chat object also changes when its preview or unread counters update.
@@ -426,6 +428,8 @@ fn RealTelegram() -> Element {
             return;
         };
         let key = (target.chat_id, target.sender_id.clone());
+        let generation = user_media_generation.peek().wrapping_add(1);
+        user_media_generation.set(generation);
         let version = ui
             .selected_chat
             .peek()
@@ -435,64 +439,119 @@ fn RealTelegram() -> Element {
         let cached = user_media_cache.read().get(&key).cloned();
 
         // Never show another sender's list while the first request runs.
-        if user_media_key.peek().as_ref() != Some(&key) {
+        let is_new_target = user_media_key.peek().as_ref() != Some(&key);
+        if is_new_target {
             user_media_key.set(Some(key.clone()));
             user_media_items.set(Vec::new());
             user_media_loading.set(true);
+            user_media_loading_more.set(false);
             user_media_error.set(None);
         }
 
         if let Some((items, cached_version)) = cached {
             user_media_items.set(items);
             user_media_loading.set(false);
+            user_media_loading_more.set(false);
             user_media_error.set(None);
             if cached_version == version {
                 return;
             }
-        } else {
+        } else if is_new_target {
             user_media_items.set(Vec::new());
             user_media_loading.set(true);
+            user_media_loading_more.set(false);
             user_media_error.set(None);
         }
 
         let services = user_media_services.clone();
         let expected = target.clone();
         spawn(async move {
-            let result = services
-                .telegram
-                .user_media(target.chat_id, target.sender_id.clone(), 200)
-                .await;
-            match result {
-                Ok(result) if result.success => {
-                    {
-                        let mut cache = user_media_cache.write();
-                        if cache.len() >= USER_MEDIA_CACHE_LIMIT {
-                            cache.clear();
+            let is_current = move || {
+                ui.user_media().as_ref() == Some(&expected) && user_media_generation() == generation
+            };
+            // Fetch the first page fast, then keep appending pages in the
+            // background. The panel renders whatever has arrived so far
+            // instead of waiting for the whole history to be scanned.
+            let mut cursor = None;
+            let mut collected: Vec<TdlibSharedMediaItem> = Vec::new();
+            let mut has_more = true;
+            let mut first_media_rendered = false;
+            let mut failed = false;
+            let mut complete = false;
+
+            while has_more {
+                let page = services
+                    .telegram
+                    .user_media(target.chat_id, target.sender_id.clone(), 30, cursor)
+                    .await;
+                match page {
+                    Ok(page) if page.success => {
+                        if !is_current() {
+                            return;
                         }
-                        cache.insert(key.clone(), (result.media.clone(), version));
+                        for item in page.media {
+                            if !collected.iter().any(|existing| existing.id == item.id) {
+                                collected.push(item);
+                            }
+                        }
+                        let next_cursor = page.next_from_message_id;
+                        has_more = page.has_more && next_cursor != 0 && Some(next_cursor) != cursor;
+                        cursor = Some(next_cursor);
+                        if !collected.is_empty() {
+                            user_media_items.set(collected.clone());
+                            if !first_media_rendered {
+                                first_media_rendered = true;
+                                user_media_loading.set(false);
+                            }
+                            user_media_loading_more.set(has_more);
+                        }
+                        if !has_more {
+                            complete = true;
+                            break;
+                        }
                     }
-                    if ui.user_media().as_ref() == Some(&expected) {
-                        user_media_items.set(result.media);
-                        user_media_error.set(None);
-                        user_media_loading.set(false);
+                    Ok(page) => {
+                        if is_current() {
+                            user_media_error.set(
+                                page.error
+                                    .or_else(|| Some("Mídias do usuário indisponíveis.".into())),
+                            );
+                            user_media_loading.set(false);
+                            user_media_loading_more.set(false);
+                        }
+                        failed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        if is_current() {
+                            user_media_error.set(Some(error));
+                            user_media_loading.set(false);
+                            user_media_loading_more.set(false);
+                        }
+                        failed = true;
+                        break;
                     }
                 }
-                Ok(result) => {
-                    if ui.user_media().as_ref() == Some(&expected) {
-                        user_media_error.set(
-                            result
-                                .error
-                                .or_else(|| Some("Mídias do usuário indisponíveis.".into())),
-                        );
-                        user_media_loading.set(false);
-                    }
+            }
+
+            if !is_current() {
+                return;
+            }
+
+            // Only complete lists are cached; an interrupted progressive load
+            // will simply restart from the newest page next time.
+            if complete && !failed {
+                let mut cache = user_media_cache.write();
+                if cache.len() >= USER_MEDIA_CACHE_LIMIT {
+                    cache.clear();
                 }
-                Err(error) => {
-                    if ui.user_media().as_ref() == Some(&expected) {
-                        user_media_error.set(Some(error));
-                        user_media_loading.set(false);
-                    }
-                }
+                cache.insert(key.clone(), (collected.clone(), version));
+            }
+            user_media_items.set(collected);
+            user_media_loading.set(false);
+            user_media_loading_more.set(false);
+            if !failed {
+                user_media_error.set(None);
             }
         });
     });
@@ -1358,6 +1417,9 @@ fn RealTelegram() -> Element {
                     empty_message:
                         "Esta conversa ainda não tem fotos ou vídeos em cache no TDLib."
                             .to_string(),
+                    group_albums: false,
+                    bulk_download: false,
+                    bulk_disabled: false,
                     on_close: move |_| shared_open.set(false),
                     on_open: move |(item, album): (TdlibSharedMediaItem, Vec<LightboxMedia>)| {
                         ui.lightbox.set(Some(LightboxState {
@@ -1385,6 +1447,9 @@ fn RealTelegram() -> Element {
                     empty_message:
                         "Não foram encontradas fotos ou vídeos enviados por este usuário."
                             .to_string(),
+                    group_albums: true,
+                    bulk_download: true,
+                    bulk_disabled: user_media_loading_more(),
                     on_close: move |_| ui.user_media.set(None),
                     on_open: {
                         let target = target.clone();
@@ -1671,6 +1736,123 @@ fn RealTelegram() -> Element {
     }
 }
 
+struct MediaPanelGroup {
+    album_id: Option<String>,
+    items: Vec<TdlibSharedMediaItem>,
+}
+
+/// Groups loaded media into album sections while keeping the original order.
+/// Album ids can appear in more than one page boundary, so items sharing an id
+/// are folded into the section created by their first occurrence.
+fn group_media_by_album(items: &[TdlibSharedMediaItem]) -> Vec<MediaPanelGroup> {
+    let mut groups: Vec<MediaPanelGroup> = Vec::new();
+    let mut album_positions: HashMap<String, usize> = HashMap::new();
+    for item in items {
+        if let Some(album_id) = item.grouped_id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(&index) = album_positions.get(album_id) {
+                groups[index].items.push(item.clone());
+            } else {
+                album_positions.insert(album_id.to_string(), groups.len());
+                groups.push(MediaPanelGroup {
+                    album_id: Some(album_id.to_string()),
+                    items: vec![item.clone()],
+                });
+            }
+        } else if let Some(last) = groups.last_mut().filter(|group| group.album_id.is_none()) {
+            last.items.push(item.clone());
+        } else {
+            groups.push(MediaPanelGroup {
+                album_id: None,
+                items: vec![item.clone()],
+            });
+        }
+    }
+    groups
+}
+
+fn lightbox_album_for(
+    item: &TdlibSharedMediaItem,
+    album_groups: &HashMap<String, Vec<LightboxMedia>>,
+) -> Vec<LightboxMedia> {
+    item.grouped_id
+        .as_deref()
+        .and_then(|group| album_groups.get(group))
+        .filter(|album| album.len() > 1)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Saves media sequentially so TDLib is not flooded with parallel requests.
+async fn save_media_batch(
+    services: &AppServices,
+    chat_id: i64,
+    items: &[TdlibSharedMediaItem],
+    mut progress: Signal<Option<(usize, usize)>>,
+) -> Result<(), String> {
+    let total = items.len();
+    for (index, item) in items.iter().enumerate() {
+        progress.set(Some((index + 1, total)));
+        let result = services.telegram.save_media(chat_id, item.id, None).await?;
+        if !result.success {
+            return Err(result
+                .error
+                .unwrap_or_else(|| "Não foi possível salvar a mídia.".to_string()));
+        }
+    }
+    let _ = services.enforce_media_cache_limit().await;
+    Ok(())
+}
+
+#[component]
+fn SharedMediaCard(
+    chat_id: i64,
+    item: TdlibSharedMediaItem,
+    album: Vec<LightboxMedia>,
+    on_open: EventHandler<(TdlibSharedMediaItem, Vec<LightboxMedia>)>,
+) -> Element {
+    rsx! {
+        div {
+            class: "shared-item",
+            onclick: {
+                let item = item.clone();
+                let album = album.clone();
+                move |_| on_open.call((item.clone(), album.clone()))
+            },
+            MessageThumbnail {
+                chat_id,
+                message_id: item.id,
+                is_video: item.is_video,
+                on_open: {
+                    let item = item.clone();
+                    let album = album.clone();
+                    move |_| on_open.call((item.clone(), album.clone()))
+                },
+            }
+            div { class: "shared-meta",
+                if !item.sender_name.trim().is_empty() {
+                    strong { "{item.sender_name}" }
+                } else {
+                    strong {
+                        if item.is_video {
+                            "Vídeo"
+                        } else if item.is_photo {
+                            "Foto"
+                        } else {
+                            "Mídia"
+                        }
+                    }
+                }
+                span {
+                    "{format_timestamp(item.date)}"
+                    if let Some(size) = item.media_size {
+                        " · {format_bytes(size)}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn MediaPanel(
     panel_id: String,
@@ -1682,17 +1864,26 @@ fn MediaPanel(
     error: Option<String>,
     empty_title: String,
     empty_message: String,
+    group_albums: bool,
+    bulk_download: bool,
+    bulk_disabled: bool,
     on_close: EventHandler<()>,
     on_open: EventHandler<(TdlibSharedMediaItem, Vec<LightboxMedia>)>,
 ) -> Element {
+    let services = use_context::<AppServices>();
+    let mut bulk_saving = use_signal(|| false);
+    let mut bulk_progress = use_signal(|| None::<(usize, usize)>);
+    let mut bulk_error = use_signal(|| None::<String>);
+    let mut saving_album = use_signal(|| None::<String>);
+
     let count = items.len();
     let subtitle_line = match count {
         0 => subtitle,
         1 => format!("{subtitle} · 1 mídia"),
         count => format!("{subtitle} · {count} mídias"),
     };
-    // Shared-media panels are flat lists. Group the items once so opening any
-    // item that belongs to an album can feed the lightbox carousel.
+    // Group the items once so opening any item that belongs to an album can
+    // feed the lightbox carousel.
     let album_groups: HashMap<String, Vec<LightboxMedia>> = {
         let mut groups: HashMap<String, Vec<LightboxMedia>> = HashMap::new();
         for item in &items {
@@ -1710,6 +1901,9 @@ fn MediaPanel(
         }
         groups
     };
+    let groups = group_media_by_album(&items);
+    let bulk_items = items.clone();
+    let bulk_error_message = bulk_error();
 
     // Focus the panel so Escape closes it without leaking a global listener.
     let focus_id = panel_id.clone();
@@ -1752,25 +1946,79 @@ fn MediaPanel(
                         strong { "{title}" }
                         span { class: "hint", "{subtitle_line}" }
                     }
-                    button {
-                        class: "btn small ghost",
-                        onclick: move |_| on_close.call(()),
-                        "Fechar"
+                    div { class: "media-panel-actions",
+                        if bulk_download && !items.is_empty() {
+                            button {
+                                class: "icon-button",
+                                title: if bulk_disabled {
+                                    "Aguarde o carregamento das mídias"
+                                } else {
+                                    "Baixar todas as mídias"
+                                },
+                                aria_label: "Baixar todas as mídias",
+                                disabled: bulk_disabled || bulk_saving() || saving_album().is_some(),
+                                onclick: {
+                                    let services = services.clone();
+                                    let items = bulk_items.clone();
+                                    move |_| {
+                                        if bulk_saving() || bulk_disabled {
+                                            return;
+                                        }
+                                        bulk_saving.set(true);
+                                        bulk_progress.set(None);
+                                        bulk_error.set(None);
+                                        let services = services.clone();
+                                        let items = items.clone();
+                                        spawn(async move {
+                                            match save_media_batch(
+                                                &services,
+                                                chat_id,
+                                                &items,
+                                                bulk_progress,
+                                            )
+                                            .await
+                                            {
+                                                Ok(()) => {}
+                                                Err(error) => bulk_error.set(Some(error)),
+                                            }
+                                            bulk_progress.set(None);
+                                            bulk_saving.set(false);
+                                        });
+                                    }
+                                },
+                                Icon { name: IconName::Download, size: 16, class: "icon" }
+                                if bulk_saving() {
+                                    if let Some((done, total)) = bulk_progress() {
+                                        span { class: "hint", "{done}/{total}" }
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn small ghost",
+                            onclick: move |_| on_close.call(()),
+                            "Fechar"
+                        }
                     }
                 }
                 if let Some(error) = error {
                     p { class: "error-banner", "{error}" }
                 }
+                if let Some(error) = bulk_error_message {
+                    p { class: "error-banner", "{error}" }
+                }
                 if loading {
-                    div { class: "shared-grid",
-                        for index in 0..9 {
-                            div {
-                                key: "skeleton-{index}",
-                                class: "shared-item shared-skeleton",
-                                div { class: "skeleton-thumb" }
-                                div { class: "shared-meta",
-                                    div { class: "skeleton-line" }
-                                    div { class: "skeleton-line short" }
+                    div { class: "shared-scroll",
+                        div { class: "shared-grid",
+                            for index in 0..9 {
+                                div {
+                                    key: "skeleton-{index}",
+                                    class: "shared-item shared-skeleton",
+                                    div { class: "skeleton-thumb" }
+                                    div { class: "shared-meta",
+                                        div { class: "skeleton-line" }
+                                        div { class: "skeleton-line short" }
+                                    }
                                 }
                             }
                         }
@@ -1784,58 +2032,127 @@ fn MediaPanel(
                         }
                     }
                 } else {
-                    div { class: "shared-grid",
-                        for item in items.iter().cloned() {
-                            {
-                                let album = item
-                                    .grouped_id
-                                    .as_deref()
-                                    .and_then(|group| album_groups.get(group))
-                                    .filter(|album| album.len() > 1)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                rsx! {
-                                    div {
-                                        key: "{item.id}",
-                                        class: "shared-item",
-                                        onclick: {
-                                            let item = item.clone();
-                                            let album = album.clone();
-                                            move |_| on_open.call((item.clone(), album.clone()))
-                                        },
-                                        MessageThumbnail {
-                                            chat_id,
-                                            message_id: item.id,
-                                            is_video: item.is_video,
-                                            on_open: {
-                                                let item = item.clone();
-                                                let album = album.clone();
-                                                move |_| on_open.call((item.clone(), album.clone()))
-                                            },
+                    div { class: "shared-scroll",
+                        if group_albums {
+                            for (index, group) in groups.iter().enumerate() {
+                                if let Some(album_id) =
+                                    group.album_id.as_ref().filter(|_| group.items.len() > 1)
+                                {
+                                    section {
+                                        key: "album-{album_id}",
+                                        class: "shared-album",
+                                        header { class: "shared-album-header",
+                                            div {
+                                                strong { "Álbum" }
+                                                span { class: "hint",
+                                                    "{group.items.len()} mídias · {format_timestamp(group.items[0].date)}"
+                                                }
+                                            }
+                                            button {
+                                                class: "icon-button",
+                                                title: if bulk_disabled {
+                                                    "Aguarde o carregamento das mídias"
+                                                } else {
+                                                    "Baixar álbum"
+                                                },
+                                                aria_label: "Baixar álbum",
+                                                disabled: bulk_disabled
+                                                    || saving_album().is_some()
+                                                    || bulk_saving(),
+                                                onclick: {
+                                                    let album_id = album_id.clone();
+                                                    let group_items = group.items.clone();
+                                                    let services = services.clone();
+                                                    move |_| {
+                                                        if bulk_disabled
+                                                            || saving_album().is_some()
+                                                            || bulk_saving()
+                                                        {
+                                                            return;
+                                                        }
+                                                        saving_album.set(Some(album_id.clone()));
+                                                        bulk_progress.set(None);
+                                                        bulk_error.set(None);
+                                                        let services = services.clone();
+                                                        let group_items = group_items.clone();
+                                                        spawn(async move {
+                                                            match save_media_batch(
+                                                                &services,
+                                                                chat_id,
+                                                                &group_items,
+                                                                bulk_progress,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(()) => {}
+                                                                Err(error) => bulk_error.set(Some(error)),
+                                                            }
+                                                            bulk_progress.set(None);
+                                                            saving_album.set(None);
+                                                        });
+                                                    }
+                                                },
+                                                Icon { name: IconName::Download, size: 15, class: "icon" }
+                                            }
                                         }
-                                        div { class: "shared-meta",
-                                            if !item.sender_name.trim().is_empty() {
-                                                strong { "{item.sender_name}" }
-                                            } else {
-                                                strong {
-                                                    if item.is_video {
-                                                        "Vídeo"
-                                                    } else if item.is_photo {
-                                                        "Foto"
-                                                    } else {
-                                                        "Mídia"
+                                        div { class: "shared-grid",
+                                            for item in group.items.iter().cloned() {
+                                                {
+                                                    let album = lightbox_album_for(&item, &album_groups);
+                                                    rsx! {
+                                                        SharedMediaCard {
+                                                            key: "{item.id}",
+                                                            chat_id,
+                                                            item,
+                                                            album,
+                                                            on_open,
+                                                        }
                                                     }
                                                 }
                                             }
-                                            span {
-                                                "{format_timestamp(item.date)}"
-                                                if let Some(size) = item.media_size {
-                                                    " · {format_bytes(size)}"
+                                        }
+                                    }
+                                } else {
+                                    div { key: "singles-{index}", class: "shared-grid",
+                                        for item in group.items.iter().cloned() {
+                                            {
+                                                let album = lightbox_album_for(&item, &album_groups);
+                                                rsx! {
+                                                    SharedMediaCard {
+                                                        key: "{item.id}",
+                                                        chat_id,
+                                                        item,
+                                                        album,
+                                                        on_open,
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
+                        } else {
+                            div { class: "shared-grid",
+                                for item in items.iter().cloned() {
+                                    {
+                                        let album = lightbox_album_for(&item, &album_groups);
+                                        rsx! {
+                                            SharedMediaCard {
+                                                key: "{item.id}",
+                                                chat_id,
+                                                item,
+                                                album,
+                                                on_open,
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if bulk_disabled {
+                            div { class: "shared-loading-more",
+                                div { class: "spinner" }
+                                span { "Carregando mais mídias..." }
                             }
                         }
                     }
@@ -2159,7 +2476,6 @@ fn mass_status_label(status: &str) -> &str {
 fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
-    let toasts = ui.toasts;
     let save_services = services.clone();
     let resource_state = state.clone();
     let resource = use_resource(move || {
@@ -2173,6 +2489,7 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
         }
     });
     let mut saving = use_signal(|| false);
+    let mut saving_album = use_signal(|| false);
     let mut save_error = use_signal(|| None::<String>);
 
     let (source, mime_type, load_error) = match &*resource.read_unchecked() {
@@ -2210,12 +2527,104 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                             span { class: "hint", "Mensagem {state.message_id}" }
                         }
                     }
-                    button {
-                        class: "icon-button lightbox-close",
-                        title: "Fechar",
-                        aria_label: "Fechar",
-                        onclick: move |_| on_close.call(()),
-                        Icon { name: IconName::Close, size: 16, class: "icon" }
+                    div { class: "lightbox-actions",
+                        button {
+                            class: "icon-button",
+                            title: "Baixar mídia",
+                            aria_label: "Baixar mídia",
+                            disabled: saving() || saving_album(),
+                            onclick: {
+                                let services = save_services.clone();
+                                move |_| {
+                                    if saving() || saving_album() {
+                                        return;
+                                    }
+                                    saving.set(true);
+                                    save_error.set(None);
+                                    let services = services.clone();
+                                    let chat_id = state.chat_id;
+                                    let message_id = state.message_id;
+                                    spawn(async move {
+                                        match services
+                                            .telegram
+                                            .save_media(chat_id, message_id, None)
+                                            .await
+                                        {
+                                            Ok(result) if result.success => {
+                                                let _ = services.enforce_media_cache_limit().await;
+                                            }
+                                            Ok(result) => save_error.set(
+                                                result.error.or_else(|| {
+                                                    Some("Não foi possível salvar a mídia.".into())
+                                                }),
+                                            ),
+                                            Err(error) => save_error.set(Some(error)),
+                                        }
+                                        saving.set(false);
+                                    });
+                                }
+                            },
+                            Icon { name: IconName::FileDownload, size: 16, class: "icon" }
+                        }
+                        if has_album {
+                            button {
+                                class: "icon-button",
+                                title: "Baixar álbum",
+                                aria_label: "Baixar álbum",
+                                disabled: saving() || saving_album(),
+                                onclick: {
+                                    let services = save_services.clone();
+                                    let album = state.album.clone();
+                                    move |_| {
+                                        if saving() || saving_album() {
+                                            return;
+                                        }
+                                        saving_album.set(true);
+                                        save_error.set(None);
+                                        let services = services.clone();
+                                        let chat_id = state.chat_id;
+                                        let album = album.clone();
+                                        spawn(async move {
+                                            let mut failure = None;
+                                            for item in album {
+                                                match services
+                                                    .telegram
+                                                    .save_media(chat_id, item.message_id, None)
+                                                    .await
+                                                {
+                                                    Ok(result) if result.success => {}
+                                                    Ok(result) => {
+                                                        failure = result.error.or_else(|| {
+                                                            Some("Não foi possível salvar o álbum.".into())
+                                                        });
+                                                        break;
+                                                    }
+                                                    Err(error) => {
+                                                        failure = Some(error);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if failure.is_none() {
+                                                let _ = services.enforce_media_cache_limit().await;
+                                            }
+                                            if let Some(error) = failure {
+                                                save_error.set(Some(error));
+                                            }
+                                            saving_album.set(false);
+                                        });
+                                    }
+                                },
+                                Icon { name: IconName::Download, size: 16, class: "icon" }
+                            }
+                        }
+                        button {
+                            class: "icon-button lightbox-close",
+                            title: "Fechar",
+                            aria_label: "Fechar",
+                            onclick: move |_| on_close.call(()),
+                            Icon { name: IconName::Close, size: 16, class: "icon" }
+                        }
                     }
                 }
                 div { class: "lightbox-stage",
@@ -2296,48 +2705,6 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                             "{mime}"
                         } else {
                             ""
-                        }
-                    }
-                    div { class: "topbar-actions",
-                        button {
-                            class: "btn primary small",
-                            disabled: saving(),
-                            onclick: {
-                                let services = save_services.clone();
-                                move |_| {
-                                    saving.set(true);
-                                    save_error.set(None);
-                                    let services = services.clone();
-                                    let chat_id = state.chat_id;
-                                    let message_id = state.message_id;
-                                    spawn(async move {
-                                        match services
-                                            .telegram
-                                            .save_media(chat_id, message_id, None)
-                                            .await
-                                        {
-                                            Ok(result) if result.success => {
-                                                let path = result.file_path.unwrap_or_default();
-                                                let _ = services.enforce_media_cache_limit().await;
-                                                push_toast(
-                                                    toasts,
-                                                    format!("Mídia salva em {path}."),
-                                                    ToastKind::Success,
-                                                )
-                                            }
-                                            Ok(result) => save_error.set(
-                                                result.error.or_else(|| {
-                                                    Some("Não foi possível salvar a mídia.".into())
-                                                }),
-                                            ),
-                                            Err(error) => save_error.set(Some(error)),
-                                        }
-                                        saving.set(false);
-                                    });
-                                }
-                            },
-                            Icon { name: IconName::Save, size: 14, class: "icon" }
-                            if saving() { "Salvando..." } else { "Salvar" }
                         }
                     }
                 }
@@ -3554,5 +3921,44 @@ mod tests {
             Some(false)
         );
         assert_eq!(dropped_media_kind("notes.txt", None), None);
+    }
+
+    #[test]
+    fn groups_album_items_across_page_boundaries() {
+        fn media(id: i64, album: Option<&str>) -> TdlibSharedMediaItem {
+            TdlibSharedMediaItem {
+                id,
+                date: 0,
+                sender_id: "42".into(),
+                sender_name: String::new(),
+                has_media: true,
+                is_photo: true,
+                is_video: false,
+                grouped_id: album.map(str::to_string),
+                media_size: None,
+            }
+        }
+
+        let items = vec![
+            media(1, None),
+            media(2, Some("a")),
+            media(3, Some("a")),
+            media(4, None),
+            media(5, Some("b")),
+            media(6, Some("a")),
+        ];
+        let groups = group_media_by_album(&items);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[1].album_id.as_deref(), Some("a"));
+        assert_eq!(
+            groups[1]
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 6]
+        );
+        assert_eq!(groups[2].items[0].id, 4);
+        assert_eq!(groups[3].album_id.as_deref(), Some("b"));
     }
 }
