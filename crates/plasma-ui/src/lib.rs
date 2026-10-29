@@ -517,6 +517,9 @@ fn Shell() -> Element {
     let tab = ui.tab();
     let auth_user = ui.auth_user();
     let preview = ui.preview_mode();
+    let download_active = ui.downloads().iter().any(|item| item.is_active());
+    let download_failed = ui.downloads().iter().any(|item| item.status == "failed");
+    let download_badge = download_active || download_failed;
 
     rsx! {
         div { class: "shell",
@@ -531,6 +534,17 @@ fn Shell() -> Element {
                         "data-tip": "{item.label()}",
                         onclick: move |_| ui.tab.set(item),
                         Icon { name: item.rail_icon(), size: 20, class: "icon" }
+                        if item == Tab::Downloads && download_badge {
+                            span {
+                                class: "rail-badge",
+                                title: if download_active {
+                                    "Download em andamento"
+                                } else {
+                                    "Há downloads com falha"
+                                },
+                                "!"
+                            }
+                        }
                     }
                 }
                 div { class: "rail-spacer" }
