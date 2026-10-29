@@ -14,8 +14,8 @@ pub mod views;
 
 use dioxus::prelude::*;
 use downloads::{
-    apply_download_done, apply_download_error, apply_download_progress, persist_downloads,
-    sync_telegram_downloads, DownloadRecord,
+    apply_download_done, apply_download_error, apply_download_progress,
+    apply_telegram_media_progress, persist_downloads, sync_telegram_downloads, DownloadRecord,
 };
 use icons::Icon;
 use plasma_core::AppEvent;
@@ -320,6 +320,43 @@ pub fn App() -> Element {
                                 matches,
                                 unreadable,
                             }));
+                    }
+                    Ok(AppEvent::MediaProgress {
+                        chat_id,
+                        message_id,
+                        downloaded_bytes,
+                        total_bytes,
+                        state,
+                    }) => {
+                        let id = format!("telegram-{chat_id}-{message_id}");
+                        if ui
+                            .downloads()
+                            .iter()
+                            .any(|item| item.id == id && item.is_active())
+                        {
+                            match state.as_str() {
+                                "ready" => apply_telegram_media_progress(
+                                    ui,
+                                    &id,
+                                    total_bytes,
+                                    total_bytes,
+                                    Some(99.5),
+                                ),
+                                "downloading" => {
+                                    let percent = (total_bytes > 0).then(|| {
+                                        (downloaded_bytes as f64 / total_bytes as f64) * 100.0
+                                    });
+                                    apply_telegram_media_progress(
+                                        ui,
+                                        &id,
+                                        downloaded_bytes,
+                                        total_bytes,
+                                        percent,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     Ok(AppEvent::DownloadProgress {
                         id,

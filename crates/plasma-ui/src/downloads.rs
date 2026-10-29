@@ -146,6 +146,36 @@ pub fn apply_download_progress(
     ui.downloads.set(items);
 }
 
+/// Applies a TDLib media progress event without touching the batch counters or
+/// cancelability that the Telegram queue/save logic already owns.
+pub fn apply_telegram_media_progress(
+    mut ui: UiState,
+    id: &str,
+    downloaded: u64,
+    total: u64,
+    percent: Option<f64>,
+) {
+    let mut items = ui.downloads();
+    let Some(item) = items.iter_mut().find(|item| item.id == id) else {
+        return;
+    };
+    if item.is_terminal() {
+        return;
+    }
+    item.status = "downloading".to_string();
+    item.progress = if let Some(percent) = percent {
+        percent.clamp(0.0, 99.5)
+    } else if total > 0 {
+        ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 99.5)
+    } else {
+        item.progress.max(1.0)
+    };
+    if total > 0 {
+        item.file_size = Some(total.min(i64::MAX as u64) as i64);
+    }
+    ui.downloads.set(items);
+}
+
 pub fn apply_download_done(mut ui: UiState, id: &str) {
     let mut items = ui.downloads();
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
