@@ -1662,6 +1662,7 @@ fn RealTelegram() -> Element {
                     MassDownloadPanel {
                         chat,
                         topics: mass_topics,
+                        initial_topic: topic.clone(),
                         on_close: move |_| ui.mass_download_open.set(false),
                     }
                 }
@@ -1848,6 +1849,7 @@ fn MediaPanel(
 fn MassDownloadPanel(
     chat: TdlibChatInfo,
     topics: Vec<TdlibForumTopicInfo>,
+    initial_topic: Option<TdlibForumTopicInfo>,
     on_close: EventHandler<()>,
 ) -> Element {
     let services = use_context::<AppServices>();
@@ -1859,7 +1861,11 @@ fn MassDownloadPanel(
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
     let mut folder = use_signal(|| default_folder);
-    let mut selected_topic_id = use_signal(|| "all".to_string());
+    let initial_topic_id = initial_topic
+        .as_ref()
+        .map(|topic| topic.id.to_string())
+        .unwrap_or_else(|| "all".to_string());
+    let mut selected_topic_id = use_signal(|| initial_topic_id);
     let mut split_by_user = use_signal(|| false);
     let mut split_by_album = use_signal(|| false);
     let mut album_split_mode = use_signal(|| "separator".to_string());
