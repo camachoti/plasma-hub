@@ -15,7 +15,7 @@ pub mod views;
 use dioxus::prelude::*;
 use downloads::{
     apply_download_done, apply_download_error, apply_download_progress, persist_downloads,
-    DownloadRecord,
+    sync_telegram_downloads, DownloadRecord,
 };
 use icons::Icon;
 use plasma_core::AppEvent;
@@ -277,7 +277,21 @@ pub fn App() -> Element {
                             .filter_map(|item| {
                                 serde_json::from_value::<TdlibDownloadItem>(item).ok()
                             })
-                            .collect();
+                            .collect::<Vec<_>>();
+                        let chat_title = ui
+                            .chats()
+                            .into_iter()
+                            .find(|chat| chat.id == chat_id.to_string())
+                            .map(|chat| chat.title);
+                        sync_telegram_downloads(
+                            event_services.clone(),
+                            ui,
+                            chat_id,
+                            chat_title,
+                            total,
+                            downloaded,
+                            &items,
+                        );
                         ui.mass_download_progress.set(Some(MassDownloadProgress {
                             chat_id,
                             total,

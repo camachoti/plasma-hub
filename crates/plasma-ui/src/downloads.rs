@@ -4,10 +4,11 @@
 //! SQLite. The Rust shell uses the same table and JSON shape so data from older
 //! versions is not lost.
 
-use crate::state::{now_millis, push_toast, AppServices, ToastKind, UiState};
+use crate::state::{now_millis, AppServices, UiState};
 use dioxus::prelude::WritableExt;
 use plasma_core::AppEnv;
 use plasma_store::download_history_get;
+use plasma_telegram::TdlibDownloadItem;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -215,6 +216,100 @@ fn spawn_persist(services: AppServices, items: Vec<DownloadRecord>) {
     });
 }
 
+/// Mirrors Telegram mass-download items into the shared download queue so they
+/// show up on the Downloads screen while they are still running.
+pub fn sync_telegram_downloads(
+    services: AppServices,
+    mut ui: UiState,
+    chat_id: i64,
+    chat_title: Option<String>,
+    total: usize,
+    downloaded: f64,
+    items: &[TdlibDownloadItem],
+) {
+    if items.is_empty() {
+        return;
+    }
+    let batch_id = format!("telegram-{chat_id}");
+    let created_at = now_millis();
+    let mut records = ui.downloads();
+    let mut terminal_changed = false;
+
+    for item in items {
+        let id = format!("telegram-{chat_id}-{}", item.message_id);
+        let status = telegram_status(&item.status);
+        let progress = if status == "completed" {
+            100.0
+        } else {
+            f64::from(item.progress).clamp(0.0, 99.5)
+        };
+        let size = (item.size > 0).then_some(item.size);
+
+        if let Some(record) = records.iter_mut().find(|record| record.id == id) {
+            if record.status != status {
+                if matches!(status, "completed" | "failed" | "canceled") && !record.is_terminal() {
+                    terminal_changed = true;
+                }
+                record.status = status.to_string();
+            }
+            record.progress = progress;
+            if item.file_path.is_some() {
+                record.file_path = item.file_path.clone();
+            }
+            record.file_size = size.or(record.file_size);
+            record.batch_total = Some(total as i64);
+            record.batch_downloaded = Some(downloaded.max(0.0) as i64);
+            record.can_cancel = Some(status == "downloading");
+            record.can_retry = Some(false);
+            if status != "failed" {
+                record.error = None;
+            }
+        } else {
+            records.push(DownloadRecord {
+                id,
+                chat_id: Some(chat_id.to_string()),
+                message_id: Some(item.message_id),
+                file_name: item.name.clone(),
+                progress,
+                status: status.to_string(),
+                file_path: item.file_path.clone(),
+                file_size: size,
+                platform: Some("telegram".to_string()),
+                batch_id: Some(batch_id.clone()),
+                batch_title: chat_title.clone(),
+                batch_kind: Some("chat".to_string()),
+                batch_total: Some(total as i64),
+                batch_downloaded: Some(downloaded.max(0.0) as i64),
+                created_at: Some(created_at),
+                can_cancel: Some(status == "downloading"),
+                can_retry: Some(false),
+                ..DownloadRecord::default()
+            });
+            if matches!(status, "completed" | "failed" | "canceled") {
+                terminal_changed = true;
+            }
+        }
+    }
+
+    if records.len() > 300 {
+        let drain = records.len() - 300;
+        records.drain(0..drain);
+    }
+    ui.downloads.set(records.clone());
+    if terminal_changed {
+        spawn_persist(services, records);
+    }
+}
+
+fn telegram_status(status: &str) -> &'static str {
+    match status {
+        "completed" | "skipped" => "completed",
+        "failed" => "failed",
+        "stopped" => "canceled",
+        _ => "downloading",
+    }
+}
+
 /// Native handle used by the Rust UI for queue operations.
 #[derive(Clone)]
 pub struct DownloadHandle {
@@ -370,10 +465,6 @@ pub fn new_download_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let counter = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("web-{}-{counter}", now_millis())
-}
-
-pub fn toast_download_error(ui: UiState, message: impl Into<String>) {
-    push_toast(ui.toasts, message, ToastKind::Error);
 }
 
 #[cfg(test)]
