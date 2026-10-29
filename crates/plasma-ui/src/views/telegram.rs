@@ -1762,13 +1762,15 @@ fn MediaPanel(
                 }
                 if loading {
                     div { class: "shared-grid",
-                        for index in 0..6 {
+                        for index in 0..9 {
                             div {
                                 key: "skeleton-{index}",
                                 class: "shared-item shared-skeleton",
                                 div { class: "skeleton-thumb" }
-                                div { class: "skeleton-line" }
-                                div { class: "skeleton-line short" }
+                                div { class: "shared-meta",
+                                    div { class: "skeleton-line" }
+                                    div { class: "skeleton-line short" }
+                                }
                             }
                         }
                     }
