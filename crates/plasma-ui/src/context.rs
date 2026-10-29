@@ -5,7 +5,7 @@
 //! the actions live here so the behaviour stays consistent between the
 //! timeline, the chat list and the download history.
 
-use crate::downloads::DownloadRecord;
+use crate::downloads::{save_telegram_media, DownloadRecord, TelegramSaveBatch};
 use crate::icons::IconName;
 use crate::state::{
     push_toast, toggle_topic_hidden, AppServices, LightboxMedia, LightboxState,
@@ -501,29 +501,17 @@ pub fn handle_context_action(
 /// Saves a single message media to the configured download folder.
 pub fn save_media(services: AppServices, ui: UiState, chat_id: i64, message: TdlibMessageInfo) {
     let message_id = message.id;
+    let kind = if message.is_video {
+        "Vídeo"
+    } else if message.is_photo {
+        "Foto"
+    } else {
+        "Mídia"
+    };
+    let file_name = format!("{kind} {message_id}");
     spawn(async move {
-        match services
-            .telegram
-            .save_media(chat_id, message_id, None)
-            .await
-        {
-            Ok(result) if result.success => {
-                let _ = services.enforce_media_cache_limit().await;
-                push_toast(
-                    ui.toasts,
-                    format!("Mídia salva em {}.", result.file_path.unwrap_or_default()),
-                    ToastKind::Success,
-                )
-            }
-            Ok(result) => push_toast(
-                ui.toasts,
-                result
-                    .error
-                    .unwrap_or_else(|| "Não foi possível salvar a mídia.".to_string()),
-                ToastKind::Error,
-            ),
-            Err(error) => push_toast(ui.toasts, error, ToastKind::Error),
-        }
+        let _ =
+            save_telegram_media(&services, ui, chat_id, message_id, file_name, None, None).await;
     });
 }
 
@@ -538,55 +526,38 @@ pub fn save_album(
         return;
     }
     let total = messages.len();
-    push_toast(
-        ui.toasts,
-        format!("Salvando {total} mídias do álbum..."),
-        ToastKind::Info,
-    );
+    let batch = TelegramSaveBatch {
+        id: format!(
+            "telegram-album-{chat_id}-{}",
+            messages
+                .first()
+                .map(|message| message.id)
+                .unwrap_or_default()
+        ),
+        title: format!("Álbum · {total} mídias"),
+        total,
+    };
     spawn(async move {
-        let mut saved = 0usize;
-        let mut last_path = None;
-        for message in messages {
-            if let Ok(result) = services
-                .telegram
-                .save_media(chat_id, message.id, None)
-                .await
-            {
-                if result.success {
-                    saved += 1;
-                    last_path = result.file_path.or(last_path);
-                }
-            }
-        }
-        if saved > 0 {
-            let _ = services.enforce_media_cache_limit().await;
-        }
-        let failed = total - saved;
-        let folder = last_path
-            .and_then(|path| {
-                std::path::Path::new(&path)
-                    .parent()
-                    .map(|parent| parent.display().to_string())
-            })
-            .unwrap_or_default();
-        if failed == 0 {
-            let detail = if folder.is_empty() {
-                String::new()
+        for (index, message) in messages.iter().enumerate() {
+            let kind = if message.is_video {
+                "Vídeo"
+            } else if message.is_photo {
+                "Foto"
             } else {
-                format!(" em {folder}")
+                "Mídia"
             };
-            push_toast(
-                ui.toasts,
-                format!("Álbum salvo: {saved} mídias{detail}."),
-                ToastKind::Success,
-            );
-        } else {
-            push_toast(
-                ui.toasts,
-                format!("Álbum salvo parcialmente: {saved} de {total} mídias."),
-                ToastKind::Error,
-            );
+            let _ = save_telegram_media(
+                &services,
+                ui,
+                chat_id,
+                message.id,
+                format!("{kind} {}", message.id),
+                None,
+                Some((&batch, index + 1)),
+            )
+            .await;
         }
+        let _ = services.enforce_media_cache_limit().await;
     });
 }
 

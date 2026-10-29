@@ -2,6 +2,7 @@
 //! a local preview on the same shell before login.
 
 use crate::context::{ContextMenuState, ContextTarget};
+use crate::downloads::{save_telegram_media, TelegramSaveBatch};
 use crate::icons::{Icon, IconName};
 use crate::state::{
     load_hidden_topics, merge_messages, message_cache_key, push_toast, set_if_changed,
@@ -1785,14 +1786,25 @@ fn lightbox_album_for(
 /// Saves media sequentially so TDLib is not flooded with parallel requests.
 async fn save_media_batch(
     services: &AppServices,
+    ui: UiState,
     chat_id: i64,
     items: &[TdlibSharedMediaItem],
+    batch: Option<&TelegramSaveBatch>,
     mut progress: Signal<Option<(usize, usize)>>,
 ) -> Result<(), String> {
     let total = items.len();
     for (index, item) in items.iter().enumerate() {
         progress.set(Some((index + 1, total)));
-        let result = services.telegram.save_media(chat_id, item.id, None).await?;
+        let result = save_telegram_media(
+            services,
+            ui,
+            chat_id,
+            item.id,
+            format!("Mídia {}", item.id),
+            item.media_size,
+            batch.map(|batch| (batch, index + 1)),
+        )
+        .await?;
         if !result.success {
             return Err(result
                 .error
@@ -1871,12 +1883,24 @@ fn MediaPanel(
     on_open: EventHandler<(TdlibSharedMediaItem, Vec<LightboxMedia>)>,
 ) -> Element {
     let services = use_context::<AppServices>();
+    let ui = use_context::<UiState>();
     let mut bulk_saving = use_signal(|| false);
     let mut bulk_progress = use_signal(|| None::<(usize, usize)>);
     let mut bulk_error = use_signal(|| None::<String>);
     let mut saving_album = use_signal(|| None::<String>);
 
     let count = items.len();
+    let download_batch = TelegramSaveBatch {
+        id: format!(
+            "telegram-user-{chat_id}-{}",
+            items
+                .first()
+                .map(|item| item.sender_id.as_str())
+                .unwrap_or("all")
+        ),
+        title: format!("{title} · {subtitle}"),
+        total: count,
+    };
     let subtitle_line = match count {
         0 => subtitle,
         1 => format!("{subtitle} · 1 mídia"),
@@ -1960,6 +1984,7 @@ fn MediaPanel(
                                 onclick: {
                                     let services = services.clone();
                                     let items = bulk_items.clone();
+                                    let batch = download_batch.clone();
                                     move |_| {
                                         if bulk_saving() || bulk_disabled {
                                             return;
@@ -1969,11 +1994,14 @@ fn MediaPanel(
                                         bulk_error.set(None);
                                         let services = services.clone();
                                         let items = items.clone();
+                                        let batch = batch.clone();
                                         spawn(async move {
                                             match save_media_batch(
                                                 &services,
+                                                ui,
                                                 chat_id,
                                                 &items,
+                                                Some(&batch),
                                                 bulk_progress,
                                             )
                                             .await
@@ -2063,6 +2091,17 @@ fn MediaPanel(
                                                     let album_id = album_id.clone();
                                                     let group_items = group.items.clone();
                                                     let services = services.clone();
+                                                    let album_batch = TelegramSaveBatch {
+                                                        id: format!(
+                                                            "{}-album-{album_id}",
+                                                            download_batch.id
+                                                        ),
+                                                        title: format!(
+                                                            "{} · álbum",
+                                                            download_batch.title
+                                                        ),
+                                                        total: group_items.len(),
+                                                    };
                                                     move |_| {
                                                         if bulk_disabled
                                                             || saving_album().is_some()
@@ -2075,11 +2114,14 @@ fn MediaPanel(
                                                         bulk_error.set(None);
                                                         let services = services.clone();
                                                         let group_items = group_items.clone();
+                                                        let album_batch = album_batch.clone();
                                                         spawn(async move {
                                                             match save_media_batch(
                                                                 &services,
+                                                                ui,
                                                                 chat_id,
                                                                 &group_items,
+                                                                Some(&album_batch),
                                                                 bulk_progress,
                                                             )
                                                             .await
@@ -2545,10 +2587,16 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                     let chat_id = state.chat_id;
                                     let message_id = state.message_id;
                                     spawn(async move {
-                                        match services
-                                            .telegram
-                                            .save_media(chat_id, message_id, None)
-                                            .await
+                                        match save_telegram_media(
+                                            &services,
+                                            ui,
+                                            chat_id,
+                                            message_id,
+                                            format!("Mídia {message_id}"),
+                                            None,
+                                            None,
+                                        )
+                                        .await
                                         {
                                             Ok(result) if result.success => {
                                                 let _ = services.enforce_media_cache_limit().await;
@@ -2575,6 +2623,18 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                 onclick: {
                                     let services = save_services.clone();
                                     let album = state.album.clone();
+                                    let batch = TelegramSaveBatch {
+                                        id: format!(
+                                            "telegram-album-{}-{}",
+                                            state.chat_id,
+                                            album
+                                                .first()
+                                                .map(|item| item.message_id)
+                                                .unwrap_or(state.message_id)
+                                        ),
+                                        title: format!("Álbum · {}", state.title),
+                                        total: album.len(),
+                                    };
                                     move |_| {
                                         if saving() || saving_album() {
                                             return;
@@ -2584,14 +2644,21 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                         let services = services.clone();
                                         let chat_id = state.chat_id;
                                         let album = album.clone();
+                                        let batch = batch.clone();
                                         spawn(async move {
                                             let mut failure = None;
-                                            for item in album {
-                                                match services
-                                                    .telegram
-                                                    .save_media(chat_id, item.message_id, None)
-                                                    .await
-                                                {
+                                            for (index, item) in album.iter().enumerate() {
+                                                let result = save_telegram_media(
+                                                    &services,
+                                                    ui,
+                                                    chat_id,
+                                                    item.message_id,
+                                                    format!("Mídia {}", item.message_id),
+                                                    None,
+                                                    Some((&batch, index + 1)),
+                                                )
+                                                .await;
+                                                match result {
                                                     Ok(result) if result.success => {}
                                                     Ok(result) => {
                                                         failure = result.error.or_else(|| {

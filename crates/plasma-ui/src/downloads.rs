@@ -8,7 +8,7 @@ use crate::state::{now_millis, AppServices, UiState};
 use dioxus::prelude::WritableExt;
 use plasma_core::AppEnv;
 use plasma_store::download_history_get;
-use plasma_telegram::TdlibDownloadItem;
+use plasma_telegram::{NativeSavedMedia, TdlibDownloadItem};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -299,6 +299,95 @@ pub fn sync_telegram_downloads(
     if terminal_changed {
         spawn_persist(services, records);
     }
+}
+
+/// A group of Telegram media saved together from the same panel or album.
+#[derive(Clone, Debug)]
+pub struct TelegramSaveBatch {
+    pub id: String,
+    pub title: String,
+    pub total: usize,
+}
+
+/// Saves one Telegram media and mirrors it into the shared download queue so
+/// single, album and bulk saves show up on the Downloads screen like mass
+/// downloads do. The returned result is kept for inline error feedback.
+pub async fn save_telegram_media(
+    services: &AppServices,
+    ui: UiState,
+    chat_id: i64,
+    message_id: i64,
+    file_name: String,
+    file_size: Option<i64>,
+    batch: Option<(&TelegramSaveBatch, usize)>,
+) -> Result<NativeSavedMedia, String> {
+    let id = format!("telegram-{chat_id}-{message_id}");
+    let batch_id = batch.map(|(batch, _)| batch.id.clone());
+    let batch_title = batch.map(|(batch, _)| batch.title.clone());
+    let batch_total = batch.map(|(batch, _)| batch.total as i64);
+    let batch_done = batch.map(|(_, done)| done as i64);
+
+    push_download(
+        services.clone(),
+        ui,
+        DownloadRecord {
+            id: id.clone(),
+            chat_id: Some(chat_id.to_string()),
+            message_id: Some(message_id),
+            file_name,
+            progress: 0.0,
+            status: "downloading".to_string(),
+            file_size,
+            platform: Some("telegram".to_string()),
+            source_label: Some("Telegram".to_string()),
+            batch_kind: batch_id.as_ref().map(|_| "telegram".to_string()),
+            batch_id,
+            batch_title,
+            batch_total,
+            batch_downloaded: batch_done.map(|done| done.saturating_sub(1)),
+            created_at: Some(now_millis()),
+            can_cancel: Some(false),
+            can_retry: Some(false),
+            ..DownloadRecord::default()
+        },
+    );
+
+    let result = services
+        .telegram
+        .save_media(chat_id, message_id, None)
+        .await;
+    update_download(
+        services.clone(),
+        ui,
+        &id,
+        |record| match &result {
+            Ok(saved) if saved.success => {
+                record.status = "completed".to_string();
+                record.progress = 100.0;
+                record.file_path = saved.file_path.clone();
+                if let Some(name) = saved.file_name.as_ref() {
+                    record.file_name = name.clone();
+                }
+                if let Some(size) = saved.size {
+                    record.file_size = Some(size);
+                }
+                record.error = None;
+            }
+            Ok(saved) => {
+                record.status = "failed".to_string();
+                record.error = saved
+                    .error
+                    .clone()
+                    .or_else(|| Some("Não foi possível salvar a mídia.".to_string()));
+            }
+            Err(error) => {
+                record.status = "failed".to_string();
+                record.error = Some(error.clone());
+            }
+        },
+        true,
+    );
+    result
 }
 
 fn telegram_status(status: &str) -> &'static str {

@@ -331,7 +331,7 @@ fn DownloadRow(item: DownloadRecord) -> Element {
     let mut ui = use_context::<UiState>();
     let id = item.id.clone();
     let can_retry = can_retry_record(&item);
-    let can_cancel = item.is_active();
+    let can_cancel = item.can_cancel.unwrap_or_else(|| item.is_active());
     let cancel_services = services.clone();
     let retry_services = services.clone();
 
