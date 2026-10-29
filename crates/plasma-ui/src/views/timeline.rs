@@ -537,7 +537,7 @@ pub(crate) fn MessageThumbnail(
                     Some(Ok(Some(url))) => rsx! { img { src: "{url}", alt: "" } },
                     Some(Ok(None)) => rsx! { span { class: "thumb-placeholder", "▣" } },
                     Some(Err(error)) => rsx! { span { class: "thumb-placeholder", title: "{error}", "!" } },
-                    None => rsx! { span { class: "thumb-placeholder", "…" } },
+                    None => rsx! { div { class: "thumb-skeleton" } },
                 }
             }
             if is_video {
