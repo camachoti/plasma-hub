@@ -547,6 +547,34 @@ async fn refresh_identity(services: AppServices, mut ui: UiState) {
     }
 }
 
+/// Class for a rail item, including Downloads feedback markers:
+/// `busy` while a download is running, `failed` when a download failed.
+fn rail_item_class(tab: Tab, item: Tab, download_active: bool, download_failed: bool) -> String {
+    let mut classes = if tab == item {
+        "rail-item active".to_string()
+    } else {
+        "rail-item".to_string()
+    };
+    if item == Tab::Downloads && download_active {
+        classes.push_str(" busy");
+    }
+    if item == Tab::Downloads && download_failed {
+        classes.push_str(" failed");
+    }
+    classes
+}
+
+/// Tooltip text for a rail item, surfacing the Downloads state when relevant.
+fn rail_item_tip(item: Tab, download_active: bool, download_failed: bool) -> &'static str {
+    if item == Tab::Downloads && download_active {
+        "Downloads: em andamento"
+    } else if item == Tab::Downloads && download_failed {
+        "Downloads: há falhas"
+    } else {
+        item.label()
+    }
+}
+
 /// App chrome: rail, top bar and the active view.
 #[component]
 fn Shell() -> Element {
@@ -556,7 +584,6 @@ fn Shell() -> Element {
     let preview = ui.preview_mode();
     let download_active = ui.downloads().iter().any(|item| item.is_active());
     let download_failed = ui.downloads().iter().any(|item| item.status == "failed");
-    let download_badge = download_active || download_failed;
 
     rsx! {
         div { class: "shell",
@@ -565,21 +592,17 @@ fn Shell() -> Element {
                 for item in Tab::ALL {
                     button {
                         key: "{item.label()}",
-                        class: if tab == item { "rail-item active" } else { "rail-item" },
+                        class: rail_item_class(tab, item, download_active, download_failed),
                         title: "{item.label()}",
                         aria_label: "{item.label()}",
-                        "data-tip": "{item.label()}",
+                        "data-tip": rail_item_tip(item, download_active, download_failed),
                         onclick: move |_| ui.tab.set(item),
                         Icon { name: item.rail_icon(), size: 20, class: "icon" }
-                        if item == Tab::Downloads && download_badge {
+                        if item == Tab::Downloads && download_failed {
                             span {
-                                class: "rail-badge",
-                                title: if download_active {
-                                    "Download em andamento"
-                                } else {
-                                    "Há downloads com falha"
-                                },
-                                "!"
+                                class: "rail-dot",
+                                title: "Há downloads com falha",
+                                aria_label: "Há downloads com falha",
                             }
                         }
                     }

@@ -1,47 +1,13 @@
-# TODO UX
+# TODO: UX Improvements
 
-Backlog de melhorias de usabilidade para o Plasma Hub, priorizado por impacto percebido e risco técnico.
-
-## Prioridade Alta
-
-- [x] Padronizar estados principais por chat: carregando mensagens, carregando mídias, sem permissão para enviar, TDLib desconectado e reconectando.
-- [x] Criar skeletons específicos para mensagem, avatar, mídia, lista de chats e lista de tópicos.
-- [x] Melhorar feedback de mídia, separando claramente cache, download, processamento, salvamento, cancelamento e indisponibilidade.
-- [x] Implementar busca dentro do chat com filtros rápidos por mídia, usuário, data, álbum e tópico.
-- [x] Criar barra de ações fixa no modo seleção com baixar, encaminhar, copiar e cancelar seleção.
-
-## Prioridade Média
-
-- [x] Melhorar empty states para grupo sem tópicos, tópico vazio, chat sem mídia, login pendente e TDLib não autenticado.
-- [x] Adicionar atalhos de teclado: `Esc`, `/`, `Ctrl+F`, `Enter` e `Shift+Enter`.
-- [x] Persistir preferências por chat, incluindo ordem personalizada, último chat, tópico, filtros, painel lateral e posição aproximada de leitura.
-- [x] Refinar pré-carregamento inteligente: priorizar thumbs visíveis, manter próximas em segundo plano e pausar atualizações em scroll rápido.
 - [x] Adicionar toasts discretos para downloads, envio, pasta selecionada, arquivo anexado, mídia salva, cópia e encaminhamento.
+- [x] Substituir ícone de exclamação no botão 'Downloads' por indicação visual sutil:
+  - [x] Animacão suave (pulsação de opacidade no ícone) enquanto há downloads ativos
+  - [x] Mudança de cor do botão (cor de destaque) quando há downloads em andamento
+  - [x] Ambos (animacão + mudança de cor) — classe `.rail-item.busy` + `.icon` animado; falhas mantêm um ponto vermelho discreto (`.rail-dot`) sem exclamação
+- [ ] Implementar progresso em tempo real para downloads massivos via `AppEvent::MediaProgress` (em andamento)
+- [ ] Refatorar `apply_telegram_media_progress` para usar `Signal` diretamente em vez de `UiState`
+- [ ] Ajustar layout da barra de status para melhorar a visibilidade do estado de download
+- [ ] Testar experiência de uso com usuários reais (se possível)
 
-## Prioridade Técnica Com Impacto UX
-
-- [x] Criar fila visual única de downloads com progresso, histórico persistente, remoção, abrir pasta, retry e cancelamento, incluindo YouTube/Twitter nativos.
-- [x] Exibir indicador discreto quando mídia vem do cache versus rede.
-- [x] Criar banner superior para TDLib desconectado, reconectando ou atualizando.
-- [x] Reduzir flashes de estado, especialmente “mídia indisponível” durante transições de carregamento.
-- [x] Restaurar sessão de UI após reiniciar, incluindo chat, tópico, painel lateral e posição aproximada de leitura.
-- [x] Revisar acessibilidade dos controles de mídia, mensagens e cabeçalho: rótulos para leitor de tela, estado expandido/pressionado e navegação por teclado.
-
-## Sequência Recomendada
-
-1. Persistência de ordem personalizada.
-2. Pré-carregamento inteligente de mídias.
-3. Redução de flashes de estado.
-4. Revisão final de acessibilidade.
-
-## Próximo Ciclo (Rust pós-cutover)
-
-- [x] Referência de resposta clicável, com salto para a mensagem original e destaque, carregando o contexto quando a original está fora da página.
-- [x] Retry de downloads nativos, reanalisando a página quando a URL direta expirou.
-- [x] Ação “Tentar falhos” para repetir os downloads com origem e destino salvos.
-- [x] Limite de cache de mídia aplicado no startup e depois de salvar mídia.
-- [x] Diagnóstico com versão, sistema, schema, pasta de dados e log de panes.
-- [x] Busca global entre conversas, com salto para o contexto do resultado e paginação.
-- [ ] Estados offline explícitos e fila de envio durante queda do TDLib.
-- [ ] Teste de carga da timeline com 10 mil mensagens em device real.
-- [ ] Validação Android em device, assinatura release e foreground service.
+> **Nota**: O foco é manter uma interface limpa e intuitiva, evitando notificações intrusivas. A indicação visual deve ser perceptível mas não dominante.
