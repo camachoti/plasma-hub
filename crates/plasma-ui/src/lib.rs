@@ -593,7 +593,6 @@ fn Shell() -> Element {
                     button {
                         key: "{item.label()}",
                         class: rail_item_class(tab, item, download_active, download_failed),
-                        title: "{item.label()}",
                         aria_label: "{item.label()}",
                         "data-tip": rail_item_tip(item, download_active, download_failed),
                         onclick: move |_| ui.tab.set(item),
@@ -601,7 +600,6 @@ fn Shell() -> Element {
                         if item == Tab::Downloads && download_failed {
                             span {
                                 class: "rail-dot",
-                                title: "Há downloads com falha",
                                 aria_label: "Há downloads com falha",
                             }
                         }
@@ -610,7 +608,7 @@ fn Shell() -> Element {
                 div { class: "rail-spacer" }
                 button {
                     class: "rail-item",
-                    title: "Paleta de comandos",
+                    aria_label: "Paleta de comandos",
                     "data-tip": "Paleta de comandos",
                     onclick: move |_| ui.show_palette.set(true),
                     "⌘"
