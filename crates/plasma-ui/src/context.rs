@@ -301,6 +301,23 @@ pub fn handle_context_action(
             let Ok(parsed) = chat_id.parse::<i64>() else {
                 return;
             };
+            // Clear the unread badge right away; the backend call below keeps
+            // Telegram itself in sync.
+            if parsed != 0 {
+                let mut chats = ui.chats();
+                let read_selected = ui
+                    .selected_chat()
+                    .is_some_and(|selected| selected.id == *chat_id);
+                if let Some(index) = chats.iter().position(|chat| chat.id == *chat_id) {
+                    chats[index].unread_count = 0;
+                    ui.chats.set(chats.clone());
+                    if read_selected {
+                        let mut selected = ui.selected_chat().unwrap();
+                        selected.unread_count = 0;
+                        ui.selected_chat.set(Some(selected));
+                    }
+                }
+            }
             let services = services.clone();
             spawn(async move {
                 if let Err(error) = services.telegram.read_chat(parsed).await {
