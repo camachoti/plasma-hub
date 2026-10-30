@@ -336,7 +336,7 @@ pub fn App() -> Element {
                         {
                             match state.as_str() {
                                 "ready" => apply_telegram_media_progress(
-                                    ui,
+                                    ui.downloads,
                                     &id,
                                     total_bytes,
                                     total_bytes,
@@ -347,7 +347,7 @@ pub fn App() -> Element {
                                         (downloaded_bytes as f64 / total_bytes as f64) * 100.0
                                     });
                                     apply_telegram_media_progress(
-                                        ui,
+                                        ui.downloads,
                                         &id,
                                         downloaded_bytes,
                                         total_bytes,

@@ -6,7 +6,7 @@
   - [x] Mudança de cor do botão (cor de destaque) quando há downloads em andamento
   - [x] Ambos (animacão + mudança de cor) — classe `.rail-item.busy` + `.icon` animado; falhas mantêm um ponto vermelho discreto (`.rail-dot`) sem exclamação
 - [ ] Implementar progresso em tempo real para downloads massivos via `AppEvent::MediaProgress` (em andamento)
-- [ ] Refatorar `apply_telegram_media_progress` para usar `Signal` diretamente em vez de `UiState`
+- [x] Refatorar `apply_telegram_media_progress` para usar `Signal` diretamente em vez de `UiState` (wrapper sobre `apply_media_progress_to_items`, com testes unitários)
 - [ ] Ajustar layout da barra de status para melhorar a visibilidade do estado de download
 - [ ] Testar experiência de uso com usuários reais (se possível)
 

@@ -5,7 +5,7 @@
 //! versions is not lost.
 
 use crate::state::{now_millis, AppServices, UiState};
-use dioxus::prelude::WritableExt;
+use dioxus::prelude::{Signal, WritableExt};
 use plasma_core::AppEnv;
 use plasma_store::download_history_get;
 use plasma_telegram::{NativeSavedMedia, TdlibDownloadItem};
@@ -149,18 +149,32 @@ pub fn apply_download_progress(
 /// Applies a TDLib media progress event without touching the batch counters or
 /// cancelability that the Telegram queue/save logic already owns.
 pub fn apply_telegram_media_progress(
-    mut ui: UiState,
+    mut downloads: Signal<Vec<DownloadRecord>>,
     id: &str,
     downloaded: u64,
     total: u64,
     percent: Option<f64>,
 ) {
-    let mut items = ui.downloads();
+    let mut items = downloads();
+    apply_media_progress_to_items(&mut items, id, downloaded, total, percent);
+    downloads.set(items);
+}
+
+/// Pure slice mutation shared by the signal wrapper so the clamping and
+/// terminal-handling rules stay testable without a Dioxus scope. Returns true
+/// when the item was updated.
+fn apply_media_progress_to_items(
+    items: &mut [DownloadRecord],
+    id: &str,
+    downloaded: u64,
+    total: u64,
+    percent: Option<f64>,
+) -> bool {
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
-        return;
+        return false;
     };
     if item.is_terminal() {
-        return;
+        return false;
     }
     item.status = "downloading".to_string();
     item.progress = if let Some(percent) = percent {
@@ -173,7 +187,7 @@ pub fn apply_telegram_media_progress(
     if total > 0 {
         item.file_size = Some(total.min(i64::MAX as u64) as i64);
     }
-    ui.downloads.set(items);
+    true
 }
 
 pub fn apply_download_done(mut ui: UiState, id: &str) {
@@ -620,5 +634,56 @@ mod tests {
         assert_eq!(item.extra["customField"], 42);
         let encoded = serde_json::to_value(item).unwrap();
         assert_eq!(encoded["customField"], 42);
+    }
+
+    #[test]
+    fn telegram_media_progress_updates_and_clamps() {
+        let mut items = vec![DownloadRecord {
+            id: "telegram-1-2".into(),
+            status: "queued".into(),
+            progress: 10.0,
+            ..Default::default()
+        }];
+        assert!(apply_media_progress_to_items(
+            &mut items,
+            "telegram-1-2",
+            50,
+            100,
+            None,
+        ));
+        let item = &items[0];
+        assert_eq!(item.status, "downloading");
+        assert_eq!(item.progress, 50.0);
+        assert_eq!(item.file_size, Some(100));
+
+        // Missing items and terminal states stay untouched.
+        assert!(!apply_media_progress_to_items(
+            &mut items,
+            "telegram-9-9",
+            1,
+            2,
+            None,
+        ));
+        items[0].status = "completed".into();
+        items[0].progress = 100.0;
+        assert!(!apply_media_progress_to_items(
+            &mut items,
+            "telegram-1-2",
+            90,
+            100,
+            None,
+        ));
+        assert_eq!(items[0].progress, 100.0);
+
+        // Percent hints are clamped to leave room for the terminal state.
+        items[0].status = "downloading".into();
+        assert!(apply_media_progress_to_items(
+            &mut items,
+            "telegram-1-2",
+            95,
+            100,
+            Some(99.5),
+        ));
+        assert_eq!(items[0].progress, 99.5);
     }
 }
