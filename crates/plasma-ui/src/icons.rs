@@ -45,6 +45,8 @@ pub enum IconName {
     Settings,
     ChevronDown,
     ChevronRight,
+    World,
+    WorldCheck,
 }
 
 impl IconName {
@@ -185,6 +187,21 @@ impl IconName {
             ],
             IconName::ChevronDown => &["M6 9l6 6l6 -6"],
             IconName::ChevronRight => &["M9 6l6 6l-6 6"],
+            IconName::World => &[
+                "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0",
+                "M3.6 9h16.8",
+                "M3.6 15h16.8",
+                "M11.5 3a17 17 0 0 0 0 18",
+                "M12.5 3a17 17 0 0 1 0 18",
+            ],
+            IconName::WorldCheck => &[
+                "M13.5 3.475a9 9 0 1 0 7.074 6.709",
+                "M3.6 9h16.8",
+                "M3.6 15h9.6",
+                "M11.5 3a17 17 0 0 0 0 18",
+                "M12.5 3a17 17 0 0 1 3.055 10.468",
+                "M15 19l2 2l4 -4",
+            ],
         }
     }
 }

@@ -875,8 +875,8 @@ fn RealTelegram() -> Element {
                         }
                         div { class: "chat-header-actions",
                             button {
-                                class: if global_search() { "btn small active" } else { "btn small ghost" },
-                                title: "Buscar em todas as conversas",
+                                class: if global_search() { "btn small active global-toggle" } else { "btn small ghost global-toggle" },
+                                title: if global_search() { "Buscando em todas as conversas" } else { "Buscar em todas as conversas" },
                                 onclick: move |_| {
                                     let next = !global_search();
                                     global_search.set(next);
@@ -888,7 +888,11 @@ fn RealTelegram() -> Element {
                                     ui.search_error.set(None);
                                     ui.search_loading.set(false);
                                 },
-                                "Global"
+                                Icon {
+                                    name: if global_search() { IconName::WorldCheck } else { IconName::World },
+                                    size: 17,
+                                    class: "icon",
+                                }
                             }
                             input {
                                 class: "chat-search-input header-search",

@@ -272,6 +272,7 @@ h1, h2, h3, p { margin: 0; }
   border-color: var(--accent);
   color: var(--text-0);
 }
+.btn.active.global-toggle .icon { color: var(--accent); }
 .btn.active:hover:not(:disabled) { background: var(--accent-soft); color: var(--text-0); }
 .btn.danger {
   background: color-mix(in oklch, var(--danger) 14%, var(--bg-2));
