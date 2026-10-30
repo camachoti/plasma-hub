@@ -1999,6 +1999,14 @@ fn MediaPanel(
                                         let items = items.clone();
                                         let batch = batch.clone();
                                         spawn(async move {
+                                            let dest_dir = pick_save_folder("Salvar todas as mídias como")
+                                                .await
+                                                .map(|path| path.to_string_lossy().to_string());
+                                            if dest_dir.is_none() {
+                                                bulk_progress.set(None);
+                                                bulk_saving.set(false);
+                                                return;
+                                            }
                                             match save_media_batch(
                                                 &services,
                                                 ui,
@@ -2006,7 +2014,7 @@ fn MediaPanel(
                                                 &items,
                                                 Some(&batch),
                                                 bulk_progress,
-                                                None,
+                                                dest_dir,
                                             )
                                             .await
                                             {
@@ -2120,6 +2128,18 @@ fn MediaPanel(
                                                         let group_items = group_items.clone();
                                                         let album_batch = album_batch.clone();
                                                         spawn(async move {
+                                                            let dest_dir =
+                                                                pick_save_folder("Salvar álbum como")
+                                                                    .await
+                                                                    .map(|path| {
+                                                                        path.to_string_lossy()
+                                                                            .to_string()
+                                                                    });
+                                                            if dest_dir.is_none() {
+                                                                bulk_progress.set(None);
+                                                                saving_album.set(None);
+                                                                return;
+                                                            }
                                                             match save_media_batch(
                                                                 &services,
                                                                 ui,
@@ -2127,7 +2147,7 @@ fn MediaPanel(
                                                                 &group_items,
                                                                 Some(&album_batch),
                                                                 bulk_progress,
-                                                                None,
+                                                                dest_dir,
                                                             )
                                                             .await
                                                             {
