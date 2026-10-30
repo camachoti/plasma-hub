@@ -1,7 +1,7 @@
 //! Telegram view: real TDLib chats, topics, search and cache when signed in;
 //! a local preview on the same shell before login.
 
-use crate::context::{ContextMenuState, ContextTarget};
+use crate::context::{pick_save_folder, ContextMenuState, ContextTarget};
 use crate::downloads::{save_telegram_media, TelegramSaveBatch};
 use crate::icons::{Icon, IconName};
 use crate::state::{
@@ -1784,6 +1784,7 @@ fn lightbox_album_for(
 }
 
 /// Saves media sequentially so TDLib is not flooded with parallel requests.
+/// `dest_dir` optionally directs the files into a user-chosen folder.
 async fn save_media_batch(
     services: &AppServices,
     ui: UiState,
@@ -1791,6 +1792,7 @@ async fn save_media_batch(
     items: &[TdlibSharedMediaItem],
     batch: Option<&TelegramSaveBatch>,
     mut progress: Signal<Option<(usize, usize)>>,
+    dest_dir: Option<String>,
 ) -> Result<(), String> {
     let total = items.len();
     for (index, item) in items.iter().enumerate() {
@@ -1803,6 +1805,7 @@ async fn save_media_batch(
             format!("Mídia {}", item.id),
             item.media_size,
             batch.map(|batch| (batch, index + 1)),
+            dest_dir.clone(),
         )
         .await?;
         if !result.success {
@@ -2003,6 +2006,7 @@ fn MediaPanel(
                                                 &items,
                                                 Some(&batch),
                                                 bulk_progress,
+                                                None,
                                             )
                                             .await
                                             {
@@ -2123,6 +2127,7 @@ fn MediaPanel(
                                                                 &group_items,
                                                                 Some(&album_batch),
                                                                 bulk_progress,
+                                                                None,
                                                             )
                                                             .await
                                                             {
@@ -2587,6 +2592,13 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                     let chat_id = state.chat_id;
                                     let message_id = state.message_id;
                                     spawn(async move {
+                                        let dest_dir = pick_save_folder("Salvar mídia como")
+                                            .await
+                                            .map(|path| path.to_string_lossy().to_string());
+                                        if dest_dir.is_none() {
+                                            saving.set(false);
+                                            return;
+                                        }
                                         match save_telegram_media(
                                             &services,
                                             ui,
@@ -2595,6 +2607,7 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                             format!("Mídia {message_id}"),
                                             None,
                                             None,
+                                            dest_dir,
                                         )
                                         .await
                                         {
@@ -2646,6 +2659,13 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                         let album = album.clone();
                                         let batch = batch.clone();
                                         spawn(async move {
+                                            let dest_dir = pick_save_folder("Salvar álbum como")
+                                                .await
+                                                .map(|path| path.to_string_lossy().to_string());
+                                            if dest_dir.is_none() {
+                                                saving_album.set(false);
+                                                return;
+                                            };
                                             let mut failure = None;
                                             for (index, item) in album.iter().enumerate() {
                                                 let result = save_telegram_media(
@@ -2656,6 +2676,7 @@ fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) -> Element {
                                                     format!("Mídia {}", item.message_id),
                                                     None,
                                                     Some((&batch, index + 1)),
+                                                    dest_dir.clone(),
                                                 )
                                                 .await;
                                                 match result {

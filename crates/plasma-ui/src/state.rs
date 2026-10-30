@@ -575,7 +575,7 @@ impl TelegramHandle {
         &self,
         chat_id: i64,
         message_id: i64,
-        destination_path: Option<String>,
+        destination_dir: Option<String>,
     ) -> Result<NativeSavedMedia, String> {
         let env = self.env.clone();
         let manager = self.manager.clone();
@@ -585,7 +585,7 @@ impl TelegramHandle {
                 &manager,
                 chat_id,
                 message_id,
-                destination_path,
+                destination_dir,
             )
             .await
         });

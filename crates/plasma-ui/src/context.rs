@@ -498,6 +498,22 @@ pub fn handle_context_action(
     }
 }
 
+/// Opens a native folder chooser on the desktop (like a browser "save") so the
+/// media save starts from a user-picked folder. Android falls back to the
+/// default download folder.
+pub async fn pick_save_folder(title: &'static str) -> Option<std::path::PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    {
+        rfd::FileDialog::new().set_title(title).pick_folder()
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = title;
+        None
+    }
+}
+
 /// Saves a single message media to the configured download folder.
 pub fn save_media(services: AppServices, ui: UiState, chat_id: i64, message: TdlibMessageInfo) {
     let message_id = message.id;
@@ -510,8 +526,16 @@ pub fn save_media(services: AppServices, ui: UiState, chat_id: i64, message: Tdl
     };
     let file_name = format!("{kind} {message_id}");
     spawn(async move {
-        let _ =
-            save_telegram_media(&services, ui, chat_id, message_id, file_name, None, None).await;
+        let dest_dir = pick_save_folder("Salvar mídia como")
+            .await
+            .map(|path| path.to_string_lossy().to_string());
+        if dest_dir.is_none() {
+            return;
+        }
+        let _ = save_telegram_media(
+            &services, ui, chat_id, message_id, file_name, None, None, dest_dir,
+        )
+        .await;
     });
 }
 
@@ -538,6 +562,12 @@ pub fn save_album(
         total,
     };
     spawn(async move {
+        let dest_dir = pick_save_folder("Salvar álbum como")
+            .await
+            .map(|path| path.to_string_lossy().to_string());
+        if dest_dir.is_none() {
+            return;
+        }
         for (index, message) in messages.iter().enumerate() {
             let kind = if message.is_video {
                 "Vídeo"
@@ -554,6 +584,7 @@ pub fn save_album(
                 format!("{kind} {}", message.id),
                 None,
                 Some((&batch, index + 1)),
+                dest_dir.clone(),
             )
             .await;
         }

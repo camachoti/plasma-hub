@@ -821,6 +821,32 @@ fn sanitize_filename(value: &str) -> String {
     }
 }
 
+/// Builds a unique file path inside a user-chosen folder so a "save like a
+/// browser" never overwrites existing files ("foto_123.jpg", "(1)", "(2)", ...).
+fn unique_file_destination(folder: &Path, file_name: &str) -> PathBuf {
+    let safe = sanitize_filename(file_name);
+    let mut path = folder.join(&safe);
+    if path.exists() {
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("arquivo")
+            .to_string();
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        for index in 1..10_000 {
+            path = folder.join(format!("{stem} ({index}){extension}"));
+            if !path.exists() {
+                break;
+            }
+        }
+    }
+    path
+}
+
 fn sanitize_folder_name(value: &str) -> String {
     let name: String = value
         .chars()
@@ -4181,7 +4207,7 @@ pub async fn telegram_media_save(
     state: &TdlibManager,
     chat_id: i64,
     message_id: i64,
-    destination_path: Option<String>,
+    destination_dir: Option<String>,
 ) -> Result<NativeSavedMedia, String> {
     let save_abort_flag = native_media_abort_flag(state, chat_id, message_id).await;
     let meta =
@@ -4219,8 +4245,8 @@ pub async fn telegram_media_save(
         .file_name
         .clone()
         .unwrap_or_else(|| sanitize_filename(&format!("media_{message_id}")));
-    let destination = match destination_path {
-        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
+    let destination = match destination_dir {
+        Some(dir) if !dir.trim().is_empty() => unique_file_destination(Path::new(&dir), &file_name),
         _ => app.paths().download_dir()?.join(&file_name),
     };
 
@@ -5040,6 +5066,30 @@ pub async fn tdlib_start_mass_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_file_destination_appends_numeric_suffix() {
+        let temp = std::env::temp_dir().join(format!("plasma-suffix-{}", now_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let first = unique_file_destination(&temp, "Foto welcome.png");
+        assert_eq!(first.file_name().unwrap(), "Foto_welcome.png");
+        std::fs::write(&first, b"x").unwrap();
+
+        let second = unique_file_destination(&temp, "Foto welcome.png");
+        assert_eq!(second.file_name().unwrap(), "Foto_welcome (1).png");
+
+        let third = unique_file_destination(&temp, "sem_extensao");
+        std::fs::write(&third, b"x").unwrap();
+        assert_eq!(third.file_name().unwrap(), "sem_extensao");
+        assert_eq!(
+            unique_file_destination(&temp, "sem_extensao")
+                .file_name()
+                .unwrap(),
+            "sem_extensao (1)"
+        );
+
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
 
     #[test]
     fn forum_topic_round_trips_without_becoming_a_thread() {

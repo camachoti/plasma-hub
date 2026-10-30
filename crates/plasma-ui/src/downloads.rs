@@ -355,7 +355,10 @@ pub struct TelegramSaveBatch {
 
 /// Saves one Telegram media and mirrors it into the shared download queue so
 /// single, album and bulk saves show up on the Downloads screen like mass
-/// downloads do. The returned result is kept for inline error feedback.
+/// downloads do. `dest_dir` is an optional user-chosen folder ("save like a
+/// browser"); when it is `None` the file goes to the configured download
+/// folder. The returned result is kept for inline error feedback.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_telegram_media(
     services: &AppServices,
     ui: UiState,
@@ -364,6 +367,7 @@ pub async fn save_telegram_media(
     file_name: String,
     file_size: Option<i64>,
     batch: Option<(&TelegramSaveBatch, usize)>,
+    dest_dir: Option<String>,
 ) -> Result<NativeSavedMedia, String> {
     let id = format!("telegram-{chat_id}-{message_id}");
     let batch_id = batch.map(|(batch, _)| batch.id.clone());
@@ -398,7 +402,7 @@ pub async fn save_telegram_media(
 
     let result = services
         .telegram
-        .save_media(chat_id, message_id, None)
+        .save_media(chat_id, message_id, dest_dir.clone())
         .await;
     update_download(
         services.clone(),
