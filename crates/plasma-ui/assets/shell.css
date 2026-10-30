@@ -1597,7 +1597,13 @@ h1, h2, h3, p { margin: 0; }
 .downloads-heading, .twitter-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .downloads-heading h1, .twitter-heading h1 { font-size: 24px; letter-spacing: -0.04em; }
 .downloads-heading p, .twitter-heading p { max-width: 620px; margin-top: 4px; }
-.downloads-stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.downloads-stats { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.pill.busy { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 40%, transparent); background: color-mix(in oklch, var(--accent) 12%, transparent); }
+.pill.failed { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 40%, transparent); background: color-mix(in oklch, var(--danger) 12%, transparent); }
+.downloads-status { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.downloads-status-track { flex: 1; max-width: 280px; height: 4px; border-radius: 999px; background: var(--bg-3); overflow: hidden; }
+.downloads-status-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
+.downloads-status-label { color: var(--text-2); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
 .download-card {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);

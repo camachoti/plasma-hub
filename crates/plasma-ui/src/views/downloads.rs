@@ -43,6 +43,15 @@ pub fn DownloadsView() -> Element {
         .iter()
         .filter(|item| item.status == "completed")
         .count();
+    let failed = items.iter().filter(|item| item.status == "failed").count();
+    let overall = (active > 0).then(|| {
+        let sum: f64 = items
+            .iter()
+            .filter(|item| item.is_active())
+            .map(|item| item.progress)
+            .sum();
+        sum / active as f64
+    });
     let current_analysis = analysis();
     let retryable_failed: Vec<_> = items
         .iter()
@@ -85,8 +94,32 @@ pub fn DownloadsView() -> Element {
                         }
                     }
                     div { class: "downloads-stats",
-                        span { class: "pill", "{active} ativo(s)" }
+                        span {
+                            class: if active > 0 { "pill busy" } else { "pill" },
+                            "{active} ativo(s)"
+                        }
+                        if failed > 0 {
+                            span {
+                                class: "pill failed",
+                                aria_label: "Downloads com falha",
+                                "{failed} com falha"
+                            }
+                        }
                         span { class: "pill", "{completed} concluído(s)" }
+                    }
+                }
+                if let Some(progress) = overall {
+                    div { class: "downloads-status",
+                        div { class: "downloads-status-track",
+                            div {
+                                class: "downloads-status-fill",
+                                style: "width: {progress:.1}%",
+                            }
+                        }
+                        span {
+                            class: "downloads-status-label",
+                            "{progress:.0}% médio · {active} em andamento"
+                        }
                     }
                 }
 

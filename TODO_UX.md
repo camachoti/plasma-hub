@@ -7,7 +7,7 @@
   - [x] Ambos (animacão + mudança de cor) — classe `.rail-item.busy` + `.icon` animado; falhas mantêm um ponto vermelho discreto (`.rail-dot`) sem exclamação
 - [ ] Implementar progresso em tempo real para downloads massivos via `AppEvent::MediaProgress` (em andamento)
 - [x] Refatorar `apply_telegram_media_progress` para usar `Signal` diretamente em vez de `UiState` (wrapper sobre `apply_media_progress_to_items`, com testes unitários)
-- [ ] Ajustar layout da barra de status para melhorar a visibilidade do estado de download
+- [x] Ajustar layout da barra de status para melhorar a visibilidade do estado de download (pills com cor de estado + barra de progresso agregado em `DownloadsView`)
 - [ ] Testar experiência de uso com usuários reais (se possível)
 
 > **Nota**: O foco é manter uma interface limpa e intuitiva, evitando notificações intrusivas. A indicação visual deve ser perceptível mas não dominante.
