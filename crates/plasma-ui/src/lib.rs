@@ -10,6 +10,7 @@ pub mod icons;
 pub mod state;
 pub mod theme;
 pub mod twitter;
+pub mod twitter_fake;
 pub mod views;
 
 use dioxus::prelude::*;
@@ -23,9 +24,12 @@ use plasma_duplicates::SearchMatch;
 use plasma_store::SettingKey;
 use plasma_telegram::{TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo};
 use state::{
-    apply_auth_error, apply_auth_status, bump_message_tick, bump_telegram_tick,
-    mark_deleted_messages, AppServices, DuplicateSearchProgress, ForwardState, LightboxState,
-    MassDownloadProgress, ReactionPickerState, Tab, UiState, UserMediaState,
+    apply_auth_error, apply_auth_status, apply_chat_patch, apply_live_message,
+    apply_message_content, bump_telegram_tick, clear_cached_chat_list, mark_deleted_messages,
+    recall_cached_chat_list, AppServices, ConversationState, DuplicateSearchMedia,
+    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress, PanelState,
+    ReactionPickerState, SessionState, ShellState, Tab, ToastKind, TransferState, UiState,
+    UserMediaState,
 };
 use theme::{Density, Palette};
 use views::{
@@ -50,8 +54,10 @@ pub fn App() -> Element {
     let settings = services.settings.clone();
     let skip_login = settings.get_bool(SettingKey::SKIP_LOGIN).unwrap_or(false);
 
+    // Android share intents must reach Downloads without waiting for Telegram login.
+    let open_from_share = services.initial_shared_url.is_some();
     let tab = use_signal(|| {
-        if services.initial_shared_url.is_some() {
+        if open_from_share {
             Tab::Downloads
         } else {
             Tab::Telegram
@@ -63,7 +69,7 @@ pub fn App() -> Element {
     let density = use_signal(|| {
         Density::from_stored(settings.get(SettingKey::APPEARANCE_DENSITY).ok().flatten())
     });
-    let logged_in = use_signal(|| skip_login);
+    let logged_in = use_signal(|| skip_login || open_from_share);
     let show_spike = use_signal(|| false);
     let show_palette = use_signal(|| false);
     let toasts = use_signal(Vec::new);
@@ -72,13 +78,20 @@ pub fn App() -> Element {
     let auth_error = use_signal(|| None::<String>);
     let auth_user = use_signal(|| None::<String>);
     let booting = use_signal(|| !skip_login);
-    let preview_mode = use_signal(|| skip_login);
+    let preview_mode = use_signal(|| skip_login || open_from_share);
     let avatar = use_signal(|| None::<String>);
 
-    let chats = use_signal(Vec::<TdlibChatInfo>::new);
+    let chats = use_signal(|| {
+        if skip_login {
+            Vec::new()
+        } else {
+            recall_cached_chat_list(&settings)
+        }
+    });
     let chats_loading = use_signal(|| false);
     let chats_error = use_signal(|| None::<String>);
     let selected_chat = use_signal(|| None::<TdlibChatInfo>);
+    let mobile_show_list = use_signal(|| true);
 
     let messages = use_signal(Vec::<TdlibMessageInfo>::new);
     let messages_loading = use_signal(|| false);
@@ -90,6 +103,13 @@ pub fn App() -> Element {
     let selected_topic = use_signal(|| None::<TdlibForumTopicInfo>);
     let hidden_topics = use_signal(Vec::<String>::new);
     let topic_browser_open = use_signal(|| false);
+    // Per-chat topic listings fill instantly on revisit while a fresh copy
+    // loads in the background.
+    let topics_cache =
+        use_signal(std::collections::HashMap::<String, Vec<TdlibForumTopicInfo>>::new);
+    let topics_with_new_media = use_signal(std::collections::HashSet::<String>::new);
+    let twitter_gallery_badges = use_signal(std::collections::HashMap::<String, usize>::new);
+    let twitter_sync_status = use_signal(|| None::<state::TwitterGallerySyncStatus>);
     let thumbnails = use_signal(std::collections::HashMap::<(i64, i64), String>::new);
 
     let search_results = use_signal(Vec::<TdlibMessageInfo>::new);
@@ -103,7 +123,11 @@ pub fn App() -> Element {
     let mass_download_stopping = use_signal(|| false);
     let mass_download_progress = use_signal(|| None::<MassDownloadProgress>);
     let mass_download_open = use_signal(|| false);
+    // Topic pre-selected from the topic context menu; None means the panel
+    // falls back to the currently selected topic.
+    let mass_download_topic = use_signal(|| None::<TdlibForumTopicInfo>);
     let duplicate_search_progress = use_signal(|| None::<DuplicateSearchProgress>);
+    let duplicate_search = use_signal(|| None::<Vec<DuplicateSearchMedia>>);
     let context_menu = use_signal(|| None::<context::ContextMenuState>);
     let select_portal = use_signal(|| None::<SelectPortal>);
     let reply_to = use_signal(|| None::<TdlibMessageInfo>);
@@ -114,52 +138,69 @@ pub fn App() -> Element {
     let shared_url = use_signal(|| services.initial_shared_url.clone());
 
     let mut ui = use_context_provider(|| UiState {
-        tab,
-        palette,
-        density,
-        logged_in,
-        show_spike,
-        show_palette,
-        toasts,
-        auth_state,
-        auth_error,
-        auth_user,
-        booting,
-        preview_mode,
-        avatar,
-        chats,
-        chats_loading,
-        chats_error,
-        selected_chat,
-        messages,
-        messages_loading,
-        messages_error,
-        messages_has_more,
-        messages_key,
-        topics,
-        selected_topic,
-        hidden_topics,
-        topic_browser_open,
-        thumbnails,
-        search_results,
-        search_loading,
-        search_error,
-        telegram_tick,
-        message_tick,
-        downloads,
-        mass_download_running,
-        mass_download_stopping,
-        mass_download_progress,
-        mass_download_open,
-        duplicate_search_progress,
-        context_menu,
-        select_portal,
-        reply_to,
-        forward_state,
-        lightbox,
-        user_media,
-        reaction_picker,
-        shared_url,
+        shell: ShellState {
+            tab,
+            palette,
+            density,
+            logged_in,
+            show_spike,
+            show_palette,
+            toasts,
+            select_portal,
+            shared_url,
+        },
+        session: SessionState {
+            auth_state,
+            auth_error,
+            auth_user,
+            booting,
+            preview_mode,
+            avatar,
+        },
+        conversation: ConversationState {
+            chats,
+            chats_loading,
+            chats_error,
+            selected_chat,
+            mobile_show_list,
+            messages,
+            messages_loading,
+            messages_error,
+            messages_has_more,
+            messages_key,
+            topics,
+            selected_topic,
+            hidden_topics,
+            topic_browser_open,
+            topics_cache,
+            topics_with_new_media,
+            twitter_gallery_badges,
+            twitter_sync_status,
+            thumbnails,
+            search_results,
+            search_loading,
+            search_error,
+            telegram_tick,
+            message_tick,
+        },
+        transfers: TransferState {
+            downloads,
+            mass_download_running,
+            mass_download_stopping,
+            mass_download_progress,
+            mass_download_open,
+            mass_download_topic,
+            duplicate_search_progress,
+            duplicate_search,
+        },
+        panels: PanelState {
+            context_menu,
+            reply_to,
+            forward_state,
+            lightbox,
+            user_media,
+            reaction_picker,
+        },
     });
 
     // Restore the persisted download history once. The React frontend uses the
@@ -169,14 +210,14 @@ pub fn App() -> Element {
         let history_services = history_services.clone();
         async move {
             if let Ok(items) = history_services.downloads.load_history().await {
-                let mut existing = ui.downloads();
+                let mut existing = ui.transfers.downloads();
                 for item in items {
                     if !existing.iter().any(|entry| entry.id == item.id) {
                         existing.push(item);
                     }
                 }
                 existing.sort_by_key(|item| item.created_at.unwrap_or_default());
-                ui.downloads.set(existing);
+                ui.transfers.downloads.set(existing);
             }
         }
     });
@@ -195,11 +236,11 @@ pub fn App() -> Element {
                  com cargo build -p plasma, ou use a prévia sem conta."
                         .to_string(),
                 );
-                ui.booting.set(false);
+                ui.session.booting.set(false);
                 return;
             };
 
-            ui.auth_state.set("initializing".to_string());
+            ui.session.auth_state.set("initializing".to_string());
             match init_services
                 .telegram
                 .init(credentials.api_id, credentials.api_hash)
@@ -208,10 +249,158 @@ pub fn App() -> Element {
                 Ok(status) => apply_auth_status(ui, status),
                 Err(error) => apply_auth_error(ui, error),
             }
-            ui.booting.set(false);
+            ui.session.booting.set(false);
 
-            if ui.auth_state() == "ready" {
+            if ui.session.auth_state() == "ready" {
                 refresh_identity(init_services.clone(), ui).await;
+            }
+        }
+    });
+
+    // One-shot import of synthetic Twitter galleries left in the webview.
+    let migrate_services = services.clone();
+    use_future(move || {
+        let migrate_services = migrate_services.clone();
+        async move {
+            match crate::twitter_fake::migrate_twitter_fake_chats_from_local_storage(
+                &migrate_services.settings,
+            )
+            .await
+            {
+                Ok(0) => {}
+                Ok(added) => {
+                    let mut chats = ui.conversation.chats();
+                    crate::twitter_fake::merge_fake_dialogs_into(
+                        &mut chats,
+                        &migrate_services.settings,
+                    );
+                    ui.conversation.chats.set(chats);
+                    state::push_toast(
+                        ui.shell.toasts,
+                        format!("{added} item(ns) Twitter/X importado(s) do app antigo."),
+                        ToastKind::Success,
+                    );
+                }
+                Err(_) => {
+                    // localStorage may be unavailable outside the WebView; ignore.
+                }
+            }
+        }
+    });
+
+    // Periodic append-only refresh of followed Twitter media galleries.
+    let poller_services = services.clone();
+    use_future(move || {
+        let poller_services = poller_services.clone();
+        async move {
+            const INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+            loop {
+                tokio::time::sleep(INTERVAL).await;
+                let chats = crate::twitter_fake::read_twitter_fake_chats(&poller_services.settings);
+                if chats.is_empty() {
+                    continue;
+                }
+                let cookies = poller_services
+                    .twitter
+                    .load_cookies()
+                    .await
+                    .unwrap_or_default();
+                let cookie_value = {
+                    let trimmed = cookies.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                };
+                for chat in chats {
+                    let url = if chat.original_url.trim().is_empty() {
+                        format!("https://x.com/{}", chat.username)
+                    } else {
+                        chat.original_url.clone()
+                    };
+                    let profile = match poller_services
+                        .twitter
+                        .analyze_profile(url, cookie_value.clone())
+                        .await
+                    {
+                        Ok(profile) => profile,
+                        Err(error) => {
+                            if ui
+                                .conversation
+                                .selected_chat()
+                                .is_some_and(|selected| selected.id == chat.id)
+                            {
+                                ui.conversation.twitter_sync_status.set(Some(
+                                    state::TwitterGallerySyncStatus {
+                                        chat_id: chat.id.clone(),
+                                        last_at_ms: None,
+                                        last_error: Some(error.to_string()),
+                                        checking: false,
+                                    },
+                                ));
+                            }
+                            continue;
+                        }
+                    };
+                    let Ok(result) = crate::twitter_fake::update_from_profile(
+                        &poller_services.settings,
+                        &profile,
+                    ) else {
+                        continue;
+                    };
+                    let open = ui
+                        .conversation
+                        .selected_chat()
+                        .is_some_and(|selected| selected.id == result.chat_id);
+                    if open {
+                        ui.conversation.twitter_sync_status.set(Some(
+                            state::TwitterGallerySyncStatus {
+                                chat_id: result.chat_id.clone(),
+                                last_at_ms: Some(state::now_millis()),
+                                last_error: None,
+                                checking: false,
+                            },
+                        ));
+                    }
+                    if result.added_count == 0 {
+                        continue;
+                    }
+                    let mut chats = ui.conversation.chats();
+                    crate::twitter_fake::merge_fake_dialogs_into(
+                        &mut chats,
+                        &poller_services.settings,
+                    );
+                    ui.conversation.chats.set(chats);
+                    if open {
+                        if let Some(fake) = crate::twitter_fake::get_twitter_fake_chat(
+                            &poller_services.settings,
+                            &result.chat_id,
+                        ) {
+                            let thumbs = fake.thumbnail_seed();
+                            if !thumbs.is_empty() {
+                                let mut cache = ui.conversation.thumbnails.write();
+                                for (key, url) in thumbs {
+                                    cache.insert(key, url);
+                                }
+                            }
+                            ui.conversation.messages.set(fake.messages_as_tdlib());
+                        }
+                        ui.conversation
+                            .twitter_gallery_badges
+                            .write()
+                            .remove(&result.chat_id);
+                    } else {
+                        let mut badges = ui.conversation.twitter_gallery_badges();
+                        let entry = badges.entry(result.chat_id.clone()).or_insert(0);
+                        *entry = entry.saturating_add(result.added_count);
+                        ui.conversation.twitter_gallery_badges.set(badges);
+                    }
+                    state::push_toast(
+                        ui.shell.toasts,
+                        format!(
+                            "{} nova(s) mídia(s) em @{}",
+                            result.added_count, chat.username
+                        ),
+                        ToastKind::Info,
+                    );
+                }
             }
         }
     });
@@ -226,24 +415,47 @@ pub fn App() -> Element {
                 match receiver.recv().await {
                     Ok(AppEvent::TelegramAuth { state }) => {
                         let ready = state == "ready";
-                        ui.auth_state.set(state.clone());
+                        ui.session.auth_state.set(state.clone());
                         if ready {
-                            ui.logged_in.set(true);
-                            ui.preview_mode.set(false);
+                            ui.shell.logged_in.set(true);
+                            ui.session.preview_mode.set(false);
+                            // Refresh the chat list; leave the open timeline alone.
+                            // Opening a chat already loads its history.
                             bump_telegram_tick(ui);
-                            bump_message_tick(ui);
                             refresh_identity(event_services.clone(), ui).await;
                         } else if matches!(state.as_str(), "closed" | "logging_out") {
-                            ui.logged_in.set(false);
+                            ui.shell.logged_in.set(false);
+                            clear_cached_chat_list(&event_services.settings);
+                            ui.conversation.chats.set(Vec::new());
+                            ui.conversation.selected_chat.set(None);
                         }
                     }
-                    Ok(AppEvent::TelegramNewMessage { chat_id, .. }) => {
-                        // The chat list always needs a refresh, but the open
-                        // timeline only changes when the message belongs to it.
-                        bump_telegram_tick(ui);
-                        if selected_chat_id(ui) == Some(chat_id) {
-                            bump_message_tick(ui);
+                    Ok(AppEvent::TelegramNewMessage {
+                        chat_id, message, ..
+                    }) => match serde_json::from_value::<TdlibMessageInfo>(message) {
+                        Ok(message) => {
+                            apply_live_message(&event_services, ui, chat_id, message);
                         }
+                        Err(_) => bump_telegram_tick(ui),
+                    },
+                    Ok(AppEvent::TelegramMessageUpdated {
+                        chat_id,
+                        message_id,
+                        text,
+                        has_media,
+                        is_photo,
+                        is_video,
+                    }) => {
+                        apply_message_content(
+                            ui, chat_id, message_id, text, has_media, is_photo, is_video,
+                        );
+                    }
+                    Ok(AppEvent::TelegramChatPatch {
+                        chat_id,
+                        title,
+                        unread_count,
+                    }) => {
+                        apply_chat_patch(ui, chat_id, title, unread_count);
                     }
                     Ok(AppEvent::TelegramMessagesDeleted {
                         chat_id,
@@ -252,16 +464,10 @@ pub fn App() -> Element {
                         mark_deleted_messages(ui, &message_ids);
                         let services = event_services.clone();
                         spawn(async move {
-                            // Persist the marker before reloading, otherwise the
-                            // network page can overwrite it with the old cache.
                             let _ = services
                                 .telegram
                                 .mark_messages_deleted(chat_id.to_string(), message_ids)
                                 .await;
-                            bump_telegram_tick(ui);
-                            if selected_chat_id(ui) == Some(chat_id) {
-                                bump_message_tick(ui);
-                            }
                         });
                     }
                     Ok(AppEvent::TelegramDownloadProgress {
@@ -279,6 +485,7 @@ pub fn App() -> Element {
                             })
                             .collect::<Vec<_>>();
                         let chat_title = ui
+                            .conversation
                             .chats()
                             .into_iter()
                             .find(|chat| chat.id == chat_id.to_string())
@@ -292,14 +499,23 @@ pub fn App() -> Element {
                             downloaded,
                             &items,
                         );
-                        ui.mass_download_progress.set(Some(MassDownloadProgress {
-                            chat_id,
-                            total,
-                            downloaded,
-                            current_file,
-                            is_scanning,
-                            items,
-                        }));
+                        let finished = mass_download_finished(&current_file, is_scanning);
+                        ui.transfers
+                            .mass_download_progress
+                            .set(Some(MassDownloadProgress {
+                                chat_id,
+                                total,
+                                downloaded,
+                                current_file,
+                                is_scanning,
+                                items,
+                            }));
+                        // Clear running here so a stuck JoinHandle await on the
+                        // Dioxus executor cannot leave "Parar download" locked.
+                        if finished {
+                            ui.transfers.mass_download_running.set(false);
+                            ui.transfers.mass_download_stopping.set(false);
+                        }
                     }
                     Ok(AppEvent::DuplicateSearchProgress {
                         run_id,
@@ -308,11 +524,14 @@ pub fn App() -> Element {
                         matches,
                         unreadable,
                     }) => {
+                        // Backend now sends the cumulative match list; replace
+                        // is safe and keeps the dialog in sync on large folders.
                         let matches = matches
                             .into_iter()
                             .filter_map(|item| serde_json::from_value::<SearchMatch>(item).ok())
                             .collect();
-                        ui.duplicate_search_progress
+                        ui.transfers
+                            .duplicate_search_progress
                             .set(Some(DuplicateSearchProgress {
                                 run_id,
                                 scanned,
@@ -330,13 +549,14 @@ pub fn App() -> Element {
                     }) => {
                         let id = format!("telegram-{chat_id}-{message_id}");
                         if ui
+                            .transfers
                             .downloads()
                             .iter()
                             .any(|item| item.id == id && item.is_active())
                         {
                             match state.as_str() {
                                 "ready" => apply_telegram_media_progress(
-                                    ui.downloads,
+                                    ui.transfers.downloads,
                                     &id,
                                     total_bytes,
                                     total_bytes,
@@ -347,7 +567,7 @@ pub fn App() -> Element {
                                         (downloaded_bytes as f64 / total_bytes as f64) * 100.0
                                     });
                                     apply_telegram_media_progress(
-                                        ui.downloads,
+                                        ui.transfers.downloads,
                                         &id,
                                         downloaded_bytes,
                                         total_bytes,
@@ -367,21 +587,49 @@ pub fn App() -> Element {
                         apply_download_progress(ui, &id, downloaded_bytes, total_bytes, percent);
                     }
                     Ok(AppEvent::DownloadDone { id }) => {
+                        let label = ui
+                            .transfers
+                            .downloads()
+                            .iter()
+                            .find(|item| item.id == id)
+                            .map(|item| item.title())
+                            .unwrap_or_else(|| id.clone());
                         apply_download_done(ui, &id);
                         persist_downloads(event_services.clone(), ui);
+                        if ui.shell.tab() != Tab::Downloads {
+                            state::push_toast(
+                                ui.shell.toasts,
+                                format!("Download concluído: {label}"),
+                                ToastKind::Success,
+                            );
+                        }
                     }
                     Ok(AppEvent::DownloadError { id, error }) => {
                         apply_download_error(ui, &id, error);
                         persist_downloads(event_services.clone(), ui);
                     }
                     Ok(AppEvent::SharedUrl { url }) => {
-                        ui.shared_url.set(Some(url));
-                        ui.tab.set(Tab::Downloads);
+                        ui.shell.shared_url.set(Some(url));
+                        ui.shell.tab.set(Tab::Downloads);
+                        // Downloads analysis does not need Telegram auth; open
+                        // the shell immediately when a share arrives on login.
+                        if !ui.shell.logged_in() {
+                            ui.session.preview_mode.set(true);
+                            ui.shell.logged_in.set(true);
+                        }
+                        state::push_toast(
+                            ui.shell.toasts,
+                            "Link recebido — analisando para download…",
+                            ToastKind::Info,
+                        );
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
+                // A startup burst otherwise stays inside this task and the
+                // window stops processing events until the queue drains.
+                tokio::task::yield_now().await;
             }
         }
     });
@@ -418,7 +666,7 @@ pub fn App() -> Element {
                     } else if (
                         !typing &&
                         (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
-                        document.querySelector(".lightbox-carousel")
+                        document.querySelector(".lightbox-frame.has-album")
                     ) {
                         event.preventDefault();
                         dioxus.send(event.key === "ArrowLeft" ? "lightbox-prev" : "lightbox-next");
@@ -430,26 +678,26 @@ pub fn App() -> Element {
             while let Ok(command) = eval.recv::<String>().await {
                 match command.as_str() {
                     "toggle" => {
-                        let next = !ui.show_palette();
-                        ui.show_palette.set(next);
+                        let next = !ui.shell.show_palette();
+                        ui.shell.show_palette.set(next);
                     }
                     "close" => {
-                        ui.show_palette.set(false);
-                        ui.context_menu.set(None);
-                        ui.user_media.set(None);
-                        ui.lightbox.set(None);
+                        ui.shell.show_palette.set(false);
+                        ui.panels.context_menu.set(None);
+                        ui.panels.user_media.set(None);
+                        ui.panels.lightbox.set(None);
                     }
                     "lightbox-prev" => {
-                        if let Some(state) = ui.lightbox() {
+                        if let Some(state) = ui.panels.lightbox() {
                             if let Some(previous) = state.previous_album() {
-                                ui.lightbox.set(Some(previous));
+                                ui.panels.lightbox.set(Some(previous));
                             }
                         }
                     }
                     "lightbox-next" => {
-                        if let Some(state) = ui.lightbox() {
+                        if let Some(state) = ui.panels.lightbox() {
                             if let Some(next) = state.next_album() {
-                                ui.lightbox.set(Some(next));
+                                ui.panels.lightbox.set(Some(next));
                             }
                         }
                     }
@@ -459,9 +707,9 @@ pub fn App() -> Element {
         });
     });
 
-    let palette = ui.palette();
-    let density = ui.density();
-    let open_menu = ui.context_menu();
+    let palette = ui.shell.palette();
+    let density = ui.shell.density();
+    let open_menu = ui.panels.context_menu();
 
     rsx! {
         style { dangerous_inner_html: SHELL_CSS }
@@ -469,7 +717,7 @@ pub fn App() -> Element {
             class: "plasma-root",
             "data-palette": palette.as_str(),
             "data-density": density.as_str(),
-            if ui.logged_in() {
+            if ui.shell.logged_in() {
                 Shell {}
             } else {
                 LoginView {}
@@ -483,7 +731,7 @@ pub fn App() -> Element {
                     on_select: {
                         let services = services.clone();
                         move |id: String| {
-                            let Some(menu) = ui.context_menu() else {
+                            let Some(menu) = ui.panels.context_menu() else {
                                 return;
                             };
                             context::handle_context_action(
@@ -494,32 +742,24 @@ pub fn App() -> Element {
                             );
                         }
                     },
-                    on_close: move |_| ui.context_menu.set(None),
+                    on_close: move |_| ui.panels.context_menu.set(None),
                 }
             }
-            if let Some(portal) = ui.select_portal() {
+            if let Some(portal) = ui.shell.select_portal() {
                 SelectMenu {
                     portal,
-                    on_close: move |_| ui.select_portal.set(None),
+                    on_close: move |_| ui.shell.select_portal.set(None),
                 }
             }
-            if let Some(target) = ui.reaction_picker() {
+            if let Some(target) = ui.panels.reaction_picker() {
                 ReactionPicker {
                     target,
-                    on_close: move |_| ui.reaction_picker.set(None),
+                    on_close: move |_| ui.panels.reaction_picker.set(None),
                 }
             }
             ToastStack {}
         }
     }
-}
-
-/// Numeric id of the conversation currently open in the timeline.
-fn selected_chat_id(ui: UiState) -> Option<i64> {
-    ui.selected_chat
-        .peek()
-        .as_ref()
-        .and_then(|chat| chat.id.parse::<i64>().ok())
 }
 
 async fn refresh_identity(services: AppServices, mut ui: UiState) {
@@ -536,15 +776,26 @@ async fn refresh_identity(services: AppServices, mut ui: UiState) {
             } else {
                 Some(name)
             };
-            ui.auth_user.set(display);
+            ui.session.auth_user.set(display);
         }
         Ok(me) => {
             if let Some(error) = me.error {
-                ui.auth_error.set(Some(error));
+                ui.session.auth_error.set(Some(error));
             }
         }
-        Err(error) => ui.auth_error.set(Some(error)),
+        Err(error) => ui.session.auth_error.set(Some(error.to_string())),
     }
+}
+
+/// Terminal mass-download progress labels from TDLib and Twitter/X galleries.
+fn mass_download_finished(current_file: &str, is_scanning: bool) -> bool {
+    if is_scanning {
+        return false;
+    }
+    current_file.starts_with("Concluído")
+        || current_file.starts_with("Interrompido")
+        || current_file.starts_with("Concluido:")
+        || current_file.starts_with("Parado:")
 }
 
 /// Class for a rail item, including Downloads feedback markers:
@@ -579,11 +830,15 @@ fn rail_item_tip(item: Tab, download_active: bool, download_failed: bool) -> &'s
 #[component]
 fn Shell() -> Element {
     let mut ui = use_context::<UiState>();
-    let tab = ui.tab();
-    let auth_user = ui.auth_user();
-    let preview = ui.preview_mode();
-    let download_active = ui.downloads().iter().any(|item| item.is_active());
-    let download_failed = ui.downloads().iter().any(|item| item.status == "failed");
+    let tab = ui.shell.tab();
+    let auth_user = ui.session.auth_user();
+    let preview = ui.session.preview_mode();
+    let download_active = ui.transfers.downloads().iter().any(|item| item.is_active());
+    let download_failed = ui
+        .transfers
+        .downloads()
+        .iter()
+        .any(|item| item.status == "failed");
 
     rsx! {
         div { class: "shell",
@@ -595,7 +850,7 @@ fn Shell() -> Element {
                         class: rail_item_class(tab, item, download_active, download_failed),
                         aria_label: "{item.label()}",
                         "data-tip": rail_item_tip(item, download_active, download_failed),
-                        onclick: move |_| ui.tab.set(item),
+                        onclick: move |_| ui.shell.tab.set(item),
                         Icon { name: item.rail_icon(), size: 20, class: "icon" }
                         if item == Tab::Downloads && download_failed {
                             span {
@@ -610,7 +865,7 @@ fn Shell() -> Element {
                     class: "rail-item",
                     aria_label: "Paleta de comandos",
                     "data-tip": "Paleta de comandos",
-                    onclick: move |_| ui.show_palette.set(true),
+                    onclick: move |_| ui.shell.show_palette.set(true),
                     "⌘"
                 }
             }
@@ -630,12 +885,12 @@ fn Shell() -> Element {
                         button {
                             class: "btn small ghost",
                             title: "Ctrl/Cmd + K",
-                            onclick: move |_| ui.show_palette.set(true),
+                            onclick: move |_| ui.shell.show_palette.set(true),
                             "⌘K  Comandos"
                         }
                         button {
                             class: "btn small ghost",
-                            onclick: move |_| ui.logged_in.set(false),
+                            onclick: move |_| ui.shell.logged_in.set(false),
                             "Sair"
                         }
                     }

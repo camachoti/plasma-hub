@@ -109,6 +109,39 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
     }
 }
 
+/// Shares a local file through the platform share sheet when available.
+///
+/// On desktop this falls back to revealing the file in the file manager.
+pub fn share_path(path: &str) -> Result<(), String> {
+    let target = Path::new(path);
+    if !target.exists() {
+        return Err("Arquivo não encontrado.".to_string());
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        return android::share_path(path);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        reveal_path(path)
+    }
+}
+
+/// Pulls the first `http(s)` URL out of free-form share / intent text.
+pub fn extract_http_url(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("https://").or_else(|| lower.find("http://"))?;
+    let candidate = &value[start..];
+    let end = candidate
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'' | ')' | ']'))
+        .unwrap_or(candidate.len());
+    let trimmed =
+        candidate[..end].trim_end_matches([',', '.', ')', ']', '}', ';', '!', '?', '"', '\'']);
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +158,22 @@ mod tests {
             root.join("missing").to_string_lossy().as_ref()
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extracts_urls_from_share_text() {
+        assert_eq!(
+            extract_http_url("https://x.com/foo/status/1"),
+            Some("https://x.com/foo/status/1".into())
+        );
+        assert_eq!(
+            extract_http_url("Olha isso https://youtu.be/abc123 via YouTube"),
+            Some("https://youtu.be/abc123".into())
+        );
+        assert_eq!(
+            extract_http_url("<a href=\"https://www.reddit.com/r/x/comments/1\">post</a>"),
+            Some("https://www.reddit.com/r/x/comments/1".into())
+        );
+        assert_eq!(extract_http_url("sem link aqui"), None);
     }
 }

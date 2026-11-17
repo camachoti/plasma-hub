@@ -267,6 +267,8 @@ fn same_content(
     candidate: &Path,
     cancellation: &DownloadCancellation,
 ) -> std::io::Result<bool> {
+    // Exact mode already filters by size; still require both sides to exhaust
+    // so a truncated read can never report a false positive.
     let mut candidate = BufReader::new(File::open(candidate)?);
     let source_reader: Box<dyn Read> = match (&source.path, &source.bytes) {
         (Some(path), _) => Box::new(BufReader::new(File::open(path)?)),
@@ -280,12 +282,15 @@ fn same_content(
         if cancellation.is_canceled() {
             return Ok(false);
         }
-        let count = source_reader.read(&mut left)?;
-        if count == 0 {
+        let source_count = source_reader.read(&mut left)?;
+        let candidate_count = candidate.read(&mut right)?;
+        if source_count != candidate_count {
+            return Ok(false);
+        }
+        if source_count == 0 {
             return Ok(true);
         }
-        candidate.read_exact(&mut right[..count])?;
-        if left[..count] != right[..count] {
+        if left[..source_count] != right[..source_count] {
             return Ok(false);
         }
     }
@@ -362,7 +367,6 @@ fn scan<F: FnMut(SearchProgress)>(
         }
         (Vec::new(), Vec::new())
     };
-    let mut emitted_matches = 0;
     let mut pending = vec![folder.to_path_buf()];
     while let Some(directory) = pending.pop() {
         if cancellation.is_canceled() {
@@ -450,17 +454,25 @@ fn scan<F: FnMut(SearchProgress)>(
                 }
             }
             if result.scanned % 100 == 0 || result.matches.len() > previous_matches {
+                // Cumulative matches: the UI replaces its list on each event
+                // (delta batches previously wiped hits on large folders).
                 on_progress(SearchProgress {
                     run_id: run_id.to_owned(),
                     scanned: result.scanned,
                     analyzed: result.analyzed,
-                    matches: result.matches[emitted_matches..].to_vec(),
+                    matches: result.matches.clone(),
                     unreadable: result.unreadable,
                 });
-                emitted_matches = result.matches.len();
             }
         }
     }
+    on_progress(SearchProgress {
+        run_id: run_id.to_owned(),
+        scanned: result.scanned,
+        analyzed: result.analyzed,
+        matches: result.matches.clone(),
+        unreadable: result.unreadable,
+    });
     Ok(result)
 }
 
@@ -565,6 +577,40 @@ mod tests {
             nested.join("renamed.png").to_string_lossy()
         );
         assert!(!result.canceled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn progress_keeps_cumulative_matches_after_later_batches() {
+        let root =
+            std::env::temp_dir().join(format!("plasma-duplicate-progress-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("hit.bin"), b"payload-xx").unwrap();
+        for index in 0..120 {
+            fs::write(root.join(format!("pad-{index:03}.bin")), b"other-data").unwrap();
+        }
+        let source = PreparedSource {
+            id: "file-1".into(),
+            path: None,
+            bytes: Some(b"payload-xx".to_vec()),
+            size: 10,
+            is_video: false,
+        };
+        let cancellation = DownloadCancellation::register("duplicate-search-progress");
+        let mut last_progress_matches = 0usize;
+        let result = scan(
+            |progress| {
+                last_progress_matches = progress.matches.len();
+            },
+            "test",
+            &root,
+            &[source],
+            &cancellation,
+            SearchMode::Exact,
+        )
+        .unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(last_progress_matches, 1);
         fs::remove_dir_all(root).unwrap();
     }
 

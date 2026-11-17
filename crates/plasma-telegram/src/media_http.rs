@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use plasma_core::AppEnv;
 
-use super::{
+use crate::media::{
     cached_chat_avatar, complete_native_media_meta, ensure_native_playback_file,
     parse_plasma_media_path, parse_range_header,
 };
@@ -83,15 +83,15 @@ pub fn playback_url(chat_id: i64, message_id: i64) -> String {
     format!("plasma-media://localhost/telegram/{chat_id}/{message_id}")
 }
 
-pub fn start_server(app: AppEnv) -> Result<(), String> {
+pub fn start_server(app: AppEnv) -> plasma_core::Result<()> {
     if PLASMA_MEDIA_HTTP_PORT.get().is_some() {
         return Ok(());
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(plasma_core::Error::from)?;
     let port = listener
         .local_addr()
-        .map_err(|error| error.to_string())?
+        .map_err(plasma_core::Error::from)?
         .port();
     let random_bytes: [u8; 32] = rand::random();
     let token = random_bytes
@@ -354,12 +354,12 @@ fn write_response(
     let meta = match complete_native_media_meta(app, chat_id, message_id) {
         Ok(Some(meta)) => meta,
         Ok(None) => return write_text_response(stream, 404, "Mídia não encontrada".to_string()),
-        Err(error) => return write_text_response(stream, 500, error),
+        Err(error) => return write_text_response(stream, 500, error.to_string()),
     };
 
     let (playback_path, playback_mime_type) = match ensure_native_playback_file(app, &meta) {
         Ok(result) => result,
-        Err(error) => return write_text_response(stream, 500, error),
+        Err(error) => return write_text_response(stream, 500, error.to_string()),
     };
     let content_type = playback_mime_type
         .or(meta.mime_type.clone())

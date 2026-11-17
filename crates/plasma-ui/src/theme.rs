@@ -94,6 +94,15 @@ impl Density {
         }
     }
 
+    /// Chat-list row height in px — keep in sync with `--row-h` in `shell.css`.
+    pub const fn row_height(self) -> f64 {
+        match self {
+            Self::Compact => 52.0,
+            Self::Cozy => 60.0,
+            Self::Roomy => 72.0,
+        }
+    }
+
     pub fn from_stored(value: Option<String>) -> Self {
         match value.as_deref() {
             Some("compact") => Self::Compact,

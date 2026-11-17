@@ -44,6 +44,7 @@ pub enum IconName {
     BrandTwitter,
     Settings,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     World,
     WorldCheck,
@@ -186,6 +187,7 @@ impl IconName {
                 "M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0",
             ],
             IconName::ChevronDown => &["M6 9l6 6l6 -6"],
+            IconName::ChevronLeft => &["M15 6l-6 6l6 6"],
             IconName::ChevronRight => &["M9 6l6 6l-6 6"],
             IconName::World => &[
                 "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0",

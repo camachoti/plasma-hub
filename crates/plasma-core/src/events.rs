@@ -29,6 +29,21 @@ pub enum AppEvent {
         chat_id: i64,
         message_ids: Vec<i64>,
     },
+    /// Text or media flags of a message already on screen changed.
+    TelegramMessageUpdated {
+        chat_id: i64,
+        message_id: i64,
+        text: String,
+        has_media: bool,
+        is_photo: bool,
+        is_video: bool,
+    },
+    /// Title or unread count of a chat changed, without reloading the list.
+    TelegramChatPatch {
+        chat_id: i64,
+        title: Option<String>,
+        unread_count: Option<i32>,
+    },
     TelegramDownloadProgress {
         chat_id: i64,
         total: usize,
@@ -87,6 +102,8 @@ impl AppEvent {
             Self::TelegramAuth { .. } => "telegram-auth",
             Self::TelegramNewMessage { .. } => "telegram-new-message",
             Self::TelegramMessagesDeleted { .. } => "telegram-messages-deleted",
+            Self::TelegramMessageUpdated { .. } => "telegram-message-updated",
+            Self::TelegramChatPatch { .. } => "telegram-chat-patch",
             Self::TelegramDownloadProgress { .. } => "telegram-download-progress",
             Self::DuplicateSearchProgress { .. } => "duplicate-search-progress",
             Self::MediaProgress { .. } => "media-progress",

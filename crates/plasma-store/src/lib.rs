@@ -80,13 +80,13 @@ pub struct SharedMediaCacheResult {
     error: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicDownloadState {
-    topic_id: String,
-    topic_kind: String,
-    last_message_id: i64,
-    downloaded_at: i64,
+    pub topic_id: String,
+    pub topic_kind: String,
+    pub last_message_id: i64,
+    pub downloaded_at: i64,
 }
 
 pub fn record_topic_mass_download(

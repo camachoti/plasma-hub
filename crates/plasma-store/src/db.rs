@@ -7,7 +7,10 @@
 
 use plasma_core::{AppEnv, Error, Result};
 use rusqlite::Connection;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub const DB_FILE_NAME: &str = "plasma-hub.sqlite3";
@@ -94,9 +97,64 @@ impl Db {
         &self.path
     }
 
-    pub fn connect(&self) -> Result<Connection> {
+    pub fn connect(&self) -> Result<PooledConnection> {
         connect_path(&self.path)
     }
+}
+
+/// Open SQLite handle borrowed from the process-wide pool.
+///
+/// Dropping it returns the connection instead of closing the file. Opening a
+/// new handle on every settings or cache read was paying `journal_mode=WAL`
+/// and a migration check on the UI thread.
+pub struct PooledConnection {
+    inner: Option<Connection>,
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for PooledConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PooledConnection")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl Deref for PooledConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref().expect("pooled connection still open")
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.as_mut().expect("pooled connection still open")
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        let Some(connection) = self.inner.take() else {
+            return;
+        };
+        let Ok(mut pool) = connection_pool().lock() else {
+            return;
+        };
+        let slots = pool.entry(self.path.clone()).or_default();
+        if slots.len() < POOL_LIMIT {
+            slots.push(connection);
+        }
+    }
+}
+
+const POOL_LIMIT: usize = 8;
+
+fn connection_pool() -> &'static Mutex<HashMap<PathBuf, Vec<Connection>>> {
+    static POOL: OnceLock<Mutex<HashMap<PathBuf, Vec<Connection>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Resolves the shared database file, creating the data directory if needed.
@@ -107,12 +165,24 @@ pub fn db_path(app: &AppEnv) -> Result<PathBuf> {
 }
 
 /// Opens a connection, applies the required pragmas, and runs migrations.
-pub fn connect(app: &AppEnv) -> Result<Connection> {
+pub fn connect(app: &AppEnv) -> Result<PooledConnection> {
     connect_path(&db_path(app)?)
 }
 
 /// Opens a connection at `path`, applying pragmas and migrations.
-pub fn connect_path(path: &Path) -> Result<Connection> {
+///
+/// A warm handle is reused when the pool has one. A new handle still runs
+/// migrations, so the first open of a process upgrades the schema.
+pub fn connect_path(path: &Path) -> Result<PooledConnection> {
+    if let Ok(mut pool) = connection_pool().lock() {
+        if let Some(connection) = pool.get_mut(path).and_then(|slots| slots.pop()) {
+            return Ok(PooledConnection {
+                inner: Some(connection),
+                path: path.to_path_buf(),
+            });
+        }
+    }
+
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -132,7 +202,10 @@ pub fn connect_path(path: &Path) -> Result<Connection> {
         .map_err(db_error)?;
 
     migrate(&mut connection)?;
-    Ok(connection)
+    Ok(PooledConnection {
+        inner: Some(connection),
+        path: path.to_path_buf(),
+    })
 }
 
 /// Applies all pending migrations in order.

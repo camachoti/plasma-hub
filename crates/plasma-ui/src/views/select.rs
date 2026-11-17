@@ -92,7 +92,7 @@ fn open_select(
         } else {
             top + height + 4.0
         };
-        ui.select_portal.set(Some(SelectPortal {
+        ui.shell.select_portal.set(Some(SelectPortal {
             id,
             x: number("x"),
             y,
@@ -120,14 +120,15 @@ pub fn Select(
         .find(|option| option.value == value)
         .map(|option| option.label.clone());
     let open = ui
+        .shell
         .select_portal()
         .map(|portal| portal.id == id)
         .unwrap_or(false);
 
     // Closing a modal unmounts the control; drop its stale menu with it.
     use_drop(move || {
-        if ui.select_portal().map(|portal| portal.id) == Some(id) {
-            ui.select_portal.set(None);
+        if ui.shell.select_portal().map(|portal| portal.id) == Some(id) {
+            ui.shell.select_portal.set(None);
         }
     });
 
@@ -147,8 +148,8 @@ pub fn Select(
                         if disabled {
                             return;
                         }
-                        if ui.select_portal().map(|portal| portal.id) == Some(id) {
-                            ui.select_portal.set(None);
+                        if ui.shell.select_portal().map(|portal| portal.id) == Some(id) {
+                            ui.shell.select_portal.set(None);
                             return;
                         }
                         open_select(ui, id, options.clone(), value.clone(), on_change);
@@ -165,13 +166,13 @@ pub fn Select(
                             if disabled {
                                 return;
                             }
-                            if ui.select_portal().map(|portal| portal.id) == Some(id) {
-                                ui.select_portal.set(None);
+                            if ui.shell.select_portal().map(|portal| portal.id) == Some(id) {
+                                ui.shell.select_portal.set(None);
                             } else {
                                 open_select(ui, id, options.clone(), value.clone(), on_change);
                             }
                         } else if event.key() == Key::Escape {
-                            ui.select_portal.set(None);
+                            ui.shell.select_portal.set(None);
                         }
                     }
                 },

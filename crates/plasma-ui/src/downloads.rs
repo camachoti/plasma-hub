@@ -4,7 +4,7 @@
 //! SQLite. The Rust shell uses the same table and JSON shape so data from older
 //! versions is not lost.
 
-use crate::state::{now_millis, AppServices, UiState};
+use crate::state::{now_millis, service_error, AppServices, UiState};
 use dioxus::prelude::{Signal, WritableExt};
 use plasma_core::AppEnv;
 use plasma_store::download_history_get;
@@ -119,7 +119,7 @@ pub fn apply_download_progress(
     total: u64,
     percent: Option<f64>,
 ) {
-    let mut items = ui.downloads();
+    let mut items = ui.transfers.downloads();
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
         return;
     };
@@ -143,7 +143,7 @@ pub fn apply_download_progress(
     }
     item.can_cancel = Some(true);
     item.can_retry = Some(false);
-    ui.downloads.set(items);
+    ui.transfers.downloads.set(items);
 }
 
 /// Applies a TDLib media progress event without touching the batch counters or
@@ -190,21 +190,31 @@ fn apply_media_progress_to_items(
     true
 }
 
-pub fn apply_download_done(mut ui: UiState, id: &str) {
-    let mut items = ui.downloads();
-    let Some(item) = items.iter_mut().find(|item| item.id == id) else {
-        return;
-    };
+/// Marks a queue item as successfully finished and refreshes `file_size` from disk.
+pub fn complete_download_record(item: &mut DownloadRecord) {
     item.progress = 100.0;
     item.status = "completed".to_string();
     item.error = None;
     item.can_cancel = Some(false);
     item.can_retry = Some(false);
-    ui.downloads.set(items);
+    if let Some(path) = item.file_path.as_ref() {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            item.file_size = Some(metadata.len().min(i64::MAX as u64) as i64);
+        }
+    }
+}
+
+pub fn apply_download_done(mut ui: UiState, id: &str) {
+    let mut items = ui.transfers.downloads();
+    let Some(item) = items.iter_mut().find(|item| item.id == id) else {
+        return;
+    };
+    complete_download_record(item);
+    ui.transfers.downloads.set(items);
 }
 
 pub fn apply_download_error(mut ui: UiState, id: &str, error: String) {
-    let mut items = ui.downloads();
+    let mut items = ui.transfers.downloads();
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
         return;
     };
@@ -215,23 +225,23 @@ pub fn apply_download_error(mut ui: UiState, id: &str, error: String) {
     item.error = Some(error);
     item.can_cancel = Some(false);
     item.can_retry = Some(true);
-    ui.downloads.set(items);
+    ui.transfers.downloads.set(items);
 }
 
 pub fn persist_downloads(services: AppServices, ui: UiState) {
-    let items = ui.downloads();
+    let items = ui.transfers.downloads();
     spawn_persist(services, items);
 }
 
 pub fn push_download(services: AppServices, mut ui: UiState, record: DownloadRecord) {
-    let mut items = ui.downloads();
+    let mut items = ui.transfers.downloads();
     items.retain(|item| item.id != record.id);
     items.push(record);
     if items.len() > 300 {
         let drain = items.len() - 300;
         items.drain(0..drain);
     }
-    ui.downloads.set(items.clone());
+    ui.transfers.downloads.set(items.clone());
     spawn_persist(services, items);
 }
 
@@ -242,13 +252,13 @@ pub fn update_download(
     update: impl FnOnce(&mut DownloadRecord),
     persist: bool,
 ) {
-    let mut items = ui.downloads();
+    let mut items = ui.transfers.downloads();
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
         return;
     };
     update(item);
     let items_snapshot = items.clone();
-    ui.downloads.set(items);
+    ui.transfers.downloads.set(items);
     if persist {
         spawn_persist(services, items_snapshot);
     }
@@ -276,7 +286,7 @@ pub fn sync_telegram_downloads(
     }
     let batch_id = format!("telegram-{chat_id}");
     let created_at = now_millis();
-    let mut records = ui.downloads();
+    let mut records = ui.transfers.downloads();
     let mut terminal_changed = false;
 
     for item in items {
@@ -339,7 +349,7 @@ pub fn sync_telegram_downloads(
         let drain = records.len() - 300;
         records.drain(0..drain);
     }
-    ui.downloads.set(records.clone());
+    ui.transfers.downloads.set(records.clone());
     if terminal_changed {
         spawn_persist(services, records);
     }
@@ -368,12 +378,31 @@ pub async fn save_telegram_media(
     file_size: Option<i64>,
     batch: Option<(&TelegramSaveBatch, usize)>,
     dest_dir: Option<String>,
-) -> Result<NativeSavedMedia, String> {
+) -> plasma_core::Result<NativeSavedMedia> {
     let id = format!("telegram-{chat_id}-{message_id}");
     let batch_id = batch.map(|(batch, _)| batch.id.clone());
     let batch_title = batch.map(|(batch, _)| batch.title.clone());
     let batch_total = batch.map(|(batch, _)| batch.total as i64);
     let batch_done = batch.map(|(_, done)| done as i64);
+
+    let fake_media = crate::twitter_fake::find_twitter_fake_message_by_numeric(
+        &services.settings,
+        chat_id,
+        message_id,
+    );
+    let is_twitter_fake = fake_media.is_some();
+    let resolved_name = if file_name.trim().is_empty() {
+        if fake_media
+            .as_ref()
+            .is_some_and(|(_, message)| message.is_video)
+        {
+            format!("media_{message_id}.mp4")
+        } else {
+            format!("media_{message_id}.jpg")
+        }
+    } else {
+        file_name
+    };
 
     push_download(
         services.clone(),
@@ -382,13 +411,27 @@ pub async fn save_telegram_media(
             id: id.clone(),
             chat_id: Some(chat_id.to_string()),
             message_id: Some(message_id),
-            file_name,
+            file_name: resolved_name.clone(),
             progress: 0.0,
             status: "downloading".to_string(),
             file_size,
-            platform: Some("telegram".to_string()),
-            source_label: Some("Telegram".to_string()),
-            batch_kind: batch_id.as_ref().map(|_| "telegram".to_string()),
+            platform: Some(if is_twitter_fake {
+                "twitter".to_string()
+            } else {
+                "telegram".to_string()
+            }),
+            source_label: Some(if is_twitter_fake {
+                "Twitter/X".to_string()
+            } else {
+                "Telegram".to_string()
+            }),
+            batch_kind: batch_id.as_ref().map(|_| {
+                if is_twitter_fake {
+                    "twitter".to_string()
+                } else {
+                    "telegram".to_string()
+                }
+            }),
             batch_id,
             batch_title,
             batch_total,
@@ -400,10 +443,14 @@ pub async fn save_telegram_media(
         },
     );
 
-    let result = services
-        .telegram
-        .save_media(chat_id, message_id, dest_dir.clone())
-        .await;
+    let result = if let Some((_chat, message)) = fake_media {
+        save_twitter_fake_media(services, &message, &resolved_name, dest_dir).await
+    } else {
+        services
+            .telegram
+            .save_media(chat_id, message_id, dest_dir.clone())
+            .await
+    };
     update_download(
         services.clone(),
         ui,
@@ -430,12 +477,78 @@ pub async fn save_telegram_media(
             }
             Err(error) => {
                 record.status = "failed".to_string();
-                record.error = Some(error.clone());
+                record.error = Some(error.to_string());
             }
         },
         true,
     );
     result
+}
+
+async fn save_twitter_fake_media(
+    services: &AppServices,
+    message: &crate::twitter_fake::TwitterFakeMessage,
+    file_name: &str,
+    dest_dir: Option<String>,
+) -> plasma_core::Result<NativeSavedMedia> {
+    let Some(url) = message.url.as_ref().filter(|value| !value.is_empty()) else {
+        return Ok(NativeSavedMedia {
+            success: false,
+            file_path: None,
+            file_name: None,
+            size: None,
+            skipped: false,
+            error: Some("Mídia sem URL.".into()),
+        });
+    };
+    let folder = dest_dir
+        .map(PathBuf::from)
+        .or_else(|| services.env.paths().download_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let destination = folder.join(file_name);
+    if destination.exists() {
+        return Ok(NativeSavedMedia {
+            success: true,
+            file_path: Some(destination.to_string_lossy().to_string()),
+            file_name: Some(file_name.to_string()),
+            size: destination.metadata().ok().map(|meta| meta.len() as i64),
+            skipped: true,
+            error: None,
+        });
+    }
+    let mut headers = HashMap::new();
+    headers.insert("Referer".into(), "https://x.com/".into());
+    headers.insert(
+        "User-Agent".into(),
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".into(),
+    );
+    let download_id = format!("twitter-fake-{}", message.id);
+    match plasma_download::download_url_to_file(
+        &services.env,
+        &download_id,
+        url,
+        &destination.to_string_lossy(),
+        Some(headers),
+    )
+    .await
+    {
+        Ok(()) => Ok(NativeSavedMedia {
+            success: true,
+            file_path: Some(destination.to_string_lossy().to_string()),
+            file_name: Some(file_name.to_string()),
+            size: destination.metadata().ok().map(|meta| meta.len() as i64),
+            skipped: false,
+            error: None,
+        }),
+        Err(error) => Ok(NativeSavedMedia {
+            success: false,
+            file_path: None,
+            file_name: None,
+            size: None,
+            skipped: false,
+            error: Some(error),
+        }),
+    }
 }
 
 fn telegram_status(status: &str) -> &'static str {
@@ -502,19 +615,19 @@ impl DownloadHandle {
         url: String,
         file_path: String,
         headers: Option<HashMap<String, String>>,
-    ) -> Result<(), String> {
+    ) -> plasma_core::Result<()> {
         let env = self.env.clone();
         let handle = self.runtime.spawn(async move {
             plasma_download::download_url_to_file(&env, &id, &url, &file_path, headers).await
         });
-        self.join(handle).await?
+        self.join(handle).await?.map_err(service_error)
     }
 
     pub fn cancel(&self, id: &str) -> bool {
         plasma_download::cancel_download(id)
     }
 
-    pub async fn load_history(&self) -> Result<Vec<DownloadRecord>, String> {
+    pub async fn load_history(&self) -> plasma_core::Result<Vec<DownloadRecord>> {
         let env = self.env.clone();
         let handle = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || download_history_get(&env)).await
@@ -535,7 +648,7 @@ impl DownloadHandle {
             .map(|mut item: DownloadRecord| {
                 if item.status == "downloading" {
                     item.status = "failed".to_string();
-                    item.error = Some("Download interrompido ao fechar o aplicativo.".to_string());
+                    item.error = Some("Download interrompido — pode retomar.".to_string());
                     item.can_cancel = Some(false);
                     item.can_retry = Some(item.source_url.is_some() && item.file_path.is_some());
                 }
@@ -544,7 +657,7 @@ impl DownloadHandle {
             .collect())
     }
 
-    pub async fn save_history(&self, items: Vec<DownloadRecord>) -> Result<(), String> {
+    pub async fn save_history(&self, items: Vec<DownloadRecord>) -> plasma_core::Result<()> {
         let env = self.env.clone();
         let save_lock = self.save_lock.clone();
         let handle = self.runtime.spawn(async move {
@@ -564,13 +677,13 @@ impl DownloadHandle {
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())
         });
-        self.join(handle).await?
+        self.join(handle).await?.map_err(service_error)
     }
 
-    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, String> {
-        handle
-            .await
-            .map_err(|error| format!("Tarefa de download falhou: {error}"))
+    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, plasma_core::Error> {
+        handle.await.map_err(|error| {
+            crate::state::service_error(format!("Tarefa de download falhou: {error}"))
+        })
     }
 }
 

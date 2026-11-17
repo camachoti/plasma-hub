@@ -42,9 +42,9 @@ pub fn TopicBrowser(chat: TdlibChatInfo, on_close: EventHandler<()>) -> Element 
     let mut show_hidden = use_signal(|| false);
     let chat_id = chat.id.parse::<i64>().ok();
 
-    let topics = ui.topics();
-    let hidden = ui.hidden_topics();
-    let selected = ui.selected_topic();
+    let topics = ui.conversation.topics();
+    let hidden = ui.conversation.hidden_topics();
+    let selected = ui.conversation.selected_topic();
     let selected_id = selected.as_ref().map(|topic| topic.id);
     let search = query().trim().to_lowercase();
     let hidden_count = topics
@@ -59,8 +59,8 @@ pub fn TopicBrowser(chat: TdlibChatInfo, on_close: EventHandler<()>) -> Element 
         .collect();
 
     let open_all = move |_| {
-        ui.selected_topic.set(None);
-        ui.reply_to.set(None);
+        ui.conversation.selected_topic.set(None);
+        ui.panels.reply_to.set(None);
         on_close.call(());
     };
 
@@ -151,8 +151,8 @@ pub fn TopicBrowser(chat: TdlibChatInfo, on_close: EventHandler<()>) -> Element 
                                         onclick: {
                                             let topic = topic.clone();
                                             move |_| {
-                                                ui.selected_topic.set(Some(topic.clone()));
-                                                ui.reply_to.set(None);
+                                                ui.conversation.selected_topic.set(Some(topic.clone()));
+                                                ui.panels.reply_to.set(None);
                                                 on_close.call(());
                                             }
                                         },
@@ -163,13 +163,14 @@ pub fn TopicBrowser(chat: TdlibChatInfo, on_close: EventHandler<()>) -> Element 
                                                 event.stop_propagation();
                                                 let Some(chat_id) = chat_id else { return; };
                                                 let point = event.data().client_coordinates();
-                                                ui.context_menu.set(Some(ContextMenuState::new(
+                                                ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                     point.x,
                                                     point.y,
                                                     ContextTarget::Topic {
                                                         chat_id,
                                                         topic: Box::new(topic.clone()),
                                                         hidden: hidden_now,
+                                                        browser_open: true,
                                                     },
                                                 )));
                                             }

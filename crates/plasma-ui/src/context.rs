@@ -8,8 +8,8 @@
 use crate::downloads::{save_telegram_media, DownloadRecord, TelegramSaveBatch};
 use crate::icons::IconName;
 use crate::state::{
-    push_toast, toggle_topic_hidden, AppServices, LightboxMedia, LightboxState,
-    ReactionPickerState, ToastKind, UiState, UserMediaState,
+    push_toast, toggle_topic_hidden, AppServices, DuplicateSearchMedia, LightboxMedia,
+    LightboxState, ReactionPickerState, ToastKind, UiState, UserMediaState,
 };
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibForumTopicInfo, TdlibMessageInfo};
@@ -76,15 +76,19 @@ pub enum ContextTarget {
         message: Box<TdlibMessageInfo>,
     },
     /// A forum topic chip or row. `hidden` mirrors the current visibility so
-    /// the menu label can offer hide/show.
+    /// the menu label can offer hide/show. `browser_open` says whether the
+    /// topic list dialog is already showing the same listing.
     Topic {
         chat_id: i64,
         topic: Box<TdlibForumTopicInfo>,
         hidden: bool,
+        browser_open: bool,
     },
     /// The "Todos" chip. It has no topic of its own, so the menu only opens
-    /// the topic browser.
-    Topics,
+    /// the topic browser. `browser_open` mirrors the topic list dialog.
+    Topics {
+        browser_open: bool,
+    },
     /// An album (grouped media) of the timeline. `anchor_id` is the media the
     /// user right-clicked, used by the single-item actions.
     Album {
@@ -108,16 +112,41 @@ impl ContextTarget {
     /// Builds the menu shown for this target.
     pub fn entries(&self) -> Vec<ContextMenuEntry> {
         match self {
-            ContextTarget::Chat { id } => vec![
-                ContextMenuEntry::new("chat.open", "Abrir conversa").icon(IconName::Chat),
-                ContextMenuEntry::new("chat.read", "Marcar como lida").icon(IconName::Eye),
-                ContextMenuEntry::new("chat.mass", "Download em massa")
-                    .icon(IconName::Download)
-                    .separator(),
-                ContextMenuEntry::new("chat.copy_id", "Copiar ID da conversa")
-                    .icon(IconName::Copy)
-                    .shortcut(id.clone()),
-            ],
+            ContextTarget::Chat { id } => {
+                let mut entries =
+                    vec![ContextMenuEntry::new("chat.open", "Abrir conversa").icon(IconName::Chat)];
+                if crate::twitter_fake::is_twitter_fake_chat_id(id) {
+                    entries.push(
+                        ContextMenuEntry::new("chat.mass", "Download em massa")
+                            .icon(IconName::Download),
+                    );
+                    entries.push(
+                        ContextMenuEntry::new("chat.remove_twitter", "Remover galeria Twitter")
+                            .icon(IconName::Trash)
+                            .separator(),
+                    );
+                    entries.push(
+                        ContextMenuEntry::new("chat.copy_id", "Copiar ID da conversa")
+                            .icon(IconName::Copy)
+                            .shortcut(id.clone()),
+                    );
+                } else {
+                    entries.push(
+                        ContextMenuEntry::new("chat.read", "Marcar como lida").icon(IconName::Eye),
+                    );
+                    entries.push(
+                        ContextMenuEntry::new("chat.mass", "Download em massa")
+                            .icon(IconName::Download)
+                            .separator(),
+                    );
+                    entries.push(
+                        ContextMenuEntry::new("chat.copy_id", "Copiar ID da conversa")
+                            .icon(IconName::Copy)
+                            .shortcut(id.clone()),
+                    );
+                }
+                entries
+            }
             ContextTarget::Message { message, .. } => {
                 let mut entries = vec![
                     ContextMenuEntry::new("message.reply", "Responder").icon(IconName::Reply),
@@ -134,6 +163,16 @@ impl ContextTarget {
                     entries.push(
                         ContextMenuEntry::new("message.save", "Salvar mídia").icon(IconName::Save),
                     );
+                    let mut search = ContextMenuEntry::new(
+                        "message.search_system",
+                        "Procurar arquivo no sistema",
+                    )
+                    .icon(IconName::Folder)
+                    .separator();
+                    if cfg!(target_os = "android") {
+                        search = search.disabled();
+                    }
+                    entries.push(search);
                 }
                 if message.is_deleted {
                     entries.push(
@@ -144,8 +183,12 @@ impl ContextTarget {
                 }
                 entries
             }
-            ContextTarget::Topic { hidden, .. } => vec![
-                ContextMenuEntry::new(
+            ContextTarget::Topic {
+                hidden,
+                browser_open,
+                ..
+            } => {
+                let mut entries = vec![ContextMenuEntry::new(
                     "topic.toggle",
                     if *hidden {
                         "Mostrar tópico"
@@ -157,16 +200,29 @@ impl ContextTarget {
                     IconName::Eye
                 } else {
                     IconName::EyeOff
-                }),
-                ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
-                    .icon(IconName::List)
-                    .separator(),
-            ],
-            ContextTarget::Topics => {
-                vec![
-                    ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
-                        .icon(IconName::List),
-                ]
+                })];
+                entries.push(
+                    ContextMenuEntry::new("topic.mass", "Download em massa do tópico")
+                        .icon(IconName::CloudDownload),
+                );
+                // The list dialog already shows the same listing.
+                if !*browser_open {
+                    entries.push(
+                        ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
+                            .icon(IconName::List),
+                    );
+                }
+                entries
+            }
+            ContextTarget::Topics { browser_open } => {
+                if *browser_open {
+                    Vec::new()
+                } else {
+                    vec![
+                        ContextMenuEntry::new("topic.browse", "Exibir listagem de tópicos")
+                            .icon(IconName::List),
+                    ]
+                }
             }
             ContextTarget::Album {
                 messages,
@@ -188,6 +244,15 @@ impl ContextTarget {
                     .icon(IconName::Download)
                     .separator(),
                 ];
+                if anchor.has_media {
+                    let mut search =
+                        ContextMenuEntry::new("album.search_system", "Procurar arquivo no sistema")
+                            .icon(IconName::Folder);
+                    if cfg!(target_os = "android") {
+                        search = search.disabled();
+                    }
+                    entries.push(search);
+                }
                 if messages
                     .iter()
                     .any(|message| !message.text.trim().is_empty())
@@ -226,10 +291,17 @@ impl ContextTarget {
                         ContextMenuEntry::new("download.open", "Abrir arquivo")
                             .icon(IconName::External),
                     );
-                    entries.push(
-                        ContextMenuEntry::new("download.reveal", "Mostrar na pasta")
-                            .icon(IconName::Folder),
-                    );
+                    if cfg!(target_os = "android") {
+                        entries.push(
+                            ContextMenuEntry::new("download.share", "Compartilhar")
+                                .icon(IconName::External),
+                        );
+                    } else {
+                        entries.push(
+                            ContextMenuEntry::new("download.reveal", "Mostrar na pasta")
+                                .icon(IconName::Folder),
+                        );
+                    }
                 }
                 if record.file_path.is_some() {
                     entries.push(
@@ -285,16 +357,21 @@ pub fn handle_context_action(
 ) {
     match (target, id) {
         (ContextTarget::Chat { id: chat_id }, "chat.open") => {
-            if let Some(chat) = ui.chats().into_iter().find(|chat| chat.id == *chat_id) {
-                ui.selected_chat.set(Some(chat));
-                ui.messages.set(Vec::new());
-                ui.messages_key.set(None);
-                ui.messages_has_more.set(false);
-                ui.selected_topic.set(None);
-                ui.hidden_topics.set(Vec::new());
-                ui.topic_browser_open.set(false);
-                ui.reply_to.set(None);
-                ui.user_media.set(None);
+            if let Some(chat) = ui
+                .conversation
+                .chats()
+                .into_iter()
+                .find(|chat| chat.id == *chat_id)
+            {
+                ui.conversation.selected_chat.set(Some(chat));
+                ui.conversation.messages.set(Vec::new());
+                ui.conversation.messages_key.set(None);
+                ui.conversation.messages_has_more.set(false);
+                ui.conversation.selected_topic.set(None);
+                ui.conversation.hidden_topics.set(Vec::new());
+                ui.conversation.topic_browser_open.set(false);
+                ui.panels.reply_to.set(None);
+                ui.panels.user_media.set(None);
             }
         }
         (ContextTarget::Chat { id: chat_id }, "chat.read") => {
@@ -304,29 +381,73 @@ pub fn handle_context_action(
             // Clear the unread badge right away; the backend call below keeps
             // Telegram itself in sync.
             if parsed != 0 {
-                let mut chats = ui.chats();
+                let mut chats = ui.conversation.chats();
                 let read_selected = ui
+                    .conversation
                     .selected_chat()
                     .is_some_and(|selected| selected.id == *chat_id);
                 if let Some(index) = chats.iter().position(|chat| chat.id == *chat_id) {
                     chats[index].unread_count = 0;
-                    ui.chats.set(chats.clone());
+                    ui.conversation.chats.set(chats.clone());
                     if read_selected {
-                        let mut selected = ui.selected_chat().unwrap();
-                        selected.unread_count = 0;
-                        ui.selected_chat.set(Some(selected));
+                        if let Some(mut selected) = ui.conversation.selected_chat() {
+                            selected.unread_count = 0;
+                            ui.conversation.selected_chat.set(Some(selected));
+                        }
                     }
                 }
             }
             let services = services.clone();
+            let last_message_id = ui
+                .conversation
+                .chats
+                .peek()
+                .iter()
+                .find(|chat| chat.id == *chat_id)
+                .and_then(|chat| chat.last_message_id);
             spawn(async move {
-                if let Err(error) = services.telegram.read_chat(parsed).await {
-                    push_toast(ui.toasts, error, ToastKind::Error);
+                if let Err(error) = services
+                    .telegram
+                    .read_chat(parsed, last_message_id, Some(1))
+                    .await
+                {
+                    push_toast(ui.shell.toasts, error, ToastKind::Error);
                 }
             });
         }
         (ContextTarget::Chat { .. }, "chat.mass") => {
-            ui.mass_download_open.set(true);
+            ui.transfers.mass_download_open.set(true);
+        }
+        (ContextTarget::Chat { id: chat_id }, "chat.remove_twitter") => {
+            if !crate::twitter_fake::is_twitter_fake_chat_id(chat_id) {
+                return;
+            }
+            match crate::twitter_fake::remove_twitter_fake_chat(&services.settings, chat_id) {
+                Ok(true) => {
+                    let mut chats = ui.conversation.chats();
+                    chats.retain(|chat| chat.id != *chat_id);
+                    ui.conversation.chats.set(chats);
+                    if ui
+                        .conversation
+                        .selected_chat()
+                        .is_some_and(|chat| chat.id == *chat_id)
+                    {
+                        ui.conversation.selected_chat.set(None);
+                        ui.conversation.messages.set(Vec::new());
+                    }
+                    push_toast(
+                        ui.shell.toasts,
+                        "Galeria Twitter/X removida.",
+                        ToastKind::Success,
+                    );
+                }
+                Ok(false) => push_toast(
+                    ui.shell.toasts,
+                    "Galeria Twitter/X não encontrada.",
+                    ToastKind::Info,
+                ),
+                Err(error) => push_toast(ui.shell.toasts, error, ToastKind::Error),
+            }
         }
         (ContextTarget::Chat { id: chat_id }, "chat.copy_id") => {
             let chat_id = chat_id.clone();
@@ -341,17 +462,18 @@ pub fn handle_context_action(
             } else {
                 format!("Tópico \"{}\" visível novamente.", topic.title)
             };
-            push_toast(ui.toasts, message, ToastKind::Info);
+            push_toast(ui.shell.toasts, message, ToastKind::Info);
         }
-        (ContextTarget::Topic { .. }, "topic.browse") | (ContextTarget::Topics, "topic.browse") => {
-            ui.topic_browser_open.set(true);
+        (ContextTarget::Topic { .. }, "topic.browse")
+        | (ContextTarget::Topics { .. }, "topic.browse") => {
+            ui.conversation.topic_browser_open.set(true);
         }
         (ContextTarget::Message { message, .. }, "message.reply") => {
-            ui.reply_to.set(Some(message.as_ref().clone()));
+            ui.panels.reply_to.set(Some(message.as_ref().clone()));
         }
         (ContextTarget::Message { chat_id, message }, "message.react") => {
-            if let Some(menu) = ui.context_menu() {
-                ui.reaction_picker.set(Some(ReactionPickerState {
+            if let Some(menu) = ui.panels.context_menu() {
+                ui.panels.reaction_picker.set(Some(ReactionPickerState {
                     chat_id: *chat_id,
                     message_id: message.id,
                     x: menu.x,
@@ -361,20 +483,23 @@ pub fn handle_context_action(
         }
         (ContextTarget::Message { message, .. }, "message.forward") => {
             let chat_id = ui
+                .conversation
                 .selected_chat()
                 .and_then(|chat| chat.id.parse::<i64>().ok());
             if let Some(chat_id) = chat_id {
-                ui.forward_state.set(Some(crate::state::ForwardState {
-                    source_chat_id: chat_id,
-                    message: message.as_ref().clone(),
-                }));
+                ui.panels
+                    .forward_state
+                    .set(Some(crate::state::ForwardState {
+                        source_chat_id: chat_id,
+                        message: message.as_ref().clone(),
+                    }));
             }
         }
         (ContextTarget::Message { message, .. }, "message.copy") => {
             let text = message.text.clone();
             if text.trim().is_empty() {
                 push_toast(
-                    ui.toasts,
+                    ui.shell.toasts,
                     "A mensagem não tem texto para copiar.",
                     ToastKind::Info,
                 );
@@ -385,13 +510,32 @@ pub fn handle_context_action(
             });
         }
         (ContextTarget::Message { chat_id, message }, "message.media") => {
-            ui.lightbox.set(Some(LightboxState::from_message(
+            ui.panels.lightbox.set(Some(LightboxState::from_message(
                 *chat_id,
                 message.as_ref(),
             )));
         }
         (ContextTarget::Message { chat_id, message }, "message.save") => {
             save_media(services, ui, *chat_id, message.as_ref().clone());
+        }
+        (ContextTarget::Message { chat_id, message }, "message.search_system") => {
+            if cfg!(target_os = "android") {
+                push_toast(
+                    ui.shell.toasts,
+                    "A busca no sistema não está disponível no Android.",
+                    ToastKind::Info,
+                );
+                return;
+            }
+            if !message.has_media || message.is_deleted {
+                return;
+            }
+            ui.transfers
+                .duplicate_search
+                .set(Some(vec![DuplicateSearchMedia::from_message(
+                    *chat_id,
+                    message.as_ref(),
+                )]));
         }
         (
             ContextTarget::Album {
@@ -403,7 +547,8 @@ pub fn handle_context_action(
         ) => {
             if let Some(message) = messages.iter().find(|message| message.id == *anchor_id) {
                 let album = messages.iter().map(LightboxMedia::from_message).collect();
-                ui.lightbox
+                ui.panels
+                    .lightbox
                     .set(Some(LightboxState::from_album(*chat_id, message, album)));
             }
         }
@@ -427,6 +572,34 @@ pub fn handle_context_action(
         ) => {
             save_album(services, ui, *chat_id, messages.clone());
         }
+        (
+            ContextTarget::Album {
+                chat_id,
+                messages,
+                anchor_id,
+            },
+            "album.search_system",
+        ) => {
+            if cfg!(target_os = "android") {
+                push_toast(
+                    ui.shell.toasts,
+                    "A busca no sistema não está disponível no Android.",
+                    ToastKind::Info,
+                );
+                return;
+            }
+            let Some(message) = messages.iter().find(|message| message.id == *anchor_id) else {
+                return;
+            };
+            if !message.has_media {
+                return;
+            }
+            ui.transfers
+                .duplicate_search
+                .set(Some(vec![DuplicateSearchMedia::from_message(
+                    *chat_id, message,
+                )]));
+        }
         (ContextTarget::Album { messages, .. }, "album.copy") => {
             let text = messages
                 .iter()
@@ -434,7 +607,7 @@ pub fn handle_context_action(
                 .map(|message| message.text.clone());
             let Some(text) = text else {
                 push_toast(
-                    ui.toasts,
+                    ui.shell.toasts,
                     "O álbum não tem legenda para copiar.",
                     ToastKind::Info,
                 );
@@ -453,10 +626,12 @@ pub fn handle_context_action(
             "album.forward",
         ) => {
             if let Some(message) = messages.iter().find(|message| message.id == *anchor_id) {
-                ui.forward_state.set(Some(crate::state::ForwardState {
-                    source_chat_id: *chat_id,
-                    message: message.clone(),
-                }));
+                ui.panels
+                    .forward_state
+                    .set(Some(crate::state::ForwardState {
+                        source_chat_id: *chat_id,
+                        message: message.clone(),
+                    }));
             }
         }
         (
@@ -467,7 +642,7 @@ pub fn handle_context_action(
             },
             "user.media",
         ) => {
-            ui.user_media.set(Some(UserMediaState {
+            ui.panels.user_media.set(Some(UserMediaState {
                 chat_id: *chat_id,
                 sender_id: sender_id.clone(),
                 sender_name: sender_name.clone(),
@@ -476,14 +651,21 @@ pub fn handle_context_action(
         (ContextTarget::Download { record }, "download.open") => {
             if let Some(path) = record.file_path.clone() {
                 if let Err(error) = plasma_platform::open_path(&path) {
-                    push_toast(ui.toasts, error, ToastKind::Error);
+                    push_toast(ui.shell.toasts, error, ToastKind::Error);
                 }
             }
         }
         (ContextTarget::Download { record }, "download.reveal") => {
             if let Some(path) = record.file_path.clone() {
                 if let Err(error) = plasma_platform::reveal_path(&path) {
-                    push_toast(ui.toasts, error, ToastKind::Error);
+                    push_toast(ui.shell.toasts, error, ToastKind::Error);
+                }
+            }
+        }
+        (ContextTarget::Download { record }, "download.share") => {
+            if let Some(path) = record.file_path.clone() {
+                if let Err(error) = plasma_platform::share_path(&path) {
+                    push_toast(ui.shell.toasts, error, ToastKind::Error);
                 }
             }
         }
@@ -503,9 +685,9 @@ pub fn handle_context_action(
         }
         (ContextTarget::Download { record }, "download.remove") => {
             let id = record.id.clone();
-            let mut next = ui.downloads();
+            let mut next = ui.transfers.downloads();
             next.retain(|entry| entry.id != id);
-            ui.downloads.set(next.clone());
+            ui.transfers.downloads.set(next.clone());
             let downloads = services.downloads.clone();
             spawn(async move {
                 let _ = downloads.save_history(next).await;
@@ -517,7 +699,7 @@ pub fn handle_context_action(
 
 /// Opens a native folder chooser on the desktop (like a browser "save") so the
 /// media save starts from a user-picked folder. Android falls back to the
-/// default download folder.
+/// app-specific Downloads directory (`getExternalFilesDir`).
 pub async fn pick_save_folder(title: &'static str) -> Option<std::path::PathBuf> {
     #[cfg(not(target_os = "android"))]
     {
@@ -527,7 +709,9 @@ pub async fn pick_save_folder(title: &'static str) -> Option<std::path::PathBuf>
     #[cfg(target_os = "android")]
     {
         let _ = title;
-        None
+        plasma_platform::android_app_dirs()
+            .ok()
+            .map(|dirs| dirs.download_dir)
     }
 }
 

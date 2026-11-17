@@ -31,6 +31,10 @@ impl SettingKey {
     pub const TWITTER_COOKIES: Self = Self("plasma_twitter_optional_cookies");
     pub const CLEAR_TWITTER_GROUPS_ON_CLEAR_CACHE: Self =
         Self("clear_twitter_groups_on_clear_cache");
+    /// Synthetic Twitter/X media galleries shown in the Telegram chat list.
+    pub const TWITTER_FAKE_CHATS: Self = Self("plasma_twitter_fake_chats");
+    /// Pending synthetic Twitter chat to open after switching to Telegram.
+    pub const TWITTER_FAKE_PENDING_CHAT: Self = Self("plasma_twitter_pending_fake_chat");
     /// Maximum size in bytes of the native Telegram media cache (`0` = unlimited).
     pub const MEDIA_CACHE_LIMIT: Self = Self("plasma_media_cache_limit");
 

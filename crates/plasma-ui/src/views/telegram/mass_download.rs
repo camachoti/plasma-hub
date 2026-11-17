@@ -1,0 +1,656 @@
+//! Mass download panel for one chat or topic.
+
+use crate::state::{AppServices, MassDownloadProgress, UiState};
+use crate::views::select::{Select, SelectOption};
+use dioxus::prelude::*;
+use plasma_core::AppEvent;
+use plasma_telegram::{
+    TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMassDownloadRequest,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use crate::state::{refresh_topics_with_new_media, topic_download_key};
+
+use super::composer::pick_download_folder;
+use super::conversation::parse_chat_id;
+use super::media::format_bytes;
+
+/// Shared abort flag for Twitter/X gallery mass downloads. The download loop
+/// runs on the Tokio runtime; the UI only flips this and cancels the active id.
+static TWITTER_MASS_ABORTED: AtomicBool = AtomicBool::new(false);
+static TWITTER_MASS_ACTIVE_ID: Mutex<Option<String>> = Mutex::new(None);
+
+#[component]
+pub(super) fn MassDownloadPanel(
+    chat: TdlibChatInfo,
+    topics: Vec<TdlibForumTopicInfo>,
+    initial_topic: Option<TdlibForumTopicInfo>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let services = use_context::<AppServices>();
+    let mut ui = use_context::<UiState>();
+    let default_folder = services
+        .env
+        .paths()
+        .download_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut folder = use_signal(|| default_folder);
+    let initial_topic_id = initial_topic
+        .as_ref()
+        .map(|topic| topic.id.to_string())
+        .unwrap_or_else(|| "all".to_string());
+    let mut selected_topic_id = use_signal(|| initial_topic_id);
+    let mut split_by_user = use_signal(|| false);
+    let mut split_by_album = use_signal(|| false);
+    let mut album_split_mode = use_signal(|| "separator".to_string());
+    let mut panel_error = use_signal(|| None::<String>);
+
+    let topics_with_new_media = ui.conversation.topics_with_new_media();
+    let topic_options = {
+        let mut options = vec![SelectOption::new("all", "Todos os tópicos")];
+        options.extend(topics.iter().map(|topic| {
+            let key = topic_download_key(topic.id, &topic.kind);
+            let title = if topics_with_new_media.contains(&key) {
+                format!("• {} (mídia nova)", topic.title)
+            } else {
+                topic.title.clone()
+            };
+            SelectOption::new(topic.id.to_string(), title)
+        }));
+        options
+    };
+    let album_mode_options = vec![
+        SelectOption::new("separator", "Separador"),
+        SelectOption::new("comment", "Comentário"),
+    ];
+
+    let running = ui.transfers.mass_download_running();
+    let stopping = ui.transfers.mass_download_stopping();
+    let progress = ui.transfers.mass_download_progress();
+
+    let chat_for_start = chat.clone();
+    let topics_for_start = topics.clone();
+    let start_services = services.clone();
+    let start = move |_| {
+        if ui.transfers.mass_download_running() {
+            return;
+        }
+        let folder_path = folder().trim().to_string();
+        if folder_path.is_empty() {
+            panel_error.set(Some("Escolha uma pasta de destino.".to_string()));
+            return;
+        }
+
+        if crate::twitter_fake::is_twitter_fake_chat_id(&chat_for_start.id) {
+            ui.transfers.mass_download_running.set(true);
+            ui.transfers.mass_download_stopping.set(false);
+            ui.transfers.mass_download_progress.set(None);
+            panel_error.set(None);
+            TWITTER_MASS_ABORTED.store(false, Ordering::Release);
+            if let Ok(mut guard) = TWITTER_MASS_ACTIVE_ID.lock() {
+                *guard = None;
+            }
+            let services = start_services.clone();
+            let chat = chat_for_start.clone();
+            spawn(async move {
+                // Schedules work on Tokio and returns. Running/stopping flags are
+                // cleared by the TelegramDownloadProgress "Concluído"/"Interrompido"
+                // event so a cross-runtime JoinHandle await cannot leave the button stuck.
+                if let Some(error) =
+                    start_twitter_fake_mass_download(services, chat, folder_path).await
+                {
+                    panel_error.set(Some(error));
+                    ui.transfers.mass_download_running.set(false);
+                    ui.transfers.mass_download_stopping.set(false);
+                }
+            });
+            return;
+        }
+
+        let Some(chat_id) = parse_chat_id(&chat_for_start) else {
+            panel_error.set(Some("Chat inválido para download em massa.".to_string()));
+            return;
+        };
+        let topic = topics_for_start
+            .iter()
+            .find(|topic| topic.id.to_string() == selected_topic_id())
+            .cloned();
+        let request = TdlibMassDownloadRequest {
+            chat_id,
+            folder_path,
+            topic_id: topic.as_ref().map(|topic| topic.id),
+            topic_kind: topic.as_ref().map(|topic| topic.kind.clone()),
+            split_by_user: split_by_user(),
+            split_by_album: split_by_album(),
+            album_split_mode: Some(album_split_mode()),
+        };
+
+        ui.transfers.mass_download_running.set(true);
+        ui.transfers.mass_download_stopping.set(false);
+        ui.transfers.mass_download_progress.set(None);
+        panel_error.set(None);
+        let services = start_services.clone();
+        let topic_for_refresh = topic.clone();
+        let chat_id_for_refresh = chat_id;
+        spawn(async move {
+            let outcome = services.telegram.start_mass_download(request).await;
+            match outcome {
+                Ok(result) if result.success => {
+                    if let Some(topic) = topic_for_refresh {
+                        let key = topic_download_key(topic.id, &topic.kind);
+                        ui.conversation.topics_with_new_media.write().remove(&key);
+                    }
+                    refresh_topics_with_new_media(services.clone(), ui, chat_id_for_refresh);
+                }
+                Ok(result) => panel_error.set(Some(
+                    result
+                        .error
+                        .unwrap_or_else(|| "Falha no download em massa.".to_string()),
+                )),
+                Err(error) => panel_error.set(Some(error.to_string())),
+            }
+            ui.transfers.mass_download_running.set(false);
+            ui.transfers.mass_download_stopping.set(false);
+        });
+    };
+
+    let stop_services = services.clone();
+    let stop_chat = chat.clone();
+    let stop = move |_| {
+        if !ui.transfers.mass_download_running() || ui.transfers.mass_download_stopping() {
+            return;
+        }
+        ui.transfers.mass_download_stopping.set(true);
+        if crate::twitter_fake::is_twitter_fake_chat_id(&stop_chat.id) {
+            TWITTER_MASS_ABORTED.store(true, Ordering::Release);
+            if let Ok(guard) = TWITTER_MASS_ACTIVE_ID.lock() {
+                if let Some(id) = guard.as_ref() {
+                    let _ = plasma_download::cancel_download(id);
+                }
+            }
+            return;
+        }
+        let services = stop_services.clone();
+        spawn(async move {
+            if let Err(error) = services.telegram.stop_mass_download().await {
+                panel_error.set(Some(error.to_string()));
+                ui.transfers.mass_download_stopping.set(false);
+            }
+        });
+    };
+
+    let choose_folder = move |_| {
+        spawn(async move {
+            if let Some(path) = pick_download_folder().await {
+                folder.set(path.to_string_lossy().to_string());
+            }
+        });
+    };
+
+    let percent = progress
+        .as_ref()
+        .filter(|progress| !progress.is_scanning && progress.total > 0)
+        .map(|progress| (progress.downloaded / progress.total as f64 * 100.0).clamp(0.0, 100.0))
+        .unwrap_or(0.0);
+    let bar_width = if progress
+        .as_ref()
+        .is_some_and(|progress| progress.is_scanning)
+    {
+        100.0
+    } else {
+        percent
+    };
+
+    rsx! {
+        div {
+            class: "mass-download-backdrop",
+            onclick: move |_| on_close.call(()),
+            section {
+                class: "mass-download-panel",
+                onclick: move |event| event.stop_propagation(),
+                header { class: "mass-download-header",
+                    div {
+                        strong { "Download em massa" }
+                        span { class: "hint", "{chat.title}" }
+                    }
+                    button {
+                        class: "btn small ghost",
+                        onclick: move |_| on_close.call(()),
+                        "Fechar"
+                    }
+                }
+                div { class: "mass-download-body",
+                    if let Some(message) = panel_error() {
+                        p { class: "error-banner", "{message}" }
+                    }
+                    label { class: "mass-download-field",
+                        span { "Pasta de destino" }
+                        div { class: "mass-download-folder-row",
+                            input {
+                                class: "download-input",
+                                readonly: true,
+                                value: "{folder}",
+                                placeholder: "Escolha uma pasta...",
+                            }
+                            if cfg!(target_os = "android") {
+                                button {
+                                    class: "btn small ghost",
+                                    disabled: running,
+                                    onclick: choose_folder,
+                                    title: "Usa a pasta Downloads do app",
+                                    "Pasta do app"
+                                }
+                            } else {
+                                button {
+                                    class: "btn small ghost",
+                                    disabled: running,
+                                    onclick: choose_folder,
+                                    "Procurar"
+                                }
+                            }
+                        }
+                        if cfg!(target_os = "android") {
+                            span { class: "hint",
+                                "No Android os arquivos vão para a pasta Downloads do app."
+                            }
+                        }
+                    }
+                    if !topics.is_empty() {
+                        label { class: "mass-download-field",
+                            span { "Tópico" }
+                            Select {
+                                value: selected_topic_id(),
+                                options: topic_options.clone(),
+                                placeholder: "Todos os tópicos",
+                                disabled: running,
+                                on_change: move |value| selected_topic_id.set(value),
+                            }
+                        }
+                    }
+                    div { class: "mass-download-options",
+                        label {
+                            input {
+                                r#type: "checkbox",
+                                checked: split_by_user(),
+                                disabled: running,
+                                onchange: move |event| split_by_user.set(event.checked()),
+                            }
+                            span { "Dividir por usuário" }
+                        }
+                        label {
+                            input {
+                                r#type: "checkbox",
+                                checked: split_by_album(),
+                                disabled: running,
+                                onchange: move |event| split_by_album.set(event.checked()),
+                            }
+                            span { "Dividir por álbum" }
+                        }
+                        if split_by_album() {
+                            div { class: "mass-download-album-mode",
+                                Select {
+                                    value: album_split_mode(),
+                                    options: album_mode_options.clone(),
+                                    placeholder: "Modo",
+                                    disabled: running,
+                                    on_change: move |value| album_split_mode.set(value),
+                                }
+                            }
+                        }
+                    }
+                    div { class: "mass-download-actions",
+                        if running {
+                            button {
+                                class: "btn primary",
+                                disabled: stopping,
+                                onclick: stop,
+                                if stopping { "Parando..." } else { "Parar download" }
+                            }
+                        } else {
+                            button {
+                                class: "btn primary",
+                                disabled: folder().trim().is_empty(),
+                                onclick: start,
+                                "Iniciar download"
+                            }
+                        }
+                    }
+                }
+                if let Some(progress) = progress {
+                    div { class: "mass-download-progress",
+                        div { class: "mass-download-progress-head",
+                            span { "{progress.current_file}" }
+                            strong {
+                                if progress.is_scanning {
+                                    "Escaneando..."
+                                } else {
+                                    "{progress.downloaded.floor()} de {progress.total}"
+                                }
+                            }
+                        }
+                        div { class: "download-progress-bar",
+                            div {
+                                class: if progress.is_scanning { "download-progress-fill scanning" } else { "download-progress-fill" },
+                                style: "width: {bar_width}%",
+                            }
+                        }
+                        if !progress.is_scanning && progress.total > 0 {
+                            div { class: "mass-download-summary",
+                                span { "Baixados: {mass_status_count(&progress, \"completed\")}" }
+                                span { "Já existem: {mass_status_count(&progress, \"skipped\")}" }
+                                span { "Falharam: {mass_status_count(&progress, \"failed\")}" }
+                                span { "Na fila: {mass_status_count(&progress, \"pending\") + mass_status_count(&progress, \"downloading\")}" }
+                            }
+                        }
+                        div { class: "mass-download-list",
+                            for item in progress.items.iter().take(500) {
+                                div {
+                                    key: "{item.message_id}",
+                                    class: "mass-download-item {item.status}",
+                                    div { class: "mass-download-item-name",
+                                        span { "{item.name}" }
+                                        if item.size > 0 {
+                                            small { "{format_bytes(item.size)}" }
+                                        }
+                                    }
+                                    span { class: "mass-download-item-status",
+                                        "{mass_status_label(&item.status)}"
+                                        if item.status == "downloading" {
+                                            " {item.progress}%"
+                                        }
+                                    }
+                                }
+                            }
+                            if progress.items.len() > 500 {
+                                p { class: "hint",
+                                    "Mostrando 500 de {progress.items.len()} arquivos."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn start_twitter_fake_mass_download(
+    services: AppServices,
+    chat: TdlibChatInfo,
+    folder_path: String,
+) -> Option<String> {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let Some(fake) = crate::twitter_fake::get_twitter_fake_chat(&services.settings, &chat.id)
+    else {
+        return Some("Galeria Twitter/X não encontrada.".into());
+    };
+    let media = fake
+        .messages
+        .iter()
+        .filter(|message| message.url.as_ref().is_some_and(|url| !url.is_empty()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = media.len();
+    if total == 0 {
+        return Some("Nenhuma mídia para baixar nesta galeria.".into());
+    }
+
+    let folder = PathBuf::from(&folder_path);
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        return Some(format!("Não foi possível criar a pasta: {error}"));
+    }
+
+    // `load_cookies` returns the raw Netscape file; CDN requests need a
+    // normalized `Cookie` header (or none). Sending the file verbatim makes
+    // reqwest reject the header and every item fails.
+    let raw_cookies = services.twitter.load_cookies().await.unwrap_or_default();
+    let cookie_header = plasma_twitter::normalize_cookie_input(Some(&raw_cookies))
+        .ok()
+        .flatten();
+
+    let numeric_id = crate::twitter_fake::fake_chat_numeric_id(&chat.id);
+    let events = services.events.clone();
+    let env = services.env.clone();
+    let runtime = services.telegram.runtime_handle();
+
+    // Do not await this JoinHandle on the Dioxus executor — that can leave the
+    // UI stuck on "Parar download" after the work already finished. Completion
+    // is signaled via the final TelegramDownloadProgress event instead.
+    runtime.spawn(async move {
+        use std::time::{Duration, Instant};
+
+        let mut items: Vec<TdlibDownloadItem> = Vec::with_capacity(total);
+        let mut downloaded = 0.0f64;
+        let mut failed = 0usize;
+        let mut last_error: Option<String> = None;
+        let mut last_publish = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let publish_interval = Duration::from_millis(250);
+
+        let publish = |downloaded: f64,
+                       current_file: &str,
+                       is_scanning: bool,
+                       items: &[TdlibDownloadItem],
+                       force: bool,
+                       last_publish: &mut Instant| {
+            if !force && last_publish.elapsed() < publish_interval {
+                return;
+            }
+            publish_twitter_mass_progress(
+                &events,
+                numeric_id,
+                total,
+                downloaded,
+                current_file,
+                is_scanning,
+                items,
+            );
+            *last_publish = Instant::now();
+        };
+
+        publish(
+            downloaded,
+            "Iniciando...",
+            true,
+            &items,
+            true,
+            &mut last_publish,
+        );
+
+        for (index, message) in media.into_iter().enumerate() {
+            if TWITTER_MASS_ABORTED.load(Ordering::Acquire) {
+                break;
+            }
+            let Some(url) = message.url.clone() else {
+                continue;
+            };
+            let ext = if message.is_video { ".mp4" } else { ".jpg" };
+            let file_name = format!("media_{}{ext}", message.id);
+            let destination = folder.join(&file_name);
+            let mut item = TdlibDownloadItem {
+                name: file_name.clone(),
+                message_id: message.id,
+                status: "pending".into(),
+                progress: 0,
+                size: message.media_size.unwrap_or(0),
+                file_path: Some(destination.to_string_lossy().to_string()),
+                thumbnail_path: message.thumbnail_url.clone(),
+            };
+
+            if destination.exists() {
+                item.status = "skipped".into();
+                item.progress = 100;
+                downloaded += 1.0;
+                items.push(item);
+                publish(
+                    downloaded,
+                    &file_name,
+                    false,
+                    &items,
+                    false,
+                    &mut last_publish,
+                );
+                if index % 32 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
+
+            item.status = "downloading".into();
+            items.push(item.clone());
+            let download_id = format!("twitter-mass-{numeric_id}-{}", message.id);
+            if let Ok(mut guard) = TWITTER_MASS_ACTIVE_ID.lock() {
+                *guard = Some(download_id.clone());
+            }
+            // Throttled: forcing every file floods the 256-slot event bus and
+            // the terminal "Concluído" event can be lagged away.
+            publish(
+                downloaded,
+                &file_name,
+                false,
+                &items,
+                false,
+                &mut last_publish,
+            );
+
+            let mut headers = HashMap::new();
+            headers.insert("Referer".into(), "https://x.com/".into());
+            headers.insert(
+                "User-Agent".into(),
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".into(),
+            );
+            if let Some(cookie) = cookie_header.as_ref() {
+                headers.insert("Cookie".into(), cookie.clone());
+            }
+
+            let outcome = plasma_download::download_url_to_file(
+                &env,
+                &download_id,
+                &url,
+                &destination.to_string_lossy(),
+                Some(headers),
+            )
+            .await;
+
+            if let Ok(mut guard) = TWITTER_MASS_ACTIVE_ID.lock() {
+                *guard = None;
+            }
+
+            if TWITTER_MASS_ABORTED.load(Ordering::Acquire) {
+                item.status = "stopped".into();
+                if let Some(last) = items.last_mut() {
+                    *last = item;
+                }
+                break;
+            }
+
+            match outcome {
+                Ok(()) => {
+                    item.status = "completed".into();
+                    item.progress = 100;
+                    downloaded += 1.0;
+                }
+                Err(error) => {
+                    failed += 1;
+                    last_error = Some(error);
+                    item.status = "failed".into();
+                }
+            }
+            if let Some(last) = items.last_mut() {
+                *last = item;
+            }
+            publish(
+                downloaded,
+                &file_name,
+                false,
+                &items,
+                false,
+                &mut last_publish,
+            );
+        }
+
+        if let Ok(mut guard) = TWITTER_MASS_ACTIVE_ID.lock() {
+            *guard = None;
+        }
+        let aborted = TWITTER_MASS_ABORTED.load(Ordering::Acquire);
+        let summary = if aborted {
+            format!("Interrompido ({downloaded:.0} de {total})")
+        } else if failed > 0 {
+            match last_error {
+                Some(error) => format!("Concluído ({failed} falharam: {error})"),
+                None => format!("Concluído ({failed} falharam)"),
+            }
+        } else {
+            "Concluído".to_string()
+        };
+        // Lightweight terminal ping first so the UI releases "Parar download"
+        // even if a later full payload is lagged on the event bus.
+        publish_twitter_mass_progress(
+            &events,
+            numeric_id,
+            total,
+            downloaded,
+            if aborted { "Interrompido" } else { "Concluído" },
+            false,
+            &[],
+        );
+        publish(
+            downloaded,
+            &summary,
+            false,
+            &items,
+            true,
+            &mut last_publish,
+        );
+    });
+
+    None
+}
+
+fn publish_twitter_mass_progress(
+    events: &plasma_core::EventBus,
+    chat_id: i64,
+    total: usize,
+    downloaded: f64,
+    current_file: impl Into<String>,
+    is_scanning: bool,
+    items: &[TdlibDownloadItem],
+) {
+    let items = items
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .collect::<Vec<_>>();
+    events.publish(AppEvent::TelegramDownloadProgress {
+        chat_id,
+        total,
+        downloaded,
+        current_file: current_file.into(),
+        is_scanning,
+        items,
+    });
+}
+
+pub(super) fn mass_status_count(progress: &MassDownloadProgress, status: &str) -> usize {
+    progress
+        .items
+        .iter()
+        .filter(|item| item.status == status)
+        .count()
+}
+
+pub(super) fn mass_status_label(status: &str) -> &str {
+    match status {
+        "pending" => "Na fila",
+        "downloading" => "Baixando",
+        "completed" => "Salvo",
+        "skipped" => "Já existe",
+        "failed" => "Falhou",
+        "stopped" => "Interrompido",
+        _ => status,
+    }
+}

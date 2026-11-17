@@ -109,18 +109,49 @@ pub fn android_app_dirs() -> Result<AndroidAppDirs, String> {
 }
 
 fn extract_url(value: &str) -> Option<String> {
-    value.split_whitespace().find_map(|part| {
-        if !(part.starts_with("http://") || part.starts_with("https://")) {
-            return None;
-        }
-        let trimmed = part.trim_end_matches([',', '.', ')', ']', '}', ';', '!', '?', '"', '\'']);
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
+    crate::extract_http_url(value)
+}
+
+fn intent_extra_string(
+    env: &mut JNIEnv<'_>,
+    intent: &JObject<'_>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let key = env
+        .new_string(key)
+        .map_err(|error| format!("Falha ao preparar extra {key}: {error}"))?;
+    let value = env
+        .call_method(
+            intent,
+            "getStringExtra",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&key)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| format!("Falha ao ler extra {key}: {error}"))?;
+    java_string(env, value)
+}
+
+fn take_launch_share_url(env: &mut JNIEnv<'_>) -> Result<Option<String>, String> {
+    let value = env
+        .call_static_method(
+            "dev/dioxus/main/MainActivity",
+            "takeLaunchShareUrl",
+            "()Ljava/lang/String;",
+            &[],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| format!("Falha ao ler URL de share em cold-start: {error}"))?;
+    java_string(env, value)
 }
 
 /// Reads the intent that launched the Activity and returns its shared URL.
 pub fn take_initial_shared_url() -> Option<String> {
     with_env(|env, activity| {
+        if let Some(url) = take_launch_share_url(env)?.as_deref().and_then(extract_url) {
+            return Ok(Some(url));
+        }
+
         let intent = env
             .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])
             .and_then(|value| value.l())
@@ -135,22 +166,21 @@ pub fn take_initial_shared_url() -> Option<String> {
             .map_err(|error| format!("Falha ao ler ação do intent: {error}"))?;
         let action = java_string(env, action)?.unwrap_or_default();
 
-        if action == "android.intent.action.SEND" || action == "android.intent.action.SEND_MULTIPLE"
+        if action == "android.intent.action.SEND"
+            || action == "android.intent.action.SEND_MULTIPLE"
+            || action == "android.intent.action.VIEW"
         {
-            let key = env
-                .new_string("android.intent.extra.TEXT")
-                .map_err(|error| error.to_string())?;
-            let text = env
-                .call_method(
-                    &intent,
-                    "getStringExtra",
-                    "(Ljava/lang/String;)Ljava/lang/String;",
-                    &[JValue::Object(&key)],
-                )
-                .and_then(|value| value.l())
-                .map_err(|error| format!("Falha ao ler texto compartilhado: {error}"))?;
-            if let Some(url) = java_string(env, text)?.as_deref().and_then(extract_url) {
-                return Ok(Some(url));
+            for key in [
+                "android.intent.extra.TEXT",
+                "android.intent.extra.SUBJECT",
+                "android.intent.extra.TITLE",
+            ] {
+                if let Some(url) = intent_extra_string(env, &intent, key)?
+                    .as_deref()
+                    .and_then(extract_url)
+                {
+                    return Ok(Some(url));
+                }
             }
         }
 
@@ -218,18 +248,27 @@ pub async fn pick_media_file() -> Option<PathBuf> {
 
 /// Opens a file with an Android viewer.
 pub fn open_path(path: &str) -> Result<(), String> {
+    call_path_method(path, "openPath", "Falha ao abrir arquivo")
+}
+
+/// Opens the system share sheet for a local file.
+pub fn share_path(path: &str) -> Result<(), String> {
+    call_path_method(path, "sharePath", "Falha ao compartilhar arquivo")
+}
+
+fn call_path_method(path: &str, method: &str, error_prefix: &str) -> Result<(), String> {
     with_env(|env, activity| {
         let value = env
             .new_string(path)
             .map_err(|error| format!("Falha ao preparar caminho: {error}"))?;
         env.call_method(
             activity,
-            "openPath",
+            method,
             "(Ljava/lang/String;)V",
             &[JValue::Object(&value)],
         )
         .map(|_| ())
-        .map_err(|error| format!("Falha ao abrir arquivo: {error}"))
+        .map_err(|error| format!("{error_prefix}: {error}"))
     })
 }
 

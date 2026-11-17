@@ -184,11 +184,13 @@ fn run_telegram_smoke(
     credentials: &TelegramCredentials,
     runtime: &tokio::runtime::Runtime,
 ) -> Result<(), String> {
-    let status = runtime.block_on(
-        services
-            .telegram
-            .init(credentials.api_id, credentials.api_hash.clone()),
-    )?;
+    let status = runtime
+        .block_on(
+            services
+                .telegram
+                .init(credentials.api_id, credentials.api_hash.clone()),
+        )
+        .map_err(|error| error.to_string())?;
     println!(
         "tdlib-smoke: success={} ready={} state={} error={}",
         status.success,
@@ -198,7 +200,9 @@ fn run_telegram_smoke(
     );
 
     if status.ready {
-        let chats = runtime.block_on(services.telegram.get_chats(20))?;
+        let chats = runtime
+            .block_on(services.telegram.get_chats(20))
+            .map_err(|error| error.to_string())?;
         println!(
             "tdlib-smoke: chats={} has_more={} error={}",
             chats.dialogs.len(),
@@ -335,6 +339,51 @@ impl EventEmitter for BusEmitter {
                     chat_id,
                     topic_id: payload.get("topicId").and_then(Value::as_i64),
                     message: payload.get("message").cloned().unwrap_or(Value::Null),
+                });
+            }
+            "tdlib-message-updated" => {
+                let Some(chat_id) = payload.get("chatId").and_then(Value::as_i64) else {
+                    return;
+                };
+                let Some(message_id) = payload.get("messageId").and_then(Value::as_i64) else {
+                    return;
+                };
+                self.bus.publish(AppEvent::TelegramMessageUpdated {
+                    chat_id,
+                    message_id,
+                    text: payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    has_media: payload
+                        .get("hasMedia")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    is_photo: payload
+                        .get("isPhoto")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    is_video: payload
+                        .get("isVideo")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                });
+            }
+            "tdlib-chat-patch" => {
+                let Some(chat_id) = payload.get("chatId").and_then(Value::as_i64) else {
+                    return;
+                };
+                self.bus.publish(AppEvent::TelegramChatPatch {
+                    chat_id,
+                    title: payload
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    unread_count: payload
+                        .get("unreadCount")
+                        .and_then(Value::as_i64)
+                        .and_then(|count| i32::try_from(count).ok()),
                 });
             }
             "tdlib-messages-deleted" => {

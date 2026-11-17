@@ -40,12 +40,14 @@ fn items() -> Vec<Item> {
             hint: "Ir para a aba",
             action: Action::Tab(Tab::Settings),
         },
-        Item {
-            title: "Abrir spike de virtualização".into(),
-            hint: "5.000 mensagens",
-            action: Action::ToggleSpike,
-        },
     ];
+
+    #[cfg(debug_assertions)]
+    items.push(Item {
+        title: "Abrir spike de virtualização".into(),
+        hint: "5.000 mensagens",
+        action: Action::ToggleSpike,
+    });
 
     for palette in Palette::ALL {
         items.push(Item {
@@ -56,8 +58,8 @@ fn items() -> Vec<Item> {
     }
 
     items.push(Item {
-        title: "Sair para a tela de login".into(),
-        hint: "Sessão",
+        title: "Encerrar sessão Telegram".into(),
+        hint: "Logout TDLib",
         action: Action::Logout,
     });
 
@@ -66,26 +68,47 @@ fn items() -> Vec<Item> {
 
 fn apply(action: Action, services: &AppServices, mut ui: UiState) {
     match action {
-        Action::Tab(tab) => ui.tab.set(tab),
+        Action::Tab(tab) => ui.shell.tab.set(tab),
         Action::ToggleSpike => {
-            ui.tab.set(Tab::Telegram);
-            ui.show_spike.set(true);
+            ui.shell.tab.set(Tab::Telegram);
+            ui.shell.show_spike.set(true);
         }
         Action::Palette(palette) => apply_palette(services, ui, palette),
         Action::Logout => {
-            ui.logged_in.set(false);
-            ui.show_palette.set(false);
-            push_toast(ui.toasts, "Sessão encerrada (demo).", ToastKind::Info);
+            ui.shell.show_palette.set(false);
+            let services = services.clone();
+            spawn(async move {
+                match services.telegram.log_out().await {
+                    Ok(_) => {
+                        ui.shell.logged_in.set(false);
+                        ui.session.preview_mode.set(false);
+                        ui.session.auth_user.set(None);
+                        ui.conversation.chats.set(Vec::new());
+                        ui.conversation.selected_chat.set(None);
+                        push_toast(
+                            ui.shell.toasts,
+                            "Sessão Telegram encerrada.",
+                            ToastKind::Success,
+                        );
+                    }
+                    Err(error) => push_toast(
+                        ui.shell.toasts,
+                        format!("Falha ao sair: {error}"),
+                        ToastKind::Error,
+                    ),
+                }
+            });
+            return;
         }
     }
-    ui.show_palette.set(false);
+    ui.shell.show_palette.set(false);
 }
 
 #[component]
 pub fn CommandPalette() -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
-    if !ui.show_palette() {
+    if !ui.shell.show_palette() {
         return rsx! {};
     }
 
@@ -110,7 +133,7 @@ pub fn CommandPalette() -> Element {
                     oninput: move |event| query.set(event.value()),
                     onkeydown: move |event| {
                         match event.key() {
-                            Key::Escape => ui.show_palette.set(false),
+                            Key::Escape => ui.shell.show_palette.set(false),
                             Key::Enter => {
                                 if let Some(action) = first_action.clone() {
                                     apply(action, &keyboard_services, ui);

@@ -6,23 +6,37 @@ use crate::icons::IconName;
 use crate::theme::{Density, Palette};
 use crate::twitter::TwitterHandle;
 use crate::views::select::SelectPortal;
-use base64::Engine as _;
 use dioxus::prelude::*;
-use plasma_core::{AppEnv, EventBus};
-use plasma_duplicates::{SearchMatch, SearchMode, SearchResult, SearchSource};
+use plasma_core::{AppEnv, Error, EventBus};
+use plasma_duplicates::SearchMatch;
 use plasma_extract::{DownloadSpec, MediaInfo, Platform};
-use plasma_store::{MessageCacheGetResult, MessageCacheMeta, SettingsStore};
+use plasma_store::SettingsStore;
 use plasma_telegram::{
-    NativeMediaAssetMeta, NativeMediaCacheStats, NativePlaybackSource, NativeSavedMedia,
-    TdlibChatCapabilitiesResult, TdlibChatInfo, TdlibChatsResult, TdlibCommandResult,
-    TdlibDownloadItem, TdlibForumTopicInfo, TdlibForumTopicsResult, TdlibForwardResult,
-    TdlibGlobalSearchResult, TdlibManager, TdlibMassDownloadRequest, TdlibMassDownloadResult,
-    TdlibMessageInfo, TdlibMessagesResult, TdlibSearchMessagesResult, TdlibSendResult,
-    TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
+    NativeMediaCacheStats, TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo,
+    TdlibSharedMediaItem, TdlibStatus,
 };
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod chats_cache;
+mod forum;
+mod telegram;
+
+pub use chats_cache::*;
+pub use forum::*;
+pub use telegram::TelegramHandle;
+
+/// Maps a service failure into the shared error type.
+///
+/// Download cancellation keeps its own variant so the UI can stop a job
+/// without showing it as a failure.
+pub(crate) fn service_error(message: impl std::fmt::Display) -> Error {
+    let message = message.to_string();
+    if message == plasma_download::DOWNLOAD_CANCELED_ERROR {
+        Error::Cancelled
+    } else {
+        Error::msg(message)
+    }
+}
 
 /// Telegram API credentials embedded by `apps/plasma/build.rs`.
 #[derive(Clone, Debug)]
@@ -74,7 +88,9 @@ impl AppServices {
     ///
     /// The limit used to be applied only when the user changed the setting, so
     /// new media could grow past it. Call this after saves and at startup.
-    pub async fn enforce_media_cache_limit(&self) -> Result<Option<NativeMediaCacheStats>, String> {
+    pub async fn enforce_media_cache_limit(
+        &self,
+    ) -> plasma_core::Result<Option<NativeMediaCacheStats>> {
         let limit = self
             .settings
             .get(plasma_store::SettingKey::MEDIA_CACHE_LIMIT)
@@ -106,13 +122,13 @@ impl ExtractorHandle {
         }
     }
 
-    pub async fn analyze(&self, url: String) -> Result<MediaInfo, String> {
+    pub async fn analyze(&self, url: String) -> plasma_core::Result<MediaInfo> {
         let cookies = self.cookies_for(&url).await;
         let env = self.env.clone();
         let handle = self
             .runtime
             .spawn(async move { plasma_extract::analyze_url(&env, &url, cookies).await });
-        self.join(handle).await?
+        self.join(handle).await?.map_err(service_error)
     }
 
     pub async fn download(
@@ -123,7 +139,7 @@ impl ExtractorHandle {
         direct_url: Option<String>,
         file_name: String,
         has_audio: bool,
-    ) -> Result<(), String> {
+    ) -> plasma_core::Result<()> {
         let cookies = self.cookies_for(&original_url).await;
         let env = self.env.clone();
         let handle = self.runtime.spawn(async move {
@@ -141,7 +157,7 @@ impl ExtractorHandle {
             )
             .await
         });
-        self.join(handle).await?
+        self.join(handle).await?.map_err(service_error)
     }
 
     async fn cookies_for(&self, url: &str) -> Option<String> {
@@ -155,665 +171,10 @@ impl ExtractorHandle {
             .filter(|cookies| !cookies.trim().is_empty())
     }
 
-    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, String> {
+    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, Error> {
         handle
             .await
-            .map_err(|error| format!("Tarefa do extrator falhou: {error}"))
-    }
-}
-
-/// Async facade over `plasma-telegram`.
-///
-/// TDLib needs a Tokio runtime, while Dioxus runs its own executor. Every call
-/// is dispatched to the Tokio runtime and awaited without blocking the UI.
-#[derive(Clone)]
-pub struct TelegramHandle {
-    manager: Arc<TdlibManager>,
-    env: AppEnv,
-    runtime: tokio::runtime::Handle,
-}
-
-impl TelegramHandle {
-    pub fn new(env: AppEnv, runtime: tokio::runtime::Handle) -> Self {
-        Self {
-            manager: Arc::new(TdlibManager::default()),
-            env,
-            runtime,
-        }
-    }
-
-    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.runtime.clone()
-    }
-
-    async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, String> {
-        handle
-            .await
-            .map_err(|error| format!("Tarefa do Telegram falhou: {error}"))
-    }
-
-    pub async fn init(&self, api_id: i32, api_hash: String) -> TdlibCommandResult {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_init(&env, &manager, api_id, api_hash).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn status(&self) -> TdlibCommandResult {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_status(&manager).await });
-        self.join(handle).await?
-    }
-
-    pub async fn set_phone(&self, phone_number: String) -> TdlibCommandResult {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_set_phone(&manager, phone_number).await });
-        self.join(handle).await?
-    }
-
-    pub async fn check_code(&self, code: String) -> TdlibCommandResult {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_check_code(&manager, code).await });
-        self.join(handle).await?
-    }
-
-    pub async fn check_password(&self, password: String) -> TdlibCommandResult {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_check_password(&manager, password).await });
-        self.join(handle).await?
-    }
-
-    pub async fn get_me(&self) -> Result<TdlibUserInfo, String> {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_get_me(&manager).await });
-        self.join(handle).await?
-    }
-
-    pub async fn get_chats(&self, limit: i32) -> Result<TdlibChatsResult, String> {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_get_chats(&manager, Some(limit)).await });
-        self.join(handle).await?
-    }
-
-    /// Fetches one chat, used to open a global search result whose
-    /// conversation is not in the loaded chat list.
-    pub async fn get_chat(&self, chat_id: i64) -> Result<TdlibChatInfo, String> {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_get_chat(&manager, chat_id).await });
-        self.join(handle).await?
-    }
-
-    /// Fetches one message, used to resolve replies whose original is outside
-    /// the loaded timeline page.
-    pub async fn get_message(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Result<TdlibMessageInfo, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_get_message(&manager, chat_id, message_id).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn get_messages(
-        &self,
-        chat_id: i64,
-        limit: i32,
-        offset_id: i64,
-        offset: i32,
-        topic_id: Option<i64>,
-        topic_kind: Option<String>,
-    ) -> Result<TdlibMessagesResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_get_messages(
-                &manager,
-                chat_id,
-                Some(limit),
-                Some(offset_id),
-                Some(offset),
-                topic_id,
-                topic_kind,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn search_chat_messages(
-        &self,
-        chat_id: i64,
-        query: String,
-        limit: i32,
-        from_message_id: Option<i64>,
-        topic_id: Option<i64>,
-        topic_kind: Option<String>,
-    ) -> Result<TdlibSearchMessagesResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_search_chat_messages(
-                &manager,
-                chat_id,
-                query,
-                Some(limit),
-                from_message_id,
-                topic_id,
-                topic_kind,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn search_messages(
-        &self,
-        query: String,
-        limit: i32,
-        offset: Option<String>,
-    ) -> Result<TdlibGlobalSearchResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_search_messages(&manager, query, Some(limit), offset).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn get_forum_topics(
-        &self,
-        chat_id: i64,
-        limit: i32,
-    ) -> Result<TdlibForumTopicsResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_get_forum_topics(&manager, chat_id, Some(limit)).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn read_chat(&self, chat_id: i64) -> Result<(), String> {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_read_chat(&manager, chat_id).await });
-        self.join(handle).await?
-    }
-
-    pub async fn capabilities(&self, chat_id: i64) -> Result<TdlibChatCapabilitiesResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_get_chat_capabilities(&manager, chat_id).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn send_message(
-        &self,
-        chat_id: i64,
-        text: String,
-        reply_to_id: Option<i64>,
-        topic_id: Option<i64>,
-        topic_kind: Option<String>,
-    ) -> Result<TdlibSendResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_send_message(
-                &manager,
-                chat_id,
-                text,
-                reply_to_id,
-                topic_id,
-                topic_kind,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn send_media(
-        &self,
-        chat_id: i64,
-        file_path: String,
-        caption: Option<String>,
-        reply_to_id: Option<i64>,
-        topic_id: Option<i64>,
-        topic_kind: Option<String>,
-    ) -> Result<TdlibSendResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_send_media(
-                &manager,
-                chat_id,
-                file_path,
-                caption,
-                reply_to_id,
-                topic_id,
-                topic_kind,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn forward_message(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-        to_chat_id: i64,
-        topic_id: Option<i64>,
-        topic_kind: Option<String>,
-    ) -> Result<TdlibForwardResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_forward_message(
-                &manager, chat_id, message_id, to_chat_id, topic_id, topic_kind,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn shared_media(
-        &self,
-        chat_id: i64,
-        limit: i32,
-    ) -> Result<TdlibSharedMediaResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_get_shared_media(&manager, chat_id, Some(limit)).await
-        });
-        self.join(handle).await?
-    }
-
-    /// Photos and videos sent by one user inside a conversation.
-    pub async fn user_media(
-        &self,
-        chat_id: i64,
-        sender_id: String,
-        limit: i32,
-        from_message_id: Option<i64>,
-    ) -> Result<TdlibSharedMediaResult, String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_search_user_media(
-                &manager,
-                chat_id,
-                sender_id,
-                Some(limit),
-                from_message_id,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    /// Adds or removes an emoji reaction. Returns an error message on failure.
-    pub async fn toggle_reaction(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-        emoji: String,
-        add: bool,
-    ) -> Result<(), String> {
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_toggle_message_reaction(
-                &manager, chat_id, message_id, emoji, add,
-            )
-            .await
-        });
-        let result = self.join(handle).await??;
-        if result.success {
-            Ok(())
-        } else {
-            Err(result
-                .error
-                .unwrap_or_else(|| "Não foi possível reagir.".to_string()))
-        }
-    }
-
-    pub async fn thumbnail_data_url(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Result<Option<String>, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_download_message_thumbnail(&env, &manager, chat_id, message_id)
-                .await
-        });
-        let result = self.join(handle).await??;
-        if !result.success {
-            return Ok(None);
-        }
-        let Some(path) = result.file_path else {
-            return Ok(None);
-        };
-        read_path_data_url(PathBuf::from(path)).await.map(Some)
-    }
-
-    /// Builds a small data URL for a media file dragged into the composer.
-    /// Videos use the cached poster frame; images are capped so a huge photo
-    /// does not turn the preview modal into a multi-megabyte data URL.
-    pub async fn media_preview_data_url(
-        &self,
-        file_path: String,
-        is_video: bool,
-    ) -> Result<Option<String>, String> {
-        if is_video {
-            let env = self.env.clone();
-            let handle = self.runtime.spawn(async move {
-                let poster = tokio::task::spawn_blocking(move || {
-                    plasma_media::generate_video_thumbnail(&env, &file_path)
-                })
-                .await
-                .map_err(|error| format!("Miniatura do vídeo falhou: {error}"))??;
-                read_path_data_url(PathBuf::from(poster)).await.map(Some)
-            });
-            return self.join(handle).await?;
-        }
-
-        let path = PathBuf::from(file_path);
-        let extension = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        // WebKitGTK has no HEIC decoder; show the generic media tile instead of
-        // a broken image in the drop preview.
-        if matches!(extension.as_str(), "heic" | "heif") {
-            return Ok(None);
-        }
-        let size_path = path.clone();
-        let size = tokio::task::spawn_blocking(move || {
-            std::fs::metadata(size_path).map(|metadata| metadata.len())
-        })
-        .await
-        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?
-        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?;
-        if size > 12 * 1024 * 1024 {
-            return Ok(None);
-        }
-        read_path_data_url(path).await.map(Some)
-    }
-
-    pub async fn prepare_playback(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Result<NativePlaybackSource, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::telegram_media_prepare_playback(
-                &env, &manager, chat_id, message_id, None,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn save_media(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-        destination_dir: Option<String>,
-    ) -> Result<NativeSavedMedia, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::telegram_media_save(
-                &env,
-                &manager,
-                chat_id,
-                message_id,
-                destination_dir,
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn start_mass_download(
-        &self,
-        request: TdlibMassDownloadRequest,
-    ) -> Result<TdlibMassDownloadResult, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_start_mass_download(&env, &manager, request).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn stop_mass_download(&self) -> Result<(), String> {
-        let manager = self.manager.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::tdlib_stop_download(&manager).await });
-        self.join(handle).await?
-    }
-
-    /// Makes sure the avatar of a chat is available on disk.
-    ///
-    /// The file is cached under the app cache directory, so the second call
-    /// for the same chat does not touch TDLib again.
-    pub async fn ensure_chat_avatar(&self, chat_id: i64) -> Result<Option<String>, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_download_chat_avatar(&env, &manager, chat_id).await
-        });
-        let result = self.join(handle).await??;
-        if !result.success {
-            return Ok(None);
-        }
-        Ok(result.file_path)
-    }
-
-    /// URL of the avatar of a chat, served by the local media server.
-    pub fn chat_avatar_url(&self, chat_id: i64) -> Option<String> {
-        plasma_telegram::cached_chat_avatar(&self.env, chat_id)?;
-        let url = plasma_telegram::chat_avatar_url(chat_id);
-        // The local media server is the only transport that can serve the
-        // file; without it the row keeps the letter placeholder.
-        url.starts_with("http://").then_some(url)
-    }
-
-    /// Ensures the media of a message is cached and returns its metadata.
-    pub async fn ensure_media_cached(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Result<NativeMediaAssetMeta, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::telegram_media_ensure_cached(
-                &env,
-                &manager,
-                chat_id,
-                message_id,
-                Some("user".to_string()),
-            )
-            .await
-        });
-        self.join(handle).await?
-    }
-
-    /// Searches copies of the given media inside a folder.
-    pub async fn search_duplicate_media(
-        &self,
-        run_id: String,
-        folder_path: String,
-        sources: Vec<SearchSource>,
-        mode: Option<SearchMode>,
-    ) -> Result<SearchResult, String> {
-        let env = self.env.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_duplicates::search_duplicate_media(&env, run_id, folder_path, sources, mode)
-                .await
-        });
-        self.join(handle).await?
-    }
-
-    /// Cancels a running duplicate search.
-    pub fn cancel_duplicate_search(&self, run_id: &str) -> bool {
-        plasma_download::cancel_download(&format!("duplicate-search-{run_id}"))
-    }
-
-    /// Size and item count of the native Telegram media cache.
-    pub async fn media_cache_stats(&self) -> Result<NativeMediaCacheStats, String> {
-        let env = self.env.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::telegram_media_cache_stats(&env).await });
-        self.join(handle).await?
-    }
-
-    /// Removes every file of the native Telegram media cache.
-    pub async fn clear_media_cache(&self) -> Result<NativeMediaCacheStats, String> {
-        let env = self.env.clone();
-        let handle = self
-            .runtime
-            .spawn(async move { plasma_telegram::telegram_media_clear_cache(&env).await });
-        self.join(handle).await?
-    }
-
-    /// Evicts the oldest media until the cache fits the given size in bytes.
-    pub async fn evict_media_cache(&self, max_size: i64) -> Result<NativeMediaCacheStats, String> {
-        let env = self.env.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::telegram_media_evict_cache(&env, max_size).await
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn download_avatar(&self, chat_id: i64) -> Result<Option<String>, String> {
-        let env = self.env.clone();
-        let manager = self.manager.clone();
-        let handle = self.runtime.spawn(async move {
-            plasma_telegram::tdlib_download_chat_avatar(&env, &manager, chat_id).await
-        });
-        let result = self.join(handle).await??;
-        if !result.success {
-            return Ok(None);
-        }
-        let Some(path) = result.file_path else {
-            return Ok(None);
-        };
-
-        read_path_data_url(PathBuf::from(path)).await.map(Some)
-    }
-
-    pub async fn cached_messages(
-        &self,
-        cache_key: String,
-    ) -> Result<MessageCacheGetResult, String> {
-        let env = self.env.clone();
-        let handle = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                plasma_store::telegram_message_cache_get(&env, cache_key)
-            })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
-        });
-        self.join(handle).await?
-    }
-
-    pub async fn mark_messages_deleted(
-        &self,
-        chat_id: String,
-        message_ids: Vec<i64>,
-    ) -> Result<(), String> {
-        let env = self.env.clone();
-        let handle = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                plasma_store::telegram_message_cache_mark_deleted(&env, &chat_id, &message_ids)
-            })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
-        });
-        self.join(handle).await??;
-        Ok(())
-    }
-
-    pub async fn cache_messages(
-        &self,
-        cache_key: String,
-        messages: Vec<TdlibMessageInfo>,
-    ) -> Result<(), String> {
-        let values = messages
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        let env = self.env.clone();
-        let handle = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                plasma_store::telegram_message_cache_save(
-                    &env,
-                    cache_key,
-                    values,
-                    Some(MessageCacheMeta {
-                        last_fetched_at: Some(now_millis()),
-                    }),
-                )
-            })
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
-        });
-        self.join(handle).await??;
-        Ok(())
-    }
-}
-
-async fn read_path_data_url(path: PathBuf) -> Result<String, String> {
-    let mime = avatar_mime(&path);
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
-        .await
-        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?
-        .map_err(|error| format!("Leitura do arquivo falhou: {error}"))?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(format!("data:{mime};base64,{encoded}"))
-}
-
-fn avatar_mime(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "avif" => "image/avif",
-        "jpg" | "jpeg" => "image/jpeg",
-        _ => "image/jpeg",
+            .map_err(|error| service_error(format!("Tarefa do extrator falhou: {error}")))
     }
 }
 
@@ -906,6 +267,33 @@ pub struct DuplicateSearchProgress {
     pub unreadable: u64,
 }
 
+/// One media item to look up inside a local folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateSearchMedia {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub name: String,
+    pub is_video: bool,
+}
+
+impl DuplicateSearchMedia {
+    pub fn from_message(chat_id: i64, message: &TdlibMessageInfo) -> Self {
+        let kind = if message.is_video {
+            "Vídeo"
+        } else if message.is_photo {
+            "Foto"
+        } else {
+            "Mídia"
+        };
+        Self {
+            chat_id,
+            message_id: message.id,
+            name: format!("{kind} · {}", message.id),
+            is_video: message.is_video,
+        }
+    }
+}
+
 /// Progress emitted by a Telegram mass download.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassDownloadProgress {
@@ -915,6 +303,15 @@ pub struct MassDownloadProgress {
     pub current_file: String,
     pub is_scanning: bool,
     pub items: Vec<TdlibDownloadItem>,
+}
+
+/// Last Twitter/X gallery sync outcome shown in the conversation header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwitterGallerySyncStatus {
+    pub chat_id: String,
+    pub last_at_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub checking: bool,
 }
 
 /// Message selected for forwarding.
@@ -939,6 +336,9 @@ pub struct LightboxMedia {
     pub message_id: i64,
     pub is_video: bool,
     pub is_photo: bool,
+    pub date: i32,
+    pub media_size: Option<i64>,
+    pub video_duration: Option<i32>,
 }
 
 impl LightboxMedia {
@@ -947,6 +347,20 @@ impl LightboxMedia {
             message_id: message.id,
             is_video: message.is_video,
             is_photo: message.is_photo,
+            date: message.date,
+            media_size: message.media_size,
+            video_duration: message.video_duration,
+        }
+    }
+
+    pub fn from_shared(item: &TdlibSharedMediaItem) -> Self {
+        Self {
+            message_id: item.id,
+            is_video: item.is_video,
+            is_photo: item.is_photo,
+            date: item.date,
+            media_size: item.media_size,
+            video_duration: None,
         }
     }
 }
@@ -959,6 +373,9 @@ pub struct LightboxState {
     pub is_video: bool,
     pub is_photo: bool,
     pub title: String,
+    pub date: i32,
+    pub media_size: Option<i64>,
+    pub video_duration: Option<i32>,
     /// Every media item in the album, in timeline order. Empty for a single
     /// message. When non-empty, `message_id` identifies the active item.
     pub album: Vec<LightboxMedia>,
@@ -972,6 +389,9 @@ impl LightboxState {
             is_video: message.is_video,
             is_photo: message.is_photo,
             title: message.sender_name.clone(),
+            date: message.date,
+            media_size: message.media_size,
+            video_duration: message.video_duration,
             album: Vec::new(),
         }
     }
@@ -980,6 +400,25 @@ impl LightboxState {
         Self {
             album,
             ..Self::from_message(chat_id, message)
+        }
+    }
+
+    pub fn from_shared(
+        chat_id: i64,
+        item: &TdlibSharedMediaItem,
+        title: String,
+        album: Vec<LightboxMedia>,
+    ) -> Self {
+        Self {
+            chat_id,
+            message_id: item.id,
+            is_video: item.is_video,
+            is_photo: item.is_photo,
+            title,
+            date: item.date,
+            media_size: item.media_size,
+            video_duration: None,
+            album,
         }
     }
 
@@ -997,6 +436,9 @@ impl LightboxState {
             is_video: item.is_video,
             is_photo: item.is_photo,
             title: self.title.clone(),
+            date: item.date,
+            media_size: item.media_size,
+            video_duration: item.video_duration,
             album: self.album.clone(),
         })
     }
@@ -1041,9 +483,9 @@ impl UserMediaState {
     }
 }
 
-/// Signal bundle shared through context.
+/// Chrome shared by every screen: navigation, theme, toasts and the open select.
 #[derive(Clone, Copy)]
-pub struct UiState {
+pub struct ShellState {
     pub tab: Signal<Tab>,
     pub palette: Signal<Palette>,
     pub density: Signal<Density>,
@@ -1053,18 +495,31 @@ pub struct UiState {
     pub toasts: Signal<Vec<Toast>>,
     /// Option list of the select currently open, rendered at the app root.
     pub select_portal: Signal<Option<SelectPortal>>,
+    /// Pending URL delivered by an Android share intent.
+    pub shared_url: Signal<Option<String>>,
+}
 
+/// Login and startup, including the preview shown before an account is ready.
+#[derive(Clone, Copy)]
+pub struct SessionState {
     pub auth_state: Signal<String>,
     pub auth_error: Signal<Option<String>>,
     pub auth_user: Signal<Option<String>>,
     pub booting: Signal<bool>,
     pub preview_mode: Signal<bool>,
     pub avatar: Signal<Option<String>>,
+}
 
+/// Open Telegram conversation: chat list, timeline, topics and search.
+#[derive(Clone, Copy)]
+pub struct ConversationState {
     pub chats: Signal<Vec<TdlibChatInfo>>,
     pub chats_loading: Signal<bool>,
     pub chats_error: Signal<Option<String>>,
     pub selected_chat: Signal<Option<TdlibChatInfo>>,
+    /// Narrow/mobile pane: when true the chat list fills the viewport and the
+    /// open conversation is hidden. Ignored on wide layouts (CSS).
+    pub mobile_show_list: Signal<bool>,
 
     pub messages: Signal<Vec<TdlibMessageInfo>>,
     pub messages_loading: Signal<bool>,
@@ -1082,6 +537,15 @@ pub struct UiState {
     pub thumbnails: Signal<std::collections::HashMap<(i64, i64), String>>,
     /// Whether the topic list dialog is open.
     pub topic_browser_open: Signal<bool>,
+    /// Cached topic listings by chat id, so a known forum opens with its topics
+    /// already on screen while a fresh copy loads in the background.
+    pub topics_cache: Signal<std::collections::HashMap<String, Vec<TdlibForumTopicInfo>>>,
+    /// Topic keys (`kind:id`) known to have media newer than the last mass download.
+    pub topics_with_new_media: Signal<std::collections::HashSet<String>>,
+    /// Pending new-media counts for Twitter/X gallery chats (`twitter_profile_*`).
+    pub twitter_gallery_badges: Signal<std::collections::HashMap<String, usize>>,
+    /// Last gallery poller / manual sync status for the open fake chat header.
+    pub twitter_sync_status: Signal<Option<TwitterGallerySyncStatus>>,
 
     pub search_results: Signal<Vec<TdlibMessageInfo>>,
     pub search_loading: Signal<bool>,
@@ -1092,18 +556,28 @@ pub struct UiState {
     /// list keeps using `telegram_tick`, so unrelated chats no longer force a
     /// TDLib reload of the visible timeline.
     pub message_tick: Signal<u64>,
+}
 
+/// File transfers started from the app: history, mass download and duplicate scan.
+#[derive(Clone, Copy)]
+pub struct TransferState {
     pub downloads: Signal<Vec<DownloadRecord>>,
-
     pub mass_download_running: Signal<bool>,
     pub mass_download_stopping: Signal<bool>,
     pub mass_download_progress: Signal<Option<MassDownloadProgress>>,
     pub mass_download_open: Signal<bool>,
+    /// Topic pre-selected from a context menu; used as the panel default.
+    pub mass_download_topic: Signal<Option<TdlibForumTopicInfo>>,
     pub duplicate_search_progress: Signal<Option<DuplicateSearchProgress>>,
+    /// When set, the "Procurar arquivo no sistema" dialog is open with these items.
+    pub duplicate_search: Signal<Option<Vec<DuplicateSearchMedia>>>,
+}
 
+/// Transient surfaces drawn over the timeline.
+#[derive(Clone, Copy)]
+pub struct PanelState {
     /// Right-click menu opened at the pointer position.
     pub context_menu: Signal<Option<ContextMenuState>>,
-
     /// Message the composer replies to.
     pub reply_to: Signal<Option<TdlibMessageInfo>>,
     /// Message waiting to be forwarded.
@@ -1114,12 +588,19 @@ pub struct UiState {
     pub user_media: Signal<Option<UserMediaState>>,
     /// Emoji picker for message reactions.
     pub reaction_picker: Signal<Option<ReactionPickerState>>,
-
-    /// Pending URL delivered by an Android share intent.
-    pub shared_url: Signal<Option<String>>,
 }
 
-impl UiState {
+/// Signal bundle shared through context.
+#[derive(Clone, Copy)]
+pub struct UiState {
+    pub shell: ShellState,
+    pub session: SessionState,
+    pub conversation: ConversationState,
+    pub transfers: TransferState,
+    pub panels: PanelState,
+}
+
+impl ShellState {
     pub fn tab(self) -> Tab {
         (self.tab)()
     }
@@ -1144,6 +625,12 @@ impl UiState {
         (self.show_palette)()
     }
 
+    pub fn select_portal(self) -> Option<SelectPortal> {
+        (self.select_portal)()
+    }
+}
+
+impl SessionState {
     pub fn auth_state(self) -> String {
         (self.auth_state)()
     }
@@ -1167,7 +654,9 @@ impl UiState {
     pub fn avatar(self) -> Option<String> {
         (self.avatar)()
     }
+}
 
+impl ConversationState {
     pub fn chats(self) -> Vec<TdlibChatInfo> {
         (self.chats)()
     }
@@ -1184,6 +673,11 @@ impl UiState {
         (self.selected_chat)()
     }
 
+    /// Narrow pane: chat list fills the viewport (ignored on wide layouts).
+    pub fn mobile_show_list(self) -> bool {
+        (self.mobile_show_list)()
+    }
+
     pub fn messages(self) -> Vec<TdlibMessageInfo> {
         (self.messages)()
     }
@@ -1198,6 +692,10 @@ impl UiState {
 
     pub fn messages_has_more(self) -> bool {
         (self.messages_has_more)()
+    }
+
+    pub fn messages_key(self) -> Option<String> {
+        (self.messages_key)()
     }
 
     pub fn topics(self) -> Vec<TdlibForumTopicInfo> {
@@ -1222,12 +720,16 @@ impl UiState {
         (self.topic_browser_open)()
     }
 
-    pub fn select_portal(self) -> Option<SelectPortal> {
-        (self.select_portal)()
+    pub fn topics_with_new_media(self) -> std::collections::HashSet<String> {
+        (self.topics_with_new_media)()
     }
 
-    pub fn messages_key(self) -> Option<String> {
-        (self.messages_key)()
+    pub fn twitter_gallery_badges(self) -> std::collections::HashMap<String, usize> {
+        (self.twitter_gallery_badges)()
+    }
+
+    pub fn twitter_sync_status(self) -> Option<TwitterGallerySyncStatus> {
+        (self.twitter_sync_status)()
     }
 
     pub fn search_results(self) -> Vec<TdlibMessageInfo> {
@@ -1242,6 +744,16 @@ impl UiState {
         (self.search_error)()
     }
 
+    pub fn telegram_tick(self) -> u64 {
+        (self.telegram_tick)()
+    }
+
+    pub fn message_tick(self) -> u64 {
+        (self.message_tick)()
+    }
+}
+
+impl TransferState {
     pub fn downloads(self) -> Vec<DownloadRecord> {
         (self.downloads)()
     }
@@ -1262,10 +774,20 @@ impl UiState {
         (self.mass_download_open)()
     }
 
+    pub fn mass_download_topic(self) -> Option<TdlibForumTopicInfo> {
+        (self.mass_download_topic)()
+    }
+
     pub fn duplicate_search_progress(self) -> Option<DuplicateSearchProgress> {
         (self.duplicate_search_progress)()
     }
 
+    pub fn duplicate_search(self) -> Option<Vec<DuplicateSearchMedia>> {
+        (self.duplicate_search)()
+    }
+}
+
+impl PanelState {
     pub fn context_menu(self) -> Option<ContextMenuState> {
         (self.context_menu)()
     }
@@ -1289,78 +811,6 @@ impl UiState {
     pub fn reaction_picker(self) -> Option<ReactionPickerState> {
         (self.reaction_picker)()
     }
-
-    pub fn telegram_tick(self) -> u64 {
-        (self.telegram_tick)()
-    }
-
-    pub fn message_tick(self) -> u64 {
-        (self.message_tick)()
-    }
-}
-
-/// Stable key identifying a forum topic inside a chat.
-pub fn topic_visibility_key(topic: &TdlibForumTopicInfo) -> String {
-    let kind = if topic.kind.is_empty() {
-        "forum"
-    } else {
-        topic.kind.as_str()
-    };
-    format!("{kind}:{}", topic.id)
-}
-
-/// SQLite key holding the hidden topic list of a chat.
-pub fn topic_hidden_setting_key(chat_id: i64) -> String {
-    format!("plasma_hidden_topics_{chat_id}")
-}
-
-/// Loads the hidden topics persisted for a chat.
-pub fn load_hidden_topics(services: &AppServices, ui: UiState, chat_id: i64) {
-    let keys = services
-        .settings
-        .get_raw(&topic_hidden_setting_key(chat_id))
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .unwrap_or_default();
-    set_if_changed(ui.hidden_topics, keys);
-}
-
-/// Toggles a topic between hidden and visible, persisting the chat list.
-///
-/// Returns `true` when the topic is now hidden.
-pub fn toggle_topic_hidden(
-    services: &AppServices,
-    mut ui: UiState,
-    chat_id: i64,
-    topic: &TdlibForumTopicInfo,
-) -> bool {
-    let key = topic_visibility_key(topic);
-    let mut keys = ui.hidden_topics();
-    let hidden = if let Some(position) = keys.iter().position(|entry| *entry == key) {
-        keys.remove(position);
-        false
-    } else {
-        keys.push(key);
-        true
-    };
-    // Update the UI first and persist off the UI thread: the SQLite write used
-    // to keep the chip visible until it finished.
-    ui.hidden_topics.set(keys.clone());
-    if let Ok(raw) = serde_json::to_string(&keys) {
-        let services = services.clone();
-        let setting = topic_hidden_setting_key(chat_id);
-        spawn(async move {
-            if let Err(error) = services.settings.set_raw(&setting, &raw) {
-                push_toast(
-                    ui.toasts,
-                    format!("Falha ao salvar os tópicos ocultos: {error}"),
-                    ToastKind::Error,
-                );
-            }
-        });
-    }
-    hidden
 }
 
 /// Writes `next` only when it differs from the current value.
@@ -1379,9 +829,13 @@ pub fn set_if_changed<T: PartialEq + 'static>(mut signal: Signal<T>, next: T) ->
     changed
 }
 
-pub fn push_toast(mut toasts: Signal<Vec<Toast>>, message: impl Into<String>, kind: ToastKind) {
+pub fn push_toast(
+    mut toasts: Signal<Vec<Toast>>,
+    message: impl std::fmt::Display,
+    kind: ToastKind,
+) {
     let mut next = toasts.read().clone();
-    next.push(Toast::new(message, kind));
+    next.push(Toast::new(message.to_string(), kind));
     if next.len() > 4 {
         next.remove(0);
     }
@@ -1389,13 +843,13 @@ pub fn push_toast(mut toasts: Signal<Vec<Toast>>, message: impl Into<String>, ki
 }
 
 pub fn apply_palette(services: &AppServices, mut ui: UiState, palette: Palette) {
-    ui.palette.set(palette);
+    ui.shell.palette.set(palette);
     if let Err(error) = services.settings.set(
         plasma_store::SettingKey::APPEARANCE_PALETTE,
         palette.as_str(),
     ) {
         push_toast(
-            ui.toasts,
+            ui.shell.toasts,
             format!("Falha ao salvar a paleta: {error}"),
             ToastKind::Error,
         );
@@ -1403,13 +857,13 @@ pub fn apply_palette(services: &AppServices, mut ui: UiState, palette: Palette) 
 }
 
 pub fn apply_density(services: &AppServices, mut ui: UiState, density: Density) {
-    ui.density.set(density);
+    ui.shell.density.set(density);
     if let Err(error) = services.settings.set(
         plasma_store::SettingKey::APPEARANCE_DENSITY,
         density.as_str(),
     ) {
         push_toast(
-            ui.toasts,
+            ui.shell.toasts,
             format!("Falha ao salvar a densidade: {error}"),
             ToastKind::Error,
         );
@@ -1419,29 +873,238 @@ pub fn apply_density(services: &AppServices, mut ui: UiState, density: Density) 
 /// Copies a TDLib status into the shared auth signals.
 pub fn apply_auth_status(mut ui: UiState, status: TdlibStatus) {
     let ready = status.ready;
-    ui.auth_state.set(status.state);
-    ui.auth_error.set(status.error);
+    ui.session.auth_state.set(status.state);
+    ui.session.auth_error.set(status.error);
     if ready {
-        ui.logged_in.set(true);
-        ui.preview_mode.set(false);
+        ui.shell.logged_in.set(true);
+        ui.session.preview_mode.set(false);
+        // List only. Reloading the open conversation here raced get_chats and
+        // doubled the history work after every reconnect.
         bump_telegram_tick(ui);
-        bump_message_tick(ui);
     }
 }
 
-pub fn apply_auth_error(mut ui: UiState, error: String) {
-    ui.auth_state.set("error".to_string());
-    ui.auth_error.set(Some(error));
+pub fn apply_auth_error(mut ui: UiState, error: impl std::fmt::Display) {
+    ui.session.auth_state.set("error".to_string());
+    ui.session.auth_error.set(Some(error.to_string()));
 }
 
 pub fn bump_telegram_tick(mut ui: UiState) {
-    let next = ui.telegram_tick().wrapping_add(1);
-    (ui.telegram_tick).set(next);
+    let next = ui.conversation.telegram_tick().wrapping_add(1);
+    (ui.conversation.telegram_tick).set(next);
 }
 
 pub fn bump_message_tick(mut ui: UiState) {
-    let next = ui.message_tick().wrapping_add(1);
-    (ui.message_tick).set(next);
+    let next = ui.conversation.message_tick().wrapping_add(1);
+    (ui.conversation.message_tick).set(next);
+}
+
+fn live_preview(message: &TdlibMessageInfo) -> String {
+    if message.text.trim().is_empty() {
+        message.message.clone()
+    } else {
+        message.text.clone()
+    }
+}
+
+fn missing_chat_claims() -> &'static std::sync::Mutex<std::collections::HashSet<i64>> {
+    static CLAIMS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+        std::sync::OnceLock::new();
+    CLAIMS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn claim_missing_chat(chat_id: i64) -> bool {
+    missing_chat_claims()
+        .lock()
+        .map(|mut claims| claims.insert(chat_id))
+        .unwrap_or(false)
+}
+
+fn release_missing_chat(chat_id: i64) {
+    if let Ok(mut claims) = missing_chat_claims().lock() {
+        claims.remove(&chat_id);
+    }
+}
+
+/// Updates one chat row from a message that just arrived.
+///
+/// Returns whether the row was already in the list. The caller fetches a
+/// missing chat on its own instead of scanning every conversation.
+pub fn apply_live_chat_row(chat: &mut TdlibChatInfo, message: &TdlibMessageInfo, is_open: bool) {
+    chat.last_message_id = Some(message.id);
+    chat.last_message_text = live_preview(message);
+    chat.last_message_date = message.date;
+    chat.date = message.date;
+    chat.last_message_has_media = message.has_media;
+    chat.last_message_is_video = message.is_video;
+    chat.last_message_is_photo = message.is_photo;
+    if is_open {
+        chat.unread_count = 0;
+    } else if !message.out {
+        chat.unread_count = chat.unread_count.saturating_add(1);
+    }
+}
+
+/// Applies a live message to the chat list and, when it belongs there, the
+/// open timeline. This replaces a full TDLib reload of both.
+pub fn apply_live_message(
+    services: &AppServices,
+    mut ui: UiState,
+    chat_id: i64,
+    message: TdlibMessageInfo,
+) {
+    let chat_key = chat_id.to_string();
+    let open_id = ui
+        .conversation
+        .selected_chat
+        .peek()
+        .as_ref()
+        .map(|chat| chat.id.clone());
+    let is_open = open_id.as_deref() == Some(chat_key.as_str());
+    let mut chats = ui.conversation.chats.peek().clone();
+    if let Some(index) = chats.iter().position(|chat| chat.id == chat_key) {
+        apply_live_chat_row(&mut chats[index], &message, is_open);
+        let updated = chats.remove(index);
+        if is_open {
+            let mut selected = ui.conversation.selected_chat.peek().clone();
+            if let Some(selected) = selected.as_mut() {
+                selected.last_message_id = updated.last_message_id;
+                selected.last_message_text = updated.last_message_text.clone();
+                selected.last_message_date = updated.last_message_date;
+                selected.date = updated.date;
+                selected.last_message_has_media = updated.last_message_has_media;
+                selected.last_message_is_video = updated.last_message_is_video;
+                selected.last_message_is_photo = updated.last_message_is_photo;
+                selected.unread_count = 0;
+            }
+            set_if_changed(ui.conversation.selected_chat, selected);
+        }
+        chats.insert(0, updated);
+        ui.conversation.chats.set(chats);
+    } else if !chats.is_empty() && claim_missing_chat(chat_id) {
+        // An empty list means the startup scan is still running. Fetching
+        // every live chat on top of it piles getChat calls onto the same
+        // client and keeps the window on the loading placeholder.
+        let services = services.clone();
+        spawn(async move {
+            if let Ok(chat) = services.telegram.get_chat(chat_id).await {
+                let mut chats = ui.conversation.chats.peek().clone();
+                if !chats.iter().any(|existing| existing.id == chat.id) {
+                    chats.insert(0, chat);
+                    ui.conversation.chats.set(chats);
+                }
+            }
+            release_missing_chat(chat_id);
+        });
+    }
+
+    if !is_open {
+        return;
+    }
+    let topic = ui.conversation.selected_topic.peek().clone();
+    let visible_here = match topic.as_ref() {
+        Some(topic) => {
+            message.topic_id == Some(topic.id)
+                && (topic.kind.is_empty()
+                    || message
+                        .topic_kind
+                        .as_deref()
+                        .is_none_or(|kind| kind == topic.kind))
+        }
+        None => true,
+    };
+    let cache_key = message_cache_key(&chat_key, topic.as_ref());
+    if visible_here && ui.conversation.messages_key.peek().as_deref() == Some(cache_key.as_str()) {
+        let mut messages = ui.conversation.messages.peek().clone();
+        merge_messages(&mut messages, [message.clone()]);
+        set_if_changed(ui.conversation.messages, messages);
+    }
+    if let Some(topic_id) = message.topic_id {
+        let reading_it = topic.as_ref().is_some_and(|topic| topic.id == topic_id);
+        if !reading_it {
+            let mut topics = ui.conversation.topics.peek().clone();
+            if let Some(topic) = topics.iter_mut().find(|topic| topic.id == topic_id) {
+                topic.unread_count = topic.unread_count.saturating_add(1);
+                ui.conversation.topics.set(topics.clone());
+                ui.conversation
+                    .topics_cache
+                    .write()
+                    .insert(chat_key, topics);
+            }
+        }
+    }
+}
+
+/// Patches a message already rendered in the open timeline.
+pub fn apply_message_content(
+    mut ui: UiState,
+    chat_id: i64,
+    message_id: i64,
+    text: String,
+    has_media: bool,
+    is_photo: bool,
+    is_video: bool,
+) {
+    let chat_key = chat_id.to_string();
+    if ui
+        .conversation
+        .selected_chat
+        .peek()
+        .as_ref()
+        .map(|chat| chat.id.as_str())
+        != Some(chat_key.as_str())
+    {
+        return;
+    }
+    let mut messages = ui.conversation.messages.peek().clone();
+    let Some(message) = messages.iter_mut().find(|message| message.id == message_id) else {
+        return;
+    };
+    message.text = text.clone();
+    message.message = text;
+    message.has_media = has_media;
+    message.media = has_media;
+    message.is_photo = is_photo;
+    message.is_video = is_video;
+    ui.conversation.messages.set(messages);
+}
+
+/// Applies a title or unread change without reloading the chat list.
+pub fn apply_chat_patch(
+    mut ui: UiState,
+    chat_id: i64,
+    title: Option<String>,
+    unread_count: Option<i32>,
+) {
+    let chat_key = chat_id.to_string();
+    let mut chats = ui.conversation.chats.peek().clone();
+    let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_key) else {
+        return;
+    };
+    if let Some(title) = title.clone() {
+        chat.title = title;
+    }
+    if let Some(unread_count) = unread_count {
+        chat.unread_count = unread_count;
+    }
+    let updated_title = chat.title.clone();
+    let updated_unread = chat.unread_count;
+    ui.conversation.chats.set(chats);
+    if ui
+        .conversation
+        .selected_chat
+        .peek()
+        .as_ref()
+        .map(|chat| chat.id.as_str())
+        == Some(chat_key.as_str())
+    {
+        let mut selected = ui.conversation.selected_chat.peek().clone();
+        if let Some(selected) = selected.as_mut() {
+            selected.title = updated_title;
+            selected.unread_count = updated_unread;
+        }
+        set_if_changed(ui.conversation.selected_chat, selected);
+    }
 }
 
 /// Cache key compatible with the React app (`chatId` or
@@ -1463,6 +1126,7 @@ pub fn react_to_message(
     emoji: String,
 ) {
     let Some(mine) = ui
+        .conversation
         .messages()
         .iter()
         .find(|message| message.id == message_id)
@@ -1477,6 +1141,7 @@ pub fn react_to_message(
     };
     let add = !mine;
     let previous = ui
+        .conversation
         .messages()
         .iter()
         .find(|message| message.id == message_id)
@@ -1491,34 +1156,43 @@ pub fn react_to_message(
             .toggle_reaction(chat_id, message_id, emoji, add)
             .await
         {
-            let mut messages = ui.messages();
+            let still_here = ui
+                .conversation
+                .selected_chat()
+                .and_then(|chat| chat.id.parse::<i64>().ok())
+                == Some(chat_id);
+            if !still_here {
+                push_toast(ui.shell.toasts, error, ToastKind::Error);
+                return;
+            }
+            let mut messages = ui.conversation.messages();
             if let Some(message) = messages.iter_mut().find(|message| message.id == message_id) {
                 message.reactions = previous.clone();
             }
-            set_if_changed(ui.messages, messages);
-            let mut results = ui.search_results();
+            set_if_changed(ui.conversation.messages, messages);
+            let mut results = ui.conversation.search_results();
             if let Some(message) = results.iter_mut().find(|message| message.id == message_id) {
                 message.reactions = previous;
             }
-            set_if_changed(ui.search_results, results);
-            push_toast(ui.toasts, error, ToastKind::Error);
+            set_if_changed(ui.conversation.search_results, results);
+            push_toast(ui.shell.toasts, error, ToastKind::Error);
         }
     });
 }
 
 /// Applies the optimistic reaction change to the conversation and search rows.
 fn apply_reaction(ui: &mut UiState, message_id: i64, emoji: &str, add: bool) {
-    let mut messages = ui.messages();
+    let mut messages = ui.conversation.messages();
     if let Some(message) = messages.iter_mut().find(|message| message.id == message_id) {
         change_reactions(&mut message.reactions, emoji, add);
     }
-    set_if_changed(ui.messages, messages);
+    set_if_changed(ui.conversation.messages, messages);
 
-    let mut results = ui.search_results();
+    let mut results = ui.conversation.search_results();
     if let Some(message) = results.iter_mut().find(|message| message.id == message_id) {
         change_reactions(&mut message.reactions, emoji, add);
     }
-    set_if_changed(ui.search_results, results);
+    set_if_changed(ui.conversation.search_results, results);
 }
 
 fn change_reactions(
@@ -1566,7 +1240,7 @@ pub fn mark_deleted_messages(mut ui: UiState, message_ids: &[i64]) {
     }
     let ids: std::collections::HashSet<i64> = message_ids.iter().copied().collect();
 
-    let mut messages = ui.messages();
+    let mut messages = ui.conversation.messages();
     let mut changed = false;
     for message in &mut messages {
         if ids.contains(&message.id) && !message.is_deleted {
@@ -1575,10 +1249,10 @@ pub fn mark_deleted_messages(mut ui: UiState, message_ids: &[i64]) {
         }
     }
     if changed {
-        ui.messages.set(messages);
+        ui.conversation.messages.set(messages);
     }
 
-    let mut results = ui.search_results();
+    let mut results = ui.conversation.search_results();
     let mut changed = false;
     for message in &mut results {
         if ids.contains(&message.id) && !message.is_deleted {
@@ -1587,7 +1261,7 @@ pub fn mark_deleted_messages(mut ui: UiState, message_ids: &[i64]) {
         }
     }
     if changed {
-        ui.search_results.set(results);
+        ui.conversation.search_results.set(results);
     }
 }
 
@@ -1605,6 +1279,9 @@ pub fn merge_messages(
     for mut message in incoming {
         if let Some(position) = positions.get(&message.id).copied() {
             message.is_deleted = message.is_deleted || target[position].is_deleted;
+            if message.sender_name.trim().is_empty() {
+                message.sender_name = target[position].sender_name.clone();
+            }
             target[position] = message;
         } else {
             positions.insert(message.id, target.len());
@@ -1712,6 +1389,78 @@ mod tests {
         };
         assert_eq!(topic_visibility_key(&legacy), "forum:42");
         assert_eq!(topic_hidden_setting_key(-100), "plasma_hidden_topics_-100");
+        assert_eq!(topic_list_setting_key(-100), "plasma_topics_-100");
+        assert_eq!(forum_flag_setting_key(-100), "plasma_forum_-100");
+    }
+
+    #[test]
+    fn forum_decision_uses_the_cache_before_asking_tdlib() {
+        assert_eq!(
+            forum_decision(true, true, true, None),
+            ForumDecision::ShowCached
+        );
+        assert_eq!(
+            forum_decision(true, true, false, None),
+            ForumDecision::ShowLoading
+        );
+        assert_eq!(
+            forum_decision(false, true, true, Some(false)),
+            ForumDecision::ShowCached
+        );
+        assert_eq!(
+            forum_decision(false, true, false, Some(true)),
+            ForumDecision::ShowLoading
+        );
+        assert_eq!(
+            forum_decision(false, true, false, Some(false)),
+            ForumDecision::Plain
+        );
+        assert_eq!(
+            forum_decision(false, false, false, None),
+            ForumDecision::Plain
+        );
+        assert_eq!(
+            forum_decision(false, true, false, None),
+            ForumDecision::Probe
+        );
+        assert_eq!(
+            forum_decision(true, false, false, Some(false)),
+            ForumDecision::ShowLoading
+        );
+    }
+
+    #[test]
+    fn live_message_updates_the_row_without_marking_the_open_chat_unread() {
+        let mut chat = TdlibChatInfo {
+            id: "7".to_string(),
+            title: "Grupo".to_string(),
+            date: 1,
+            unread_count: 2,
+            is_group: true,
+            is_channel: false,
+            is_member: true,
+            can_send_messages: true,
+            can_send_media: true,
+            has_topics: false,
+            last_message_id: Some(1),
+            last_message_text: "antes".to_string(),
+            last_message_date: 1,
+            last_message_has_media: false,
+            last_message_is_video: false,
+            last_message_is_photo: false,
+        };
+        let mut incoming = message(9, 20);
+        incoming.text = "agora".to_string();
+        apply_live_chat_row(&mut chat, &incoming, true);
+        assert_eq!(chat.last_message_text, "agora");
+        assert_eq!(chat.last_message_date, 20);
+        assert_eq!(chat.unread_count, 0);
+
+        apply_live_chat_row(&mut chat, &incoming, false);
+        assert_eq!(chat.unread_count, 1);
+        incoming.out = true;
+        apply_live_chat_row(&mut chat, &incoming, false);
+        assert_eq!(chat.unread_count, 1);
     }
 
     #[test]

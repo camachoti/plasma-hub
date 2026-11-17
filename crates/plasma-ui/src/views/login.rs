@@ -18,9 +18,9 @@ pub fn LoginView() -> Element {
     let mut busy = use_signal(|| false);
     let mut form_error = use_signal(|| None::<String>);
 
-    let state = ui.auth_state();
-    let booting = ui.booting();
-    let error = ui.auth_error();
+    let state = ui.session.auth_state();
+    let booting = ui.session.booting();
+    let error = ui.session.auth_error();
     let busy_value = busy();
 
     rsx! {
@@ -47,8 +47,8 @@ pub fn LoginView() -> Element {
                         button {
                             class: "btn primary",
                             onclick: move |_| {
-                                ui.preview_mode.set(false);
-                                ui.logged_in.set(true);
+                                ui.session.preview_mode.set(false);
+                                ui.shell.logged_in.set(true);
                             },
                             "Abrir dashboard"
                         }
@@ -88,8 +88,8 @@ pub fn LoginView() -> Element {
                                         match services.telegram.check_code(value).await {
                                             Ok(status) => finish_status(services.clone(), ui, status).await,
                                             Err(error) => {
-                                                apply_auth_error(ui, error.clone());
-                                                form_error.set(Some(error));
+                                                apply_auth_error(ui, error.to_string());
+                                                form_error.set(Some(error.to_string()));
                                             }
                                         }
                                         busy.set(false);
@@ -132,8 +132,8 @@ pub fn LoginView() -> Element {
                                         match services.telegram.check_password(value).await {
                                             Ok(status) => finish_status(services.clone(), ui, status).await,
                                             Err(error) => {
-                                                apply_auth_error(ui, error.clone());
-                                                form_error.set(Some(error));
+                                                apply_auth_error(ui, error.to_string());
+                                                form_error.set(Some(error.to_string()));
                                             }
                                         }
                                         busy.set(false);
@@ -181,7 +181,7 @@ pub fn LoginView() -> Element {
                                     form_error.set(None);
                                     let services = services.clone();
                                     spawn(async move {
-                                        ui.auth_state.set("initializing".to_string());
+                                        ui.session.auth_state.set("initializing".to_string());
                                         match services
                                             .telegram
                                             .init(credentials.api_id, credentials.api_hash)
@@ -189,8 +189,8 @@ pub fn LoginView() -> Element {
                                         {
                                             Ok(status) => finish_status(services.clone(), ui, status).await,
                                             Err(error) => {
-                                                apply_auth_error(ui, error.clone());
-                                                form_error.set(Some(error));
+                                                apply_auth_error(ui, error.to_string());
+                                                form_error.set(Some(error.to_string()));
                                             }
                                         }
                                         busy.set(false);
@@ -246,8 +246,8 @@ pub fn LoginView() -> Element {
                                         match services.telegram.set_phone(value).await {
                                             Ok(status) => finish_status(services.clone(), ui, status).await,
                                             Err(error) => {
-                                                apply_auth_error(ui, error.clone());
-                                                form_error.set(Some(error));
+                                                apply_auth_error(ui, error.to_string());
+                                                form_error.set(Some(error.to_string()));
                                             }
                                         }
                                         busy.set(false);
@@ -276,16 +276,16 @@ pub fn LoginView() -> Element {
                         onclick: {
                             let services = services.clone();
                             move |_| {
-                                ui.preview_mode.set(true);
-                                ui.logged_in.set(true);
+                                ui.session.preview_mode.set(true);
+                                ui.shell.logged_in.set(true);
                                 match services.settings.set_bool(SettingKey::SKIP_LOGIN, true) {
                                     Ok(()) => push_toast(
-                                        ui.toasts,
+                                        ui.shell.toasts,
                                         "Prévia aberta sem conta. Você pode desativar isso nos ajustes.",
                                         ToastKind::Info,
                                     ),
                                     Err(error) => push_toast(
-                                        ui.toasts,
+                                        ui.shell.toasts,
                                         format!("Prévia aberta, mas a preferência não foi salva: {error}"),
                                         ToastKind::Error,
                                     ),
@@ -302,7 +302,7 @@ pub fn LoginView() -> Element {
                     for palette in Palette::ALL {
                         button {
                             key: "{palette.as_str()}",
-                            class: if ui.palette() == palette { "palette-chip active" } else { "palette-chip" },
+                            class: if ui.shell.palette() == palette { "palette-chip active" } else { "palette-chip" },
                             style: "--swatch: {palette.swatch()};",
                             onclick: {
                                 let services = services.clone();

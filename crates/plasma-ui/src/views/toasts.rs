@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 #[component]
 pub fn ToastStack() -> Element {
     let mut ui = use_context::<UiState>();
-    let items = ui.toasts.read().clone();
+    let items = ui.shell.toasts.read().clone();
 
     rsx! {
         div { class: "toast-stack",
@@ -20,9 +20,9 @@ pub fn ToastStack() -> Element {
                             button {
                                 title: "Fechar",
                                 onclick: move |_| {
-                                    let mut next = ui.toasts.read().clone();
+                                    let mut next = ui.shell.toasts.read().clone();
                                     next.retain(|item| item.id != id);
-                                    ui.toasts.set(next);
+                                    ui.shell.toasts.set(next);
                                 },
                                 "×"
                             }

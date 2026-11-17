@@ -26,6 +26,8 @@ const LEGACY_KEYS: &[&str] = &[
     "plasma_chat_media_size",
     "plasma_twitter_optional_cookies",
     "clear_twitter_groups_on_clear_cache",
+    "plasma_twitter_fake_chats",
+    "plasma_twitter_pending_fake_chat",
     "plasma_debug_logs",
 ];
 
@@ -39,8 +41,8 @@ pub fn SettingsView() -> Element {
             .get_bool(SettingKey::SKIP_LOGIN)
             .unwrap_or(false)
     });
-    let palette = ui.palette();
-    let density = ui.density();
+    let palette = ui.shell.palette();
+    let density = ui.shell.density();
 
     let mut cache_stats = use_signal(|| None::<NativeMediaCacheStats>);
     let mut cache_limit = use_signal(|| {
@@ -157,12 +159,12 @@ pub fn SettingsView() -> Element {
                                     skip_login.set(next);
                                     match services.settings.set_bool(SettingKey::SKIP_LOGIN, next) {
                                         Ok(()) => push_toast(
-                                            ui.toasts,
+                                            ui.shell.toasts,
                                             if next { "Login será pulado no próximo start." } else { "Login volta a ser solicitado." },
                                             ToastKind::Info,
                                         ),
                                         Err(error) => push_toast(
-                                            ui.toasts,
+                                            ui.shell.toasts,
                                             format!("Falha ao salvar: {error}"),
                                             ToastKind::Error,
                                         ),
@@ -174,13 +176,39 @@ pub fn SettingsView() -> Element {
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Voltar para a tela de login" }
-                            span { "Útil para testar o fluxo sem reiniciar o app." }
+                            strong { "Encerrar sessão Telegram" }
+                            span { "Faz logout no TDLib e volta para a tela de login." }
                         }
                         button {
                             class: "btn small ghost",
-                            onclick: move |_| ui.logged_in.set(false),
-                            "Mostrar login"
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    let services = services.clone();
+                                    spawn(async move {
+                                        match services.telegram.log_out().await {
+                                            Ok(_) => {
+                                                ui.shell.logged_in.set(false);
+                                                ui.session.preview_mode.set(false);
+                                                ui.session.auth_user.set(None);
+                                                ui.conversation.chats.set(Vec::new());
+                                                ui.conversation.selected_chat.set(None);
+                                                push_toast(
+                                                    ui.shell.toasts,
+                                                    "Sessão Telegram encerrada.",
+                                                    ToastKind::Success,
+                                                );
+                                            }
+                                            Err(error) => push_toast(
+                                                ui.shell.toasts,
+                                                format!("Falha ao sair: {error}"),
+                                                ToastKind::Error,
+                                            ),
+                                        }
+                                    });
+                                }
+                            },
+                            "Sair"
                         }
                     }
                 }
@@ -223,17 +251,62 @@ pub fn SettingsView() -> Element {
                                     clearing_cache.set(true);
                                     let services = services.clone();
                                     spawn(async move {
+                                        let clear_twitter = services
+                                            .settings
+                                            .get_bool(SettingKey::CLEAR_TWITTER_GROUPS_ON_CLEAR_CACHE)
+                                            .unwrap_or(false);
                                         match services.telegram.clear_media_cache().await {
                                             Ok(stats) => {
                                                 cache_stats.set(Some(stats));
-                                                push_toast(
-                                                    ui.toasts,
-                                                    "Cache de mídia limpo.",
-                                                    ToastKind::Success,
-                                                );
+                                                if clear_twitter {
+                                                    if let Err(error) =
+                                                        crate::twitter_fake::clear_twitter_fake_chats(
+                                                            &services.settings,
+                                                        )
+                                                    {
+                                                        push_toast(
+                                                            ui.shell.toasts,
+                                                            format!(
+                                                                "Cache limpo, mas as galerias Twitter falharam: {error}"
+                                                            ),
+                                                            ToastKind::Error,
+                                                        );
+                                                    } else {
+                                                        let mut chats = ui.conversation.chats();
+                                                        chats.retain(|chat| {
+                                                            !crate::twitter_fake::is_twitter_fake_chat_id(
+                                                                &chat.id,
+                                                            )
+                                                        });
+                                                        ui.conversation.chats.set(chats);
+                                                        if ui
+                                                            .conversation
+                                                            .selected_chat()
+                                                            .is_some_and(|chat| {
+                                                                crate::twitter_fake::is_twitter_fake_chat_id(
+                                                                    &chat.id,
+                                                                )
+                                                            })
+                                                        {
+                                                            ui.conversation.selected_chat.set(None);
+                                                            ui.conversation.messages.set(Vec::new());
+                                                        }
+                                                        push_toast(
+                                                            ui.shell.toasts,
+                                                            "Cache de mídia e galerias Twitter limpos.",
+                                                            ToastKind::Success,
+                                                        );
+                                                    }
+                                                } else {
+                                                    push_toast(
+                                                        ui.shell.toasts,
+                                                        "Cache de mídia limpo.",
+                                                        ToastKind::Success,
+                                                    );
+                                                }
                                             }
                                             Err(error) => push_toast(
-                                                ui.toasts,
+                                                ui.shell.toasts,
                                                 format!("Falha ao limpar o cache: {error}"),
                                                 ToastKind::Error,
                                             ),
@@ -279,7 +352,7 @@ pub fn SettingsView() -> Element {
                                                 .set(SettingKey::MEDIA_CACHE_LIMIT, &bytes.to_string())
                                             {
                                                 push_toast(
-                                                    ui.toasts,
+                                                    ui.shell.toasts,
                                                     format!("Falha ao salvar o limite: {error}"),
                                                     ToastKind::Error,
                                                 );
@@ -287,7 +360,7 @@ pub fn SettingsView() -> Element {
                                             match services.telegram.evict_media_cache(bytes).await {
                                                 Ok(stats) => cache_stats.set(Some(stats)),
                                                 Err(error) => push_toast(
-                                                    ui.toasts,
+                                                    ui.shell.toasts,
                                                     format!("Falha ao aplicar o limite: {error}"),
                                                     ToastKind::Error,
                                                 ),
@@ -352,7 +425,7 @@ pub fn SettingsView() -> Element {
                                 class: "btn small ghost",
                                 onclick: move |_| {
                                     if let Err(error) = plasma_platform::open_path(&open_data_dir) {
-                                        push_toast(ui.toasts, error, ToastKind::Error);
+                                        push_toast(ui.shell.toasts, error, ToastKind::Error);
                                     }
                                 },
                                 "Abrir dados"
@@ -361,7 +434,7 @@ pub fn SettingsView() -> Element {
                                 class: "btn small ghost",
                                 onclick: move |_| {
                                     if let Err(error) = plasma_platform::open_path(&open_crash_log) {
-                                        push_toast(ui.toasts, error, ToastKind::Error);
+                                        push_toast(ui.shell.toasts, error, ToastKind::Error);
                                     }
                                 },
                                 "Abrir log de falhas"
@@ -390,7 +463,7 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
-fn import_legacy(services: AppServices, ui: UiState) {
+fn import_legacy(services: AppServices, mut ui: UiState) {
     spawn(async move {
         let keys = LEGACY_KEYS
             .iter()
@@ -418,24 +491,74 @@ fn import_legacy(services: AppServices, ui: UiState) {
         let mut eval = dioxus::document::eval(&script);
         match eval.recv::<Vec<(String, String)>>().await {
             Ok(entries) if entries.is_empty() => push_toast(
-                ui.toasts,
+                ui.shell.toasts,
                 "Nenhuma preferência encontrada nesta WebView.",
                 ToastKind::Info,
             ),
-            Ok(entries) => match services.settings.import_legacy(entries) {
-                Ok(count) => push_toast(
-                    ui.toasts,
-                    format!("{count} preferência(s) importada(s) para o SQLite."),
-                    ToastKind::Success,
-                ),
-                Err(error) => push_toast(
-                    ui.toasts,
-                    format!("Falha ao importar: {error}"),
-                    ToastKind::Error,
-                ),
-            },
+            Ok(entries) => {
+                let mut twitter_payload = None::<String>;
+                let filtered: Vec<(String, String)> = entries
+                    .into_iter()
+                    .filter(|(key, value)| {
+                        if key == SettingKey::TWITTER_FAKE_CHATS.as_str() {
+                            twitter_payload = Some(value.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                let mut imported = match services.settings.import_legacy(filtered) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        push_toast(
+                            ui.shell.toasts,
+                            format!("Falha ao importar: {error}"),
+                            ToastKind::Error,
+                        );
+                        return;
+                    }
+                };
+                if let Some(raw) = twitter_payload {
+                    match serde_json::from_str::<Vec<crate::twitter_fake::TwitterFakeChat>>(&raw) {
+                        Ok(legacy) => match crate::twitter_fake::merge_legacy_chats(
+                            &services.settings,
+                            legacy,
+                        ) {
+                            Ok(added) => {
+                                imported += added;
+                                let mut chats = ui.conversation.chats();
+                                crate::twitter_fake::merge_fake_dialogs_into(
+                                    &mut chats,
+                                    &services.settings,
+                                );
+                                ui.conversation.chats.set(chats);
+                            }
+                            Err(error) => push_toast(
+                                ui.shell.toasts,
+                                format!("Falha ao importar galerias Twitter: {error}"),
+                                ToastKind::Error,
+                            ),
+                        },
+                        Err(error) => push_toast(
+                            ui.shell.toasts,
+                            format!("JSON inválido em plasma_twitter_fake_chats: {error}"),
+                            ToastKind::Error,
+                        ),
+                    }
+                }
+                if imported == 0 {
+                    push_toast(ui.shell.toasts, "Nada novo para importar.", ToastKind::Info);
+                } else {
+                    push_toast(
+                        ui.shell.toasts,
+                        format!("{imported} item(ns) importado(s) para o SQLite."),
+                        ToastKind::Success,
+                    );
+                }
+            }
             Err(error) => push_toast(
-                ui.toasts,
+                ui.shell.toasts,
                 format!("Falha ao ler o localStorage: {error}"),
                 ToastKind::Error,
             ),

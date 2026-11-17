@@ -41,12 +41,12 @@ pub fn TwitterView() -> Element {
             spawn(async move {
                 match services.twitter.save_cookies(value).await {
                     Ok(()) => push_toast(
-                        ui.toasts,
+                        ui.shell.toasts,
                         "Cookies do Twitter salvos no arquivo local.",
                         ToastKind::Success,
                     ),
                     Err(error) => push_toast(
-                        ui.toasts,
+                        ui.shell.toasts,
                         format!("Falha ao salvar cookies: {error}"),
                         ToastKind::Error,
                     ),
@@ -86,12 +86,12 @@ pub fn TwitterView() -> Element {
                         .await
                     {
                         Ok(info) => profile.set(Some(info)),
-                        Err(message) => error.set(Some(message)),
+                        Err(message) => error.set(Some(message.to_string())),
                     }
                 } else {
                     match services.twitter.analyze_tweet(raw_url, cookie_value).await {
                         Ok(info) => tweet.set(Some(info)),
-                        Err(message) => error.set(Some(message)),
+                        Err(message) => error.set(Some(message.to_string())),
                     }
                 }
                 analyzing.set(false);
@@ -129,12 +129,12 @@ pub fn TwitterView() -> Element {
                             .await
                         {
                             Ok(info) => profile.set(Some(info)),
-                            Err(message) => error.set(Some(message)),
+                            Err(message) => error.set(Some(message.to_string())),
                         }
                     } else {
                         match services.twitter.analyze_tweet(raw_url, cookie_value).await {
                             Ok(info) => tweet.set(Some(info)),
-                            Err(message) => error.set(Some(message)),
+                            Err(message) => error.set(Some(message.to_string())),
                         }
                     }
                     analyzing.set(false);
@@ -348,7 +348,7 @@ fn TweetCard(tweet: NativeMediaInfo, cookies: String) -> Element {
 #[component]
 fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
     let services = use_context::<AppServices>();
-    let ui = use_context::<UiState>();
+    let mut ui = use_context::<UiState>();
     let avatar = profile.avatar_url.clone();
     let media = profile
         .media_items
@@ -362,6 +362,8 @@ fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
     let original_url = profile.original_url.clone();
     let services_for_download = services.clone();
     let cookies_for_download = cookies.clone();
+    let mut creating_chat = use_signal(|| false);
+    let profile_for_chat = profile.clone();
 
     rsx! {
         article { class: "twitter-result",
@@ -391,18 +393,75 @@ fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
                     button {
                         class: "btn primary",
                         disabled: media_urls.is_empty(),
-                        onclick: move |_| {
-                            download_profile(
-                                services_for_download.clone(),
-                                ui,
-                                &username,
-                                &media_urls,
-                                &original_url,
-                                profile.avatar_url.clone(),
-                                cookies_for_download.clone(),
-                            );
+                        onclick: {
+                            let media_urls = media_urls.clone();
+                            let username = username.clone();
+                            let original_url = original_url.clone();
+                            move |_| {
+                                download_profile(
+                                    services_for_download.clone(),
+                                    ui,
+                                    &username,
+                                    &media_urls,
+                                    &original_url,
+                                    profile.avatar_url.clone(),
+                                    cookies_for_download.clone(),
+                                );
+                            }
                         },
                         "Baixar todas"
+                    }
+                    button {
+                        class: "btn ghost",
+                        disabled: media_urls.is_empty() || creating_chat(),
+                        onclick: {
+                            let services = services.clone();
+                            move |_| {
+                                if creating_chat() {
+                                    return;
+                                }
+                                creating_chat.set(true);
+                                match crate::twitter_fake::create_from_profile(
+                                    &services.settings,
+                                    &profile_for_chat,
+                                ) {
+                                    Ok(result) => {
+                                        let mut chats = ui.conversation.chats();
+                                        crate::twitter_fake::merge_fake_dialogs_into(
+                                            &mut chats,
+                                            &services.settings,
+                                        );
+                                        ui.conversation.chats.set(chats);
+                                        if let Some(chat) = crate::twitter_fake::get_twitter_fake_chat(
+                                            &services.settings,
+                                            &result.chat_id,
+                                        ) {
+                                            crate::views::chat_list::open_chat(
+                                                services.clone(),
+                                                ui,
+                                                chat.to_dialog(),
+                                            );
+                                        }
+                                        ui.shell.tab.set(crate::state::Tab::Telegram);
+                                        crate::state::push_toast(
+                                            ui.shell.toasts,
+                                            format!(
+                                                "Galeria @{} criada com {} mídia(s).",
+                                                profile_for_chat.username, result.media_count
+                                            ),
+                                            crate::state::ToastKind::Success,
+                                        );
+                                    }
+                                    Err(error) => crate::state::push_toast(
+                                        ui.shell.toasts,
+                                        error.message,
+                                        crate::state::ToastKind::Error,
+                                    ),
+                                }
+                                creating_chat.set(false);
+                            }
+                        },
+                        if creating_chat() { "Criando..." } else { "Criar chat" }
                     }
                 }
             }
@@ -495,7 +554,11 @@ fn download_profile(
     cookies: String,
 ) {
     if media_urls.is_empty() {
-        push_toast(ui.toasts, "Nenhuma mídia para baixar.", ToastKind::Info);
+        push_toast(
+            ui.shell.toasts,
+            "Nenhuma mídia para baixar.",
+            ToastKind::Info,
+        );
         return;
     }
     let id = format!(
@@ -550,7 +613,7 @@ fn finish_twitter_download(
     services: AppServices,
     ui: UiState,
     id: String,
-    result: Result<(), String>,
+    result: plasma_core::Result<()>,
 ) {
     match result {
         Ok(()) => {
@@ -558,17 +621,11 @@ fn finish_twitter_download(
                 services,
                 ui,
                 &id,
-                |item| {
-                    item.progress = 100.0;
-                    item.status = "completed".to_string();
-                    item.error = None;
-                    item.can_cancel = Some(false);
-                    item.can_retry = Some(false);
-                },
+                crate::downloads::complete_download_record,
                 true,
             );
         }
-        Err(error) if error == plasma_download::DOWNLOAD_CANCELED_ERROR => {
+        Err(error) if error.is_cancelled() => {
             update_download(
                 services,
                 ui,
@@ -589,7 +646,7 @@ fn finish_twitter_download(
                 &id,
                 |item| {
                     item.status = "failed".to_string();
-                    item.error = Some(error);
+                    item.error = Some(error.to_string());
                     item.can_cancel = Some(false);
                     item.can_retry = Some(true);
                 },

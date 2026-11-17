@@ -12,6 +12,9 @@ typealias BuildConfig = com.camacho.plasmahub.BuildConfig
 
 class MainActivity : WryActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Capture before native startup so a cold-start share still has a URL
+        // even if JNI dispatch races with Rust main.
+        stashLaunchShareUrl(intent)
         super.onCreate(savedInstanceState)
         handleShareIntent(intent)
     }
@@ -48,6 +51,29 @@ class MainActivity : WryActivity() {
     }
 
     fun openPath(path: String) {
+        withScannedUri(path) { uri, mime ->
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { startActivity(view) }
+        }
+    }
+
+    fun sharePath(path: String) {
+        withScannedUri(path) { uri, mime ->
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching {
+                startActivity(Intent.createChooser(share, "Compartilhar"))
+            }
+        }
+    }
+
+    private fun withScannedUri(path: String, block: (Uri, String) -> Unit) {
         val file = File(path)
         if (!file.exists()) {
             return
@@ -61,40 +87,64 @@ class MainActivity : WryActivity() {
             arrayOf(mime),
         ) { _, uri ->
             if (uri != null) {
-                val view = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, mime)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                runCatching { startActivity(view) }
+                block(uri, mime)
             }
         }
     }
 
     private fun handleShareIntent(intent: Intent?) {
+        val url = extractShareUrl(intent) ?: return
+        runCatching { nativeOnShareUrl(url) }
+    }
+
+    private fun stashLaunchShareUrl(intent: Intent?) {
+        launchShareUrl = extractShareUrl(intent)
+    }
+
+    private fun extractShareUrl(intent: Intent?): String? {
         if (intent == null) {
-            return
+            return null
         }
         val action = intent.action
         if (action != Intent.ACTION_SEND &&
             action != Intent.ACTION_SEND_MULTIPLE &&
             action != Intent.ACTION_VIEW
         ) {
-            return
+            return null
         }
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-            ?: intent.clipData?.getItemAt(0)?.text?.toString()
-        val url = extractUrl(text) ?: extractUrl(intent.dataString)
-        if (url != null) {
-            nativeOnShareUrl(url)
+
+        val candidates = mutableListOf<String?>()
+        candidates += intent.getStringExtra(Intent.EXTRA_TEXT)
+        candidates += intent.getStringExtra(Intent.EXTRA_SUBJECT)
+        candidates += intent.getStringExtra(Intent.EXTRA_TITLE)
+        intent.clipData?.let { clip ->
+            for (index in 0 until clip.itemCount) {
+                val item = clip.getItemAt(index)
+                candidates += item?.text?.toString()
+                candidates += item?.htmlText
+                candidates += item?.uri?.toString()
+            }
         }
+        candidates += intent.dataString
+
+        for (candidate in candidates) {
+            val url = extractUrl(candidate)
+            if (url != null) {
+                return url
+            }
+        }
+        return null
     }
 
     private fun extractUrl(value: String?): String? {
-        if (value == null) {
+        if (value.isNullOrBlank()) {
             return null
         }
-        val match = Regex("""https?://\S+""").find(value)?.value ?: return null
-        return match.trimEnd(',', '.', ')', ']', '}', ';', '!', '?', '"', '\'')
+        val match = Regex("""https?://[^\s<>"'\)\]]+""", RegexOption.IGNORE_CASE)
+            .find(value)
+            ?.value
+            ?: return null
+        return match.trimEnd(',', '.', ')', ']', '}', ';', '!', '?', '"', '\'', '>')
     }
 
     private fun copyUriToCache(uri: Uri): String? {
@@ -134,8 +184,19 @@ class MainActivity : WryActivity() {
     companion object {
         private const val REQUEST_OPEN_MEDIA = 0x5048
 
+        @JvmField
+        @Volatile
+        var launchShareUrl: String? = null
+
         init {
             System.loadLibrary("main")
+        }
+
+        @JvmStatic
+        fun takeLaunchShareUrl(): String? {
+            val value = launchShareUrl
+            launchShareUrl = null
+            return value
         }
     }
 

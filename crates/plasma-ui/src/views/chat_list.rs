@@ -1,35 +1,10 @@
 //! Chat list rows with the real avatar of each conversation.
 
 use crate::context::{ContextMenuState, ContextTarget};
-use crate::state::{AppServices, UiState};
+use crate::state::{prepare_forum_view, set_chat_has_topics, AppServices, ForumDecision, UiState};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibChatInfo;
-
-/// Avatar of a chat.
-///
-/// The photo is downloaded on demand and served by the local media server, so
-/// the list does not carry base64 payloads in the DOM. Until the file is
-/// ready the row keeps the coloured letter placeholder.
-#[component]
-pub fn ChatAvatar(chat_id: i64, title: String) -> Element {
-    let services = use_context::<AppServices>();
-    let resource = use_resource(move || {
-        let services = services.clone();
-        async move {
-            let _ = services.telegram.ensure_chat_avatar(chat_id).await;
-            services.telegram.chat_avatar_url(chat_id)
-        }
-    });
-
-    rsx! {
-        div { class: "chat-avatar",
-            match &*resource.read_unchecked() {
-                Some(Some(url)) => rsx! { img { src: "{url}", alt: "" } },
-                _ => rsx! { span { "{title.chars().next().unwrap_or('?')}" } },
-            }
-        }
-    }
-}
+use std::collections::HashSet;
 
 /// Collapses whitespace and truncates a message preview.
 ///
@@ -51,16 +26,75 @@ pub fn summarize_last_message(text: &str, limit: usize) -> String {
 pub fn ChatRow(
     chat: TdlibChatInfo,
     active: bool,
+    visible_chats: Signal<HashSet<String>>,
     on_open: EventHandler<TdlibChatInfo>,
     on_context: EventHandler<(TdlibChatInfo, f64, f64)>,
 ) -> Element {
-    let chat_id = chat.id.parse::<i64>().ok();
+    let services = use_context::<AppServices>();
+    let ui = use_context::<UiState>();
+    let is_twitter_fake = crate::twitter_fake::is_twitter_fake_chat_id(&chat.id);
+    let gallery_badge = if is_twitter_fake {
+        ui.conversation
+            .twitter_gallery_badges()
+            .get(&chat.id)
+            .copied()
+            .filter(|count| *count > 0)
+    } else {
+        None
+    };
+    let chat_id = if is_twitter_fake {
+        None
+    } else {
+        chat.id.parse::<i64>().ok()
+    };
     let title = chat.title.clone();
     let preview = summarize_last_message(&chat.last_message_text, 90);
+    let chat_id_key = chat.id.clone();
+    let mut avatar_url = use_signal({
+        let services = services.clone();
+        let parsed = chat_id;
+        let fake_id = chat.id.clone();
+        move || {
+            if crate::twitter_fake::is_twitter_fake_chat_id(&fake_id) {
+                crate::twitter_fake::get_twitter_fake_chat(&services.settings, &fake_id)
+                    .and_then(|chat| chat.avatar_url)
+            } else {
+                parsed.and_then(|chat_id| services.telegram.chat_avatar_url(chat_id))
+            }
+        }
+    });
+    let mut avatar_requested = use_hook(|| CopyValue::new(false));
+    use_effect(move || {
+        let vis = visible_chats.read();
+        // Only rows reported by IntersectionObserver fetch avatars. When the set
+        // is still empty (before the first callback), every row would otherwise
+        // call TDLib at once after restoring a large cached list and freeze the
+        // whole window. Letter placeholders are fine until visibility arrives.
+        let wanted = vis.contains(&chat_id_key);
+        if avatar_url.peek().is_some() || !wanted || avatar_requested() {
+            return;
+        }
+        if is_twitter_fake {
+            avatar_requested.set(true);
+            return;
+        }
+        let Some(chat_id) = chat_id else {
+            return;
+        };
+        avatar_requested.set(true);
+        let services = services.clone();
+        spawn(async move {
+            let _ = services.telegram.ensure_chat_avatar(chat_id).await;
+            if let Some(url) = services.telegram.chat_avatar_url(chat_id) {
+                avatar_url.set(Some(url));
+            }
+        });
+    });
 
     rsx! {
         button {
             class: if active { "chat-row active" } else { "chat-row" },
+            "data-chat-id": "{chat.id}",
             oncontextmenu: {
                 let chat = chat.clone();
                 move |event: Event<MouseData>| {
@@ -73,8 +107,14 @@ pub fn ChatRow(
                 let chat = chat.clone();
                 move |_| on_open.call(chat.clone())
             },
-            if let Some(chat_id) = chat_id {
-                ChatAvatar { chat_id, title }
+            if chat_id.is_some() {
+                div { class: "chat-avatar",
+                    if let Some(url) = avatar_url() {
+                        img { src: "{url}", alt: "" }
+                    } else {
+                        span { "{title.chars().next().unwrap_or('?')}" }
+                    }
+                }
             } else {
                 div { class: "chat-avatar",
                     span { "{title.chars().next().unwrap_or('?')}" }
@@ -93,7 +133,13 @@ pub fn ChatRow(
             }
             div { class: "chat-meta",
                 span { class: "chat-time", "{format_timestamp(chat.last_message_date)}" }
-                if chat.unread_count > 0 {
+                if let Some(count) = gallery_badge {
+                    span {
+                        class: "unread gallery-new",
+                        title: "Novas mídias do X",
+                        "{count}"
+                    }
+                } else if chat.unread_count > 0 {
                     span { class: "unread", "{chat.unread_count}" }
                 }
             }
@@ -103,7 +149,7 @@ pub fn ChatRow(
 
 /// Opens the context menu of a chat row.
 pub fn open_chat_menu(mut ui: UiState, chat: TdlibChatInfo, x: f64, y: f64) {
-    ui.context_menu.set(Some(ContextMenuState::new(
+    ui.panels.context_menu.set(Some(ContextMenuState::new(
         x,
         y,
         ContextTarget::Chat { id: chat.id },
@@ -111,7 +157,9 @@ pub fn open_chat_menu(mut ui: UiState, chat: TdlibChatInfo, x: f64, y: f64) {
 }
 
 fn chat_kind(chat: &TdlibChatInfo) -> &'static str {
-    if chat.is_channel {
+    if crate::twitter_fake::is_twitter_fake_chat_id(&chat.id) {
+        "Twitter"
+    } else if chat.is_channel {
         "Canal"
     } else if chat.is_group {
         "Grupo"
@@ -128,24 +176,48 @@ fn format_timestamp(timestamp: i32) -> String {
 pub fn open_chat(services: AppServices, mut ui: UiState, chat: TdlibChatInfo) {
     let mut selected = chat;
     selected.unread_count = 0;
-    ui.selected_chat.set(Some(selected.clone()));
-    ui.selected_topic.set(None);
-    ui.hidden_topics.set(Vec::new());
-    ui.topic_browser_open.set(false);
-    ui.avatar.set(None);
-    ui.messages.set(Vec::new());
-    ui.messages_has_more.set(false);
-    ui.messages_key.set(None);
-    ui.search_results.set(Vec::new());
-    ui.search_error.set(None);
-    ui.search_loading.set(false);
-    ui.reply_to.set(None);
-    ui.user_media.set(None);
-    if let Ok(chat_id) = selected.id.parse::<i64>() {
-        spawn(async move {
-            let _ = services.telegram.read_chat(chat_id).await;
-        });
+    let chat_id = selected.id.clone();
+    let is_twitter_fake = crate::twitter_fake::is_twitter_fake_chat_id(&chat_id);
+    if is_twitter_fake {
+        ui.conversation
+            .twitter_gallery_badges
+            .write()
+            .remove(&chat_id);
     }
+    // Paint a known forum immediately. The topic effect still refreshes the
+    // list, but the bar no longer waits for that round trip.
+    let decision = if is_twitter_fake {
+        ForumDecision::Plain
+    } else {
+        prepare_forum_view(&services, ui, &mut selected)
+    };
+    ui.conversation.selected_chat.set(Some(selected.clone()));
+    ui.conversation.mobile_show_list.set(false);
+    if matches!(
+        decision,
+        ForumDecision::ShowCached | ForumDecision::ShowLoading
+    ) {
+        set_chat_has_topics(ui, &chat_id, true);
+    }
+    ui.conversation.selected_topic.set(None);
+    ui.conversation.hidden_topics.set(Vec::new());
+    ui.conversation.topic_browser_open.set(false);
+    if is_twitter_fake {
+        ui.session.avatar.set(
+            crate::twitter_fake::get_twitter_fake_chat(&services.settings, &chat_id)
+                .and_then(|chat| chat.avatar_url),
+        );
+    } else {
+        ui.session.avatar.set(None);
+    }
+    ui.conversation.messages.set(Vec::new());
+    ui.conversation.messages_has_more.set(false);
+    ui.conversation.messages_key.set(None);
+    ui.conversation.search_results.set(Vec::new());
+    ui.conversation.search_error.set(None);
+    ui.conversation.search_loading.set(false);
+    ui.panels.reply_to.set(None);
+    ui.panels.user_media.set(None);
 }
 
 #[cfg(test)]

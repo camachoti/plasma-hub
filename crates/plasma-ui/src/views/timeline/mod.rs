@@ -3,6 +3,13 @@
 //! Albums (Telegram grouped media) are collapsed into a single timeline item
 //! with a media grid, mirroring what the React dashboard does.
 
+mod layout;
+mod thumbnail;
+
+use layout::*;
+pub(crate) use layout::{format_timestamp, reply_sender, reply_snippet};
+pub(crate) use thumbnail::MessageThumbnail;
+
 use crate::context::{save_album, ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
 use crate::state::{
@@ -11,19 +18,13 @@ use crate::state::{
 };
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use time::OffsetDateTime;
 
-const OVERSCAN: usize = 6;
 const DEFAULT_VIEWPORT: f64 = 620.0;
 const TIMELINE_ID: &str = "plasma-timeline-scroll";
-const ALBUM_CELL_HEIGHT: f64 = 104.0;
-const ALBUM_GAP: f64 = 4.0;
 /// Reply previews are secondary to the timeline itself. Fetching every missing
 /// quote at once can queue dozens of TDLib requests and delay the visible page.
-const REPLY_FETCH_CONCURRENCY: usize = 4;
+const REPLY_FETCH_CONCURRENCY: usize = 1;
 
 /// Observes the rendered rows and reports their real height to Rust.
 ///
@@ -44,6 +45,7 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
     let frame = 0;
     let measureAll = true;
     const dirty = new Set();
+    const lastHeights = new Map();
 
     const closestRow = (node) => {
         if (!node) return null;
@@ -92,11 +94,17 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
 
         const heights = {};
         let deltaAbove = 0;
+        let changed = false;
         for (let index = 0; index < rows.length; index += 1) {
             const row = rows[index];
             const key = row.dataset.key;
             const height = measured[index];
             if (!key || height <= 0) continue;
+            const previousHeight = lastHeights.get(key);
+            if (previousHeight == null || Math.abs(previousHeight - height) > 2) {
+                changed = true;
+                lastHeights.set(key, height);
+            }
             const oldHeight = oldHeights[index];
             const top = parseFloat(row.style.top) || 0;
             heights[key] = height;
@@ -104,6 +112,7 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
                 deltaAbove += height - oldHeight;
             }
         }
+        if (!changed) return;
         dioxus.send({
             heights,
             deltaAbove,
@@ -111,12 +120,19 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
         });
     };
 
+    let debounce = 0;
     const schedule = () => {
-        if (frame) return;
-        frame = requestAnimationFrame(() => {
-            frame = 0;
-            measure();
-        });
+        if (debounce) return;
+        // Coalesce MutationObserver bursts from cache→quick→follow-up paints
+        // into one measure pass so the Rust side is not flooded.
+        debounce = setTimeout(() => {
+            debounce = 0;
+            if (frame) return;
+            frame = requestAnimationFrame(() => {
+                frame = 0;
+                measure();
+            });
+        }, 48);
     };
 
     const markAll = () => {
@@ -125,20 +141,19 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
     };
 
     const mutations = new MutationObserver(onMutations);
-    const resizes = new ResizeObserver(markAll);
     const bind = () => {
         const element = document.getElementById(TIMELINE_ID);
         if (!element) return false;
         if (container === element) return true;
         container = element;
         mutations.disconnect();
+        // Text and scrollbar changes used to schedule a new measure for every
+        // frame. A chat that had just opened then never returned to the event
+        // loop. Structural changes are enough to pick up new rows.
         mutations.observe(element, {
             childList: true,
-            characterData: true,
             subtree: true,
         });
-        resizes.disconnect();
-        resizes.observe(element);
         markAll();
         return true;
     };
@@ -152,9 +167,9 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
     watcher.observe(document.body, { childList: true, subtree: true });
     window.__plasmaTimelineMeasureCleanup = () => {
         mutations.disconnect();
-        resizes.disconnect();
         watcher.disconnect();
         window.removeEventListener("resize", markAll);
+        if (debounce) clearTimeout(debounce);
         if (frame) cancelAnimationFrame(frame);
     };
     bind();
@@ -164,387 +179,12 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
 })();
 "#;
 
-/// A row of the timeline: a single message or a grouped album.
-#[derive(Clone, Debug, PartialEq)]
-enum TimelineItem {
-    Message(Box<TdlibMessageInfo>),
-    Album(Vec<TdlibMessageInfo>),
-}
-
-impl TimelineItem {
-    fn key(&self) -> String {
-        match self {
-            TimelineItem::Message(message) => message.id.to_string(),
-            TimelineItem::Album(messages) => format!("album-{}", messages[0].id),
-        }
-    }
-
-    /// Whether this row contains the given Telegram message id.
-    fn contains(&self, message_id: i64) -> bool {
-        match self {
-            TimelineItem::Message(message) => message.id == message_id,
-            TimelineItem::Album(messages) => messages.iter().any(|item| item.id == message_id),
-        }
-    }
-}
-
-/// Measurement keys are scoped by chat: Telegram message ids are only unique
-/// inside a conversation, so the same id in two chats must not share a height.
-fn scoped_key(chat_id: i64, item: &TimelineItem) -> String {
-    format!("{chat_id}:{}", item.key())
-}
-
-/// Collapses consecutive messages that share a `grouped_id` into albums.
-fn group_albums(messages: &[TdlibMessageInfo]) -> Vec<TimelineItem> {
-    let mut items = Vec::new();
-    let mut index = 0;
-    while index < messages.len() {
-        let message = &messages[index];
-        let group = message
-            .grouped_id
-            .as_deref()
-            .filter(|group| !group.is_empty());
-        let Some(group) = group else {
-            items.push(TimelineItem::Message(Box::new(message.clone())));
-            index += 1;
-            continue;
-        };
-        let mut end = index + 1;
-        while end < messages.len() && messages[end].grouped_id.as_deref() == Some(group) {
-            end += 1;
-        }
-        if end - index == 1 {
-            items.push(TimelineItem::Message(Box::new(message.clone())));
-        } else {
-            items.push(TimelineItem::Album(messages[index..end].to_vec()));
-        }
-        index = end;
-    }
-    items
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct TimelineLayout {
-    offsets: Vec<f64>,
-    heights: Vec<f64>,
-    total_height: f64,
-}
-
-fn build_layout(
-    items: &[TimelineItem],
-    measured: &HashMap<String, f64>,
-    chat_id: i64,
-) -> TimelineLayout {
-    let mut offsets = Vec::with_capacity(items.len());
-    let mut heights = Vec::with_capacity(items.len());
-    let mut top = 0.0;
-    for item in items {
-        offsets.push(top);
-        // Rendered rows are measured by the WebView; estimates only cover rows
-        // that have never been on screen. This keeps long messages from being
-        // clipped by the virtualized canvas.
-        let height = measured
-            .get(&scoped_key(chat_id, item))
-            .copied()
-            .unwrap_or_else(|| estimate_item_height(item));
-        heights.push(height);
-        top += height;
-    }
-    TimelineLayout {
-        offsets,
-        heights,
-        total_height: top,
-    }
-}
-
-/// Returns the canvas offset of the row that contains a message, if that
-/// message is part of the loaded page.
-fn message_offset(items: &[TimelineItem], layout: &TimelineLayout, message_id: i64) -> Option<f64> {
-    items
-        .iter()
-        .position(|item| item.contains(message_id))
-        .map(|index| layout.offsets[index])
-}
-
-/// Finds the loaded message quoted by a reply, so the timeline can show a
-/// Telegram-style preview instead of a bare "resposta" label.
-fn reply_preview(items: &[TimelineItem], message_id: i64) -> Option<&TdlibMessageInfo> {
-    items.iter().find_map(|item| match item {
-        TimelineItem::Message(message) => (message.id == message_id).then_some(message.as_ref()),
-        TimelineItem::Album(messages) => messages.iter().find(|message| message.id == message_id),
-    })
-}
-
-pub(crate) fn reply_sender(message: &TdlibMessageInfo) -> String {
-    if message.out {
-        return "Você".to_string();
-    }
-    let name = message.sender_name.trim();
-    if name.is_empty() {
-        "Mensagem".to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-pub(crate) fn reply_snippet(message: &TdlibMessageInfo) -> String {
-    let text = message
-        .text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if text.is_empty() {
-        return if message.is_photo {
-            "Foto".to_string()
-        } else if message.is_video {
-            "Vídeo".to_string()
-        } else if message.has_media {
-            "Mídia".to_string()
-        } else {
-            "Mensagem sem texto".to_string()
-        };
-    }
-    let mut characters = text.chars();
-    let mut snippet: String = characters.by_ref().take(110).collect();
-    if characters.next().is_some() {
-        snippet.push('…');
-    }
-    snippet
-}
-
-#[derive(Deserialize)]
-struct RowMeasurements {
-    heights: HashMap<String, f64>,
-    #[serde(default, rename = "deltaAbove")]
-    delta_above: f64,
-    #[serde(default, rename = "atBottom")]
-    at_bottom: bool,
-}
-
-/// Number of grid rows used by an album grid.
-fn album_rows(count: usize) -> usize {
-    if count <= 2 {
-        1
-    } else {
-        count.div_ceil(2)
-    }
-}
-
-fn estimate_item_height(item: &TimelineItem) -> f64 {
-    match item {
-        TimelineItem::Message(message) => estimate_height(message),
-        TimelineItem::Album(messages) => {
-            let characters = messages
-                .iter()
-                .find(|message| !message.text.trim().is_empty())
-                .map(|message| message.text.chars().count())
-                .unwrap_or(0);
-            let lines = if characters == 0 {
-                0.0
-            } else {
-                ((characters as f64) / 74.0).ceil()
-            };
-            let rows = album_rows(messages.len());
-            let grid =
-                rows as f64 * ALBUM_CELL_HEIGHT + (rows.saturating_sub(1)) as f64 * ALBUM_GAP;
-            64.0 + lines * 19.0 + 8.0 + grid
-        }
-    }
-}
-
-fn estimate_height(message: &TdlibMessageInfo) -> f64 {
-    if message.is_deleted {
-        return 60.0;
-    }
-    let characters = message.text.chars().count();
-    let lines = ((characters as f64) / 74.0).ceil().max(1.0);
-    let mut height = 64.0 + lines * 19.0;
-    if message.has_media {
-        height += if message.is_photo || message.is_video {
-            136.0
-        } else {
-            24.0
-        };
-    }
-    if message.reply_to_msg_id.is_some() {
-        // The quoted reply block shows the author and a text snippet.
-        height += 44.0;
-    }
-    if !message.reactions.is_empty() {
-        height += 26.0;
-    }
-    height.max(64.0)
-}
-
-fn visible_range(
-    offsets: &[f64],
-    scroll_top: f64,
-    viewport_height: f64,
-    row_count: usize,
-) -> (usize, usize) {
-    if row_count == 0 {
-        return (0, 0);
-    }
-    let start = offsets
-        .partition_point(|offset| *offset < scroll_top)
-        .saturating_sub(1 + OVERSCAN);
-    let bottom = scroll_top + viewport_height.max(1.0);
-    let end = (offsets.partition_point(|offset| *offset < bottom) + OVERSCAN).min(row_count);
-    (start.min(end), end)
-}
-
-/// Resolving the local offset reads the OS time zone configuration, which is
-/// too expensive to repeat for every visible message. Cache it for the session.
-fn local_offset() -> time::UtcOffset {
-    static OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
-    *OFFSET.get_or_init(|| time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
-}
-
-pub(crate) fn format_timestamp(timestamp: i32) -> String {
-    if timestamp <= 0 {
-        return String::new();
-    }
-    let Ok(utc) = OffsetDateTime::from_unix_timestamp(timestamp as i64) else {
-        return String::new();
-    };
-    let offset = local_offset();
-    let local = utc.to_offset(offset);
-    let now = OffsetDateTime::now_utc().to_offset(offset);
-    if local.date() == now.date() {
-        format!("{:02}:{:02}", local.hour(), local.minute())
-    } else if local.year() == now.year() {
-        format!("{:02}/{:02}", u8::from(local.month()), local.day())
-    } else {
-        format!(
-            "{:02}/{:02}/{:04}",
-            u8::from(local.month()),
-            local.day(),
-            local.year()
-        )
-    }
-}
-
-fn format_size(bytes: i64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let bytes = bytes.max(0) as f64;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes / GB)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes / MB)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes / KB)
-    } else {
-        format!("{bytes:.0} B")
-    }
-}
-
-fn media_label(message: &TdlibMessageInfo) -> Option<String> {
-    if !message.has_media {
-        return None;
-    }
-    let kind = if message.is_photo {
-        "Foto"
-    } else if message.is_video {
-        "Vídeo"
-    } else {
-        "Mídia"
-    };
-    let duration = message
-        .video_duration
-        .filter(|duration| *duration > 0)
-        .map(|duration| format!(" · {}:{:02}", duration / 60, duration % 60))
-        .unwrap_or_default();
-    let size = message
-        .media_size
-        .filter(|size| *size > 0)
-        .map(|size| format!(" · {}", format_size(size)))
-        .unwrap_or_default();
-    Some(format!("{kind}{duration}{size}"))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     Reply,
     OpenMedia,
     OpenAlbumMedia(Vec<LightboxMedia>),
     Forward,
-}
-
-/// Mounted thumbnails kept in memory before the cache is dropped wholesale.
-///
-/// Data URLs are small enough to keep a scrolled conversation responsive, and
-/// the cap keeps a very long session from growing without bound.
-const THUMBNAIL_CACHE_LIMIT: usize = 512;
-
-#[component]
-pub(crate) fn MessageThumbnail(
-    chat_id: i64,
-    message_id: i64,
-    is_video: bool,
-    on_open: EventHandler<()>,
-) -> Element {
-    let services = use_context::<AppServices>();
-    let ui = use_context::<UiState>();
-    let key = (chat_id, message_id);
-    // Resolve from the memory cache first: rows that leave and re-enter the
-    // virtualized window used to show "…" and reload the thumbnail every time.
-    let cached_url = ui.thumbnails.read().get(&key).cloned();
-    let already_cached = cached_url.is_some();
-    let mut thumbnails = ui.thumbnails;
-    let resource = use_resource(move || {
-        let services = services.clone();
-        async move {
-            if already_cached {
-                return Ok(None);
-            }
-            services
-                .telegram
-                .thumbnail_data_url(chat_id, message_id)
-                .await
-        }
-    });
-    use_effect(move || {
-        let url = {
-            let state = resource.read();
-            match &*state {
-                Some(Ok(Some(url))) => url.clone(),
-                _ => return,
-            }
-        };
-        let mut cache = thumbnails.write();
-        if cache.get(&key) == Some(&url) {
-            return;
-        }
-        if cache.len() >= THUMBNAIL_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(key, url);
-    });
-
-    let state = resource.read_unchecked();
-    rsx! {
-        button {
-            r#type: "button",
-            class: "message-thumb",
-            title: "Abrir mídia",
-            onclick: move |_| on_open.call(()),
-            if let Some(url) = cached_url {
-                img { src: "{url}", alt: "" }
-            } else {
-                match &*state {
-                    Some(Ok(Some(url))) => rsx! { img { src: "{url}", alt: "" } },
-                    Some(Ok(None)) => rsx! { span { class: "thumb-placeholder", "▣" } },
-                    Some(Err(error)) => rsx! { span { class: "thumb-placeholder", title: "{error}", "!" } },
-                    None => rsx! { div { class: "thumb-skeleton" } },
-                }
-            }
-            if is_video {
-                span { class: "thumb-play", "▶" }
-            }
-        }
-    }
 }
 
 /// How the timeline should deal with the scroll position after an update.
@@ -669,6 +309,12 @@ pub fn MessageTimeline(
     };
     let items_memo = use_memo(move || group_albums(&source()));
     let mut measured_heights = use_signal(HashMap::<String, f64>::new);
+    // Heights are scoped by chat id in the key, but clearing on switch avoids
+    // carrying hundreds of stale entries across conversations.
+    use_effect(move || {
+        let _ = chat_id;
+        measured_heights.set(HashMap::new());
+    });
     let mut highlighted_message = use_signal(|| None::<i64>);
     // Replies to messages outside the loaded page are fetched by id and kept
     // here so the quote can still show the original author and text.
@@ -740,7 +386,7 @@ pub fn MessageTimeline(
         let layout = layout_memo();
         let Some(offset) = message_offset(&items, &layout, target) else {
             push_toast(
-                ui.toasts,
+                ui.shell.toasts,
                 "A mensagem original não está carregada nesta página.",
                 ToastKind::Info,
             );
@@ -775,13 +421,20 @@ pub fn MessageTimeline(
     let reply_services = services.clone();
     use_effect(move || {
         let items = items_memo();
+        let layout = layout_memo();
+        let (start, end) = visible_range(
+            &layout.offsets,
+            scroll_top(),
+            viewport_height(),
+            items.len(),
+        );
         let cached = reply_cache
             .peek()
             .keys()
             .copied()
             .collect::<HashSet<(i64, i64)>>();
         let mut missing = Vec::new();
-        for item in &items {
+        for item in items.iter().skip(start).take(end.saturating_sub(start)) {
             let messages: &[TdlibMessageInfo] = match item {
                 TimelineItem::Message(message) => std::slice::from_ref(message.as_ref()),
                 TimelineItem::Album(messages) => messages.as_slice(),
@@ -805,7 +458,15 @@ pub fn MessageTimeline(
         }
         let services = reply_services.clone();
         let mut cache = reply_cache;
+        let messages_loading = ui.conversation.messages_loading;
         spawn(async move {
+            // Wait for the open-chat page before spending TDLib on quotes.
+            for _ in 0..80 {
+                if !*messages_loading.peek() && !services.telegram.conversation_priority_active() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(REPLY_FETCH_CONCURRENCY));
             let mut tasks = tokio::task::JoinSet::new();
             for reply_id in missing {
@@ -825,11 +486,20 @@ pub fn MessageTimeline(
                     (reply_id, preview)
                 });
             }
+            let mut found = Vec::new();
             while let Some(result) = tasks.join_next().await {
-                if let Ok((reply_id, preview)) = result {
-                    cache.write().insert((chat_id, reply_id), preview);
+                if let Ok(preview) = result {
+                    found.push(preview);
                 }
             }
+            if found.is_empty() {
+                return;
+            }
+            cache.with_mut(|cache| {
+                for (reply_id, preview) in found {
+                    cache.insert((chat_id, reply_id), preview);
+                }
+            });
         });
     });
 
@@ -847,7 +517,7 @@ pub fn MessageTimeline(
                             && *height > 0.0
                             && current
                                 .get(key)
-                                .is_none_or(|current| (*current - *height).abs() > 0.5)
+                                .is_none_or(|current| (*current - *height).abs() > 2.0)
                     })
                 };
                 if !changed {
@@ -895,6 +565,9 @@ pub fn MessageTimeline(
                 if !script.is_empty() {
                     let _ = document::eval(&script).await;
                 }
+                // A burst of row measurements otherwise stays on this task and
+                // the desktop stops receiving events.
+                tokio::task::yield_now().await;
             }
         });
     });
@@ -982,7 +655,7 @@ pub fn MessageTimeline(
                                                 move |event: Event<MouseData>| {
                                                     event.prevent_default();
                                                     let point = event.data().client_coordinates();
-                                                    ui.context_menu.set(Some(ContextMenuState::new(
+                                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                         point.x,
                                                         point.y,
                                                         ContextTarget::Message {
@@ -1004,7 +677,7 @@ pub fn MessageTimeline(
                                                             event.prevent_default();
                                                             event.stop_propagation();
                                                             let point = event.data().client_coordinates();
-                                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                                 point.x,
                                                                 point.y,
                                                                 ContextTarget::User {
@@ -1037,7 +710,7 @@ pub fn MessageTimeline(
                                                                     let point = event
                                                                         .data()
                                                                         .client_coordinates();
-                                                                    ui.context_menu.set(Some(
+                                                                    ui.panels.context_menu.set(Some(
                                                                         ContextMenuState::new(
                                                                             point.x,
                                                                             point.y,
@@ -1174,7 +847,7 @@ pub fn MessageTimeline(
                                                             let message_id = message.id;
                                                             move |event: Event<MouseData>| {
                                                                 let point = event.data().client_coordinates();
-                                                                ui.reaction_picker.set(Some(ReactionPickerState {
+                                                                ui.panels.reaction_picker.set(Some(ReactionPickerState {
                                                                     chat_id,
                                                                     message_id,
                                                                     x: point.x,
@@ -1268,7 +941,7 @@ pub fn MessageTimeline(
                                                 move |event: Event<MouseData>| {
                                                     event.prevent_default();
                                                     let point = event.data().client_coordinates();
-                                                    ui.context_menu.set(Some(ContextMenuState::new(
+                                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                         point.x,
                                                         point.y,
                                                         ContextTarget::Album {
@@ -1291,7 +964,7 @@ pub fn MessageTimeline(
                                                             event.prevent_default();
                                                             event.stop_propagation();
                                                             let point = event.data().client_coordinates();
-                                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                                 point.x,
                                                                 point.y,
                                                                 ContextTarget::User {
@@ -1324,7 +997,7 @@ pub fn MessageTimeline(
                                                                     let point = event
                                                                         .data()
                                                                         .client_coordinates();
-                                                                    ui.context_menu.set(Some(
+                                                                    ui.panels.context_menu.set(Some(
                                                                         ContextMenuState::new(
                                                                             point.x,
                                                                             point.y,
@@ -1379,7 +1052,7 @@ pub fn MessageTimeline(
                                                                             event.prevent_default();
                                                                             event.stop_propagation();
                                                                             let point = event.data().client_coordinates();
-                                                                            ui.context_menu.set(Some(ContextMenuState::new(
+                                                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
                                                                                 point.x,
                                                                                 point.y,
                                                                                 ContextTarget::Album {

@@ -1,21 +1,18 @@
-//! "Procurar arquivo no sistema": finds copies of the selected media in a folder.
+//! "Procurar arquivo no sistema": finds copies of selected media in a folder.
+
+use std::path::Path;
 
 use crate::icons::{Icon, IconName};
-use crate::state::{push_toast, AppServices, ToastKind, UiState};
+use crate::state::{
+    push_toast, AppServices, DuplicateSearchMedia, DuplicateSearchProgress, ToastKind, UiState,
+};
 use dioxus::prelude::*;
 use plasma_duplicates::{SearchMatch, SearchMode, SearchSource};
 
-/// A media message picked by the user for the search.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DuplicateSearchItem {
-    pub chat_id: i64,
-    pub message_id: i64,
-    pub name: String,
-    pub is_video: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SearchPhase {
+    /// User fills folder + mode before starting.
+    Setup,
     Preparing,
     Searching,
     Done,
@@ -25,23 +22,32 @@ enum SearchPhase {
 
 #[component]
 pub fn DuplicateSearchDialog(
-    items: Vec<DuplicateSearchItem>,
+    items: Vec<DuplicateSearchMedia>,
     on_close: EventHandler<()>,
 ) -> Element {
     let services = use_context::<AppServices>();
-    let toasts = use_context::<UiState>().toasts;
+    let ui = use_context::<UiState>();
+    let toasts = ui.shell.toasts;
+    let mut progress_signal = ui.transfers.duplicate_search_progress;
     let mut folder = use_signal(|| services.downloads.download_dir().display().to_string());
     let mut mode = use_signal(|| SearchMode::Exact);
-    let mut phase = use_signal(|| SearchPhase::Preparing);
+    let mut phase = use_signal(|| SearchPhase::Setup);
     let mut error = use_signal(|| None::<String>);
     let mut run_id = use_signal(String::new);
+    let mut start_token = use_signal(|| 0u64);
 
-    // Prepare the media and run the search once the dialog opens.
+    // Run only when the user confirms from the setup form.
     let search_items = items.clone();
     let search_services = services.clone();
     use_effect(move || {
+        let token = start_token();
+        if token == 0 {
+            return;
+        }
         let services = search_services.clone();
         let items = search_items.clone();
+        let folder_path = folder();
+        let search_mode = mode();
         let run = format!(
             "ui-{}",
             std::time::SystemTime::now()
@@ -50,6 +56,16 @@ pub fn DuplicateSearchDialog(
                 .unwrap_or_default()
         );
         run_id.set(run.clone());
+        phase.set(SearchPhase::Preparing);
+        error.set(None);
+        // Reset so a previous run cannot leave stale hits for this id.
+        progress_signal.set(Some(DuplicateSearchProgress {
+            run_id: run.clone(),
+            scanned: 0,
+            analyzed: 0,
+            matches: Vec::new(),
+            unreadable: 0,
+        }));
         spawn(async move {
             let mut sources: Vec<SearchSource> = Vec::new();
             for item in &items {
@@ -59,8 +75,23 @@ pub fn DuplicateSearchDialog(
                     .await
                 {
                     Ok(meta) => {
-                        let Some(path) = meta.native_file_path else {
-                            continue;
+                        if !meta.success {
+                            error.set(Some(meta.error.unwrap_or_else(|| {
+                                "Não foi possível baixar a mídia para o cache antes da busca."
+                                    .to_string()
+                            })));
+                            phase.set(SearchPhase::Failed);
+                            return;
+                        }
+                        let Some(path) = meta
+                            .native_file_path
+                            .filter(|path| Path::new(path).is_file())
+                        else {
+                            error.set(Some(
+                                "A mídia ainda não está disponível no cache local.".to_string(),
+                            ));
+                            phase.set(SearchPhase::Failed);
+                            return;
                         };
                         sources.push(SearchSource::from_path(
                             item.message_id.to_string(),
@@ -70,7 +101,7 @@ pub fn DuplicateSearchDialog(
                         ));
                     }
                     Err(message) => {
-                        error.set(Some(message));
+                        error.set(Some(message.to_string()));
                         phase.set(SearchPhase::Failed);
                         return;
                     }
@@ -86,10 +117,19 @@ pub fn DuplicateSearchDialog(
             phase.set(SearchPhase::Searching);
             let result = services
                 .telegram
-                .search_duplicate_media(run.clone(), folder().clone(), sources, Some(mode()))
+                .search_duplicate_media(run.clone(), folder_path, sources, Some(search_mode))
                 .await;
             match result {
                 Ok(result) => {
+                    // Authoritative final snapshot (progress already sends the
+                    // cumulative list; this covers cancel / event-ordering gaps).
+                    progress_signal.set(Some(DuplicateSearchProgress {
+                        run_id: run,
+                        scanned: result.scanned,
+                        analyzed: result.analyzed,
+                        matches: result.matches,
+                        unreadable: result.unreadable,
+                    }));
                     if result.canceled {
                         phase.set(SearchPhase::Canceled);
                     } else {
@@ -97,14 +137,16 @@ pub fn DuplicateSearchDialog(
                     }
                 }
                 Err(message) => {
-                    error.set(Some(message));
+                    error.set(Some(message.to_string()));
                     phase.set(SearchPhase::Failed);
                 }
             }
         });
     });
 
-    let progress = use_context::<UiState>().duplicate_search_progress();
+    let progress = use_context::<UiState>()
+        .transfers
+        .duplicate_search_progress();
     let current_run = run_id();
     let matches: Vec<SearchMatch> = progress
         .as_ref()
@@ -128,7 +170,9 @@ pub fn DuplicateSearchDialog(
         .unwrap_or(0);
 
     let busy = matches!(phase(), SearchPhase::Preparing | SearchPhase::Searching);
+    let in_setup = phase() == SearchPhase::Setup;
     let status_text = match phase() {
+        SearchPhase::Setup => "Escolha a pasta e o tipo de busca, depois inicie.".to_string(),
         SearchPhase::Preparing => "Preparando mídia...".to_string(),
         SearchPhase::Searching => {
             if mode() == SearchMode::Exact {
@@ -154,7 +198,13 @@ pub fn DuplicateSearchDialog(
                 header { class: "duplicate-search-header",
                     div {
                         strong { "Procurar arquivo no sistema" }
-                        span { class: "hint", "{folder}" }
+                        span { class: "hint",
+                            if items.len() == 1 {
+                                "{items[0].name}"
+                            } else {
+                                "{items.len()} mídias selecionadas"
+                            }
+                        }
                     }
                     button {
                         class: "icon-button",
@@ -170,6 +220,36 @@ pub fn DuplicateSearchDialog(
                         }
                         span { "{status_text}" }
                     }
+
+                    div { class: "duplicate-search-field",
+                        label { "Pasta de busca" }
+                        div { class: "duplicate-search-folder-row",
+                            input {
+                                class: "input",
+                                r#type: "text",
+                                value: "{folder}",
+                                disabled: busy,
+                                oninput: move |event| folder.set(event.value()),
+                            }
+                            button {
+                                class: "btn small ghost",
+                                disabled: busy,
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        if let Some(path) = pick_search_folder().await {
+                                            folder.set(path.to_string_lossy().to_string());
+                                        }
+                                    });
+                                },
+                                if cfg!(target_os = "android") {
+                                    "Pasta do app"
+                                } else {
+                                    "Escolher…"
+                                }
+                            }
+                        }
+                    }
+
                     div { class: "duplicate-search-controls",
                         button {
                             class: if mode() == SearchMode::Exact { "btn small primary" } else { "btn small ghost" },
@@ -183,64 +263,68 @@ pub fn DuplicateSearchDialog(
                             onclick: move |_| mode.set(SearchMode::Visual),
                             "Varredura profunda"
                         }
-                        button {
-                            class: "btn small ghost",
-                            disabled: busy,
-                            onclick: move |_| {
-                                spawn(async move {
-                                    if let Some(path) = pick_search_folder().await {
-                                        folder.set(path.to_string_lossy().to_string());
-                                    }
-                                });
-                            },
-                            "Trocar pasta"
-                        }
                     }
-                    if unreadable > 0 {
-                        p { class: "hint", "{unreadable} arquivos ou pastas não puderam ser lidos." }
-                    }
-                    for item in items.iter() {
-                        {
-                        let item_matches = matches_for(&matches, &item.message_id.to_string());
-                        let item_status = match phase() {
-                            SearchPhase::Done => "Nenhuma cópia encontrada nesta pasta.".to_string(),
-                            SearchPhase::Failed => error().unwrap_or_default(),
-                            _ => "Nenhuma correspondência encontrada até agora.".to_string(),
-                        };
-                        rsx! {
-                        div { class: "duplicate-search-item",
+
+                    div { class: "duplicate-search-sources",
+                        strong { "Mídias" }
+                        for item in items.iter() {
                             div { class: "duplicate-search-item-head",
-                                strong { "{item.name}" }
+                                span { "{item.name}" }
                                 if item.is_video {
                                     span { class: "pill", "vídeo" }
                                 }
                             }
-                            if item_matches.is_empty() {
-                                p { class: "hint", "{item_status}" }
-                            } else {
-                                ul { class: "duplicate-search-matches",
-                                    for entry in item_matches {
-                                        li {
-                                            span { title: "{entry.path}", "{entry.path}" }
-                                            button {
-                                                class: "icon-button",
-                                                title: "Mostrar no gerenciador de arquivos",
-                                                onclick: {
-                                                    let path = entry.path.clone();
-                                                    move |_| {
-                                                        if let Err(message) = plasma_platform::reveal_path(&path) {
-                                                            push_toast(toasts, message, ToastKind::Error);
+                        }
+                    }
+
+                    if unreadable > 0 {
+                        p { class: "hint", "{unreadable} arquivos ou pastas não puderam ser lidos." }
+                    }
+
+                    if !in_setup {
+                        for item in items.iter() {
+                            {
+                            let item_matches = matches_for(&matches, &item.message_id.to_string());
+                            let item_status = match phase() {
+                                SearchPhase::Done => "Nenhuma cópia encontrada nesta pasta.".to_string(),
+                                SearchPhase::Failed => error().unwrap_or_default(),
+                                _ => "Nenhuma correspondência encontrada até agora.".to_string(),
+                            };
+                            rsx! {
+                            div { class: "duplicate-search-item",
+                                div { class: "duplicate-search-item-head",
+                                    strong { "{item.name}" }
+                                    if item.is_video {
+                                        span { class: "pill", "vídeo" }
+                                    }
+                                }
+                                if item_matches.is_empty() {
+                                    p { class: "hint", "{item_status}" }
+                                } else {
+                                    ul { class: "duplicate-search-matches",
+                                        for entry in item_matches {
+                                            li {
+                                                span { title: "{entry.path}", "{entry.path}" }
+                                                button {
+                                                    class: "icon-button",
+                                                    title: "Mostrar no gerenciador de arquivos",
+                                                    onclick: {
+                                                        let path = entry.path.clone();
+                                                        move |_| {
+                                                            if let Err(message) = plasma_platform::reveal_path(&path) {
+                                                                push_toast(toasts, message, ToastKind::Error);
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                                Icon { name: IconName::Folder, size: 16, class: "icon" }
+                                                    },
+                                                    Icon { name: IconName::Folder, size: 16, class: "icon" }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        }
+                            }
+                            }
                         }
                     }
                 }
@@ -256,6 +340,24 @@ pub fn DuplicateSearchDialog(
                                 }
                             },
                             "Cancelar busca"
+                        }
+                    } else if in_setup || matches!(phase(), SearchPhase::Done | SearchPhase::Canceled | SearchPhase::Failed) {
+                        button {
+                            class: "btn small primary",
+                            disabled: folder().trim().is_empty() || items.is_empty(),
+                            onclick: move |_| {
+                                if folder().trim().is_empty() {
+                                    push_toast(
+                                        toasts,
+                                        "Escolha uma pasta para procurar.",
+                                        ToastKind::Info,
+                                    );
+                                    return;
+                                }
+                                let next = start_token().wrapping_add(1);
+                                start_token.set(next);
+                            },
+                            if in_setup { "Iniciar busca" } else { "Buscar de novo" }
                         }
                     }
                     button {
@@ -287,6 +389,8 @@ async fn pick_search_folder() -> Option<std::path::PathBuf> {
 
     #[cfg(target_os = "android")]
     {
-        None
+        plasma_platform::android_app_dirs()
+            .ok()
+            .map(|dirs| dirs.download_dir)
     }
 }
