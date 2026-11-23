@@ -19,7 +19,7 @@ use tdlib_rs::{
 use tokio::task::JoinSet;
 
 use crate::media::{
-    document_is_video, file_name_or_default, mime_extension, sanitize_filename,
+    document_is_image, document_is_video, file_name_or_default, mime_extension, sanitize_filename,
     sanitize_folder_name,
 };
 use crate::types::*;
@@ -418,6 +418,66 @@ pub(crate) fn local_video_path(content: &MessageContent) -> Option<String> {
     (!path.is_empty()).then(|| path.clone())
 }
 
+fn positive_size(width: i32, height: i32) -> Option<(i32, i32)> {
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Pixel size of a photo or video, used to keep album tiles in proportion.
+pub(crate) fn content_media_dimensions(content: &MessageContent) -> Option<(i32, i32)> {
+    match content {
+        MessageContent::MessagePhoto(content) => content
+            .photo
+            .sizes
+            .iter()
+            .filter(|size| size.width > 0 && size.height > 0)
+            .max_by_key(|size| i64::from(size.width) * i64::from(size.height))
+            .map(|size| (size.width, size.height))
+            .or_else(|| {
+                content
+                    .photo
+                    .minithumbnail
+                    .as_ref()
+                    .and_then(|thumb| positive_size(thumb.width, thumb.height))
+            }),
+        MessageContent::MessageVideo(content) => {
+            positive_size(content.video.width, content.video.height).or_else(|| {
+                content
+                    .video
+                    .thumbnail
+                    .as_ref()
+                    .and_then(|thumb| positive_size(thumb.width, thumb.height))
+            })
+        }
+        MessageContent::MessageAnimation(content) => {
+            positive_size(content.animation.width, content.animation.height)
+        }
+        MessageContent::MessageVideoNote(content) => {
+            positive_size(content.video_note.length, content.video_note.length)
+        }
+        MessageContent::MessageDocument(content) => {
+            let preview =
+                document_is_image(&content.document.mime_type, &content.document.file_name)
+                    || document_is_video(&content.document.mime_type, &content.document.file_name);
+            if !preview {
+                return None;
+            }
+            content
+                .document
+                .thumbnail
+                .as_ref()
+                .and_then(|thumb| positive_size(thumb.width, thumb.height))
+                .or_else(|| {
+                    content
+                        .document
+                        .minithumbnail
+                        .as_ref()
+                        .and_then(|thumb| positive_size(thumb.width, thumb.height))
+                })
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn content_media_flags(
     content: &MessageContent,
 ) -> (bool, bool, bool, Option<i32>, Option<i64>) {
@@ -436,13 +496,19 @@ pub(crate) fn content_media_flags(
             None,
             Some(effective_file_size(&content.audio.audio)),
         ),
-        MessageContent::MessageDocument(content) => (
-            true,
-            false,
-            document_is_video(&content.document.mime_type, &content.document.file_name),
-            None,
-            Some(effective_file_size(&content.document.document)),
-        ),
+        MessageContent::MessageDocument(content) => {
+            let is_video =
+                document_is_video(&content.document.mime_type, &content.document.file_name);
+            let is_photo = !is_video
+                && document_is_image(&content.document.mime_type, &content.document.file_name);
+            (
+                true,
+                is_photo,
+                is_video,
+                None,
+                Some(effective_file_size(&content.document.document)),
+            )
+        }
         MessageContent::MessagePhoto(content) => {
             let size =
                 best_photo_file(content.photo.clone()).map(|file| effective_file_size(&file));
@@ -477,6 +543,9 @@ pub(crate) fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMe
     let text = content_text(&message.content);
     let (has_media, is_photo, is_video, video_duration, media_size) =
         content_media_flags(&message.content);
+    let (media_width, media_height) = content_media_dimensions(&message.content)
+        .map(|(width, height)| (Some(width), Some(height)))
+        .unwrap_or((None, None));
     let thumbnail_path = local_thumbnail_path(message_thumbnail_file(message.content.clone()));
 
     TdlibMessageInfo {
@@ -501,6 +570,8 @@ pub(crate) fn tdlib_message_to_app(message: tdlib_rs::types::Message) -> TdlibMe
         },
         video_duration,
         media_size,
+        media_width,
+        media_height,
         thumbnail_path,
         is_deleted: false,
         reactions: message_reactions(&message),

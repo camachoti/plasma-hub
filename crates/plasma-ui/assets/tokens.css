@@ -1,0 +1,534 @@
+/* ==========================================================================
+   Plasma Hub — Multi-Style Messenger Design Tokens
+   4 Styles (native, tonal, community, warm) × 2 Modes (dark, light)
+   ========================================================================== */
+
+:root {
+  --font-sans: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --sidebar-w: 298px;
+  --drawer-w: 348px;
+  --row-h: 62px;
+
+  --motion-fast: 130ms cubic-bezier(0.2, 0, 0, 1);
+  --motion-base: 190ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* Group sender identity palette (tuned per dark/light below) */
+  --sender-1: #38bdf8;
+  --sender-2: #a78bfa;
+  --sender-3: #34d399;
+  --sender-4: #fb923c;
+  --sender-5: #f472b6;
+  --sender-6: #2dd4bf;
+  --sender-7: #fbbf24;
+  --sender-8: #818cf8;
+
+  --avatar-1-from: #38bdf8;
+  --avatar-1-to: #2563eb;
+  --avatar-2-from: #818cf8;
+  --avatar-2-to: #c084fc;
+  --avatar-3-from: #34d399;
+  --avatar-3-to: #059669;
+  --avatar-4-from: #fb923c;
+  --avatar-4-to: #ea580c;
+  --avatar-5-from: #f472b6;
+  --avatar-5-to: #db2777;
+  --avatar-6-from: #2dd4bf;
+  --avatar-6-to: #0284c7;
+  --avatar-7-from: #fbbf24;
+  --avatar-7-to: #d97706;
+  --avatar-8-from: #a78bfa;
+  --avatar-8-to: #6366f1;
+}
+
+[data-mode="light"] {
+  --sender-1: #0284c7;
+  --sender-2: #7c3aed;
+  --sender-3: #059669;
+  --sender-4: #ea580c;
+  --sender-5: #db2777;
+  --sender-6: #0d9488;
+  --sender-7: #b45309;
+  --sender-8: #4f46e5;
+
+  --avatar-1-from: #0284c7;
+  --avatar-1-to: #075985;
+  --avatar-2-from: #7c3aed;
+  --avatar-2-to: #5b21b6;
+  --avatar-3-from: #059669;
+  --avatar-3-to: #047857;
+  --avatar-4-from: #ea580c;
+  --avatar-4-to: #c2410c;
+  --avatar-5-from: #db2777;
+  --avatar-5-to: #9d174d;
+  --avatar-6-from: #0d9488;
+  --avatar-6-to: #0f766e;
+  --avatar-7-from: #b45309;
+  --avatar-7-to: #92400e;
+  --avatar-8-from: #4f46e5;
+  --avatar-8-to: #3730a3;
+}
+
+[data-density="compact"] {
+  --row-h: 54px;
+  --chat-pad-y: 6px;
+  --msg-gap: 6px;
+}
+
+[data-density="cozy"] {
+  --row-h: 62px;
+  --chat-pad-y: 9px;
+  --msg-gap: 10px;
+}
+
+[data-density="roomy"] {
+  --row-h: 70px;
+  --chat-pad-y: 12px;
+  --msg-gap: 14px;
+}
+
+/* --------------------------------------------------------------------------
+   1. NATIVO FLUIDO (Telegram macOS Swift / Apple Messages / Beeper)
+   -------------------------------------------------------------------------- */
+[data-style="native"][data-mode="dark"],
+.plasma-root {
+  color-scheme: dark;
+  --shell-pad: 0px;
+  --shell-gap: 0px;
+  --pane-radius: 0px;
+  --pane-border: 1px solid rgba(255, 255, 255, 0.07);
+  --pane-shadow: none;
+
+  --bg-frame: #0f131a;
+  --bg-side: #161b24;
+  --bg-stage: #0f131a;
+  --bg-insp: #161b24;
+  --bg-elevated: #1e2532;
+  --bg-card: #1b222e;
+  --bg-input: #212938;
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --bg-selected: rgba(42, 171, 238, 0.15);
+
+  --line: rgba(255, 255, 255, 0.085);
+  --line-soft: rgba(255, 255, 255, 0.05);
+
+  --text-0: #f1f5f9;
+  --text-1: #cbd5e1;
+  --text-2: #8b98ad;
+  --text-3: #64748b;
+
+  --accent: #2aabee;
+  --accent-hover: #3bb6f5;
+  --accent-soft: rgba(42, 171, 238, 0.16);
+  --accent-fg: #ffffff;
+
+  --bubble-in: #1c2330;
+  --bubble-out: #206191;
+  --bubble-out-text: #f8fafc;
+  --bubble-out-muted: rgba(248, 250, 252, 0.72);
+  --bubble-radius-in: 17px 17px 17px 5px;
+  --bubble-radius-out: 17px 17px 5px 17px;
+  --bubble-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+
+  --radius-control: 11px;
+  --radius-card: 15px;
+  --radius-media: 12px;
+  --radius-pill: 9999px;
+  --composer-radius: 22px;
+
+  --danger: #f43f5e;
+  --danger-soft: rgba(244, 63, 94, 0.16);
+  --success: #10b981;
+  --success-fg: #042f1d;
+  --success-soft: rgba(16, 185, 129, 0.16);
+  --warning: #f59e0b;
+  --shadow-float: 0 14px 38px rgba(0, 0, 0, 0.48), 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+[data-style="native"][data-mode="light"] {
+  color-scheme: light;
+  --shell-pad: 0px;
+  --shell-gap: 0px;
+  --pane-radius: 0px;
+  --pane-border: 1px solid rgba(15, 23, 42, 0.08);
+  --pane-shadow: none;
+
+  --bg-frame: #e9eef5;
+  --bg-side: #ffffff;
+  --bg-stage: #eef3f8;
+  --bg-insp: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-card: #f5f8fb;
+  --bg-input: #eff3f8;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --bg-selected: rgba(0, 136, 204, 0.12);
+
+  --line: rgba(15, 23, 42, 0.09);
+  --line-soft: rgba(15, 23, 42, 0.05);
+
+  --text-0: #0f172a;
+  --text-1: #334155;
+  --text-2: #64748b;
+  --text-3: #94a3b8;
+
+  --accent: #0088cc;
+  --accent-hover: #0077b5;
+  --accent-soft: rgba(0, 136, 204, 0.12);
+  --accent-fg: #ffffff;
+
+  --bubble-in: #ffffff;
+  --bubble-out: #d9f0ff;
+  --bubble-out-text: #0c2d48;
+  --bubble-out-muted: rgba(12, 45, 72, 0.62);
+  --bubble-radius-in: 17px 17px 17px 5px;
+  --bubble-radius-out: 17px 17px 5px 17px;
+  --bubble-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+
+  --radius-control: 11px;
+  --radius-card: 15px;
+  --radius-media: 12px;
+  --radius-pill: 9999px;
+  --composer-radius: 22px;
+
+  --danger: #e11d48;
+  --danger-soft: rgba(225, 29, 72, 0.11);
+  --success: #059669;
+  --success-fg: #ffffff;
+  --success-soft: rgba(5, 150, 105, 0.12);
+  --warning: #d97706;
+  --shadow-float: 0 14px 36px rgba(15, 23, 42, 0.14), 0 2px 6px rgba(15, 23, 42, 0.06);
+}
+
+/* --------------------------------------------------------------------------
+   2. ILHAS TONAIS (Material You / Telegram K / Signal)
+   -------------------------------------------------------------------------- */
+[data-style="tonal"][data-mode="dark"] {
+  color-scheme: dark;
+  --shell-pad: 7px;
+  --shell-gap: 7px;
+  --pane-radius: 18px;
+  --pane-border: 1px solid rgba(255, 255, 255, 0.05);
+  --pane-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+
+  --bg-frame: #0c0e15;
+  --bg-side: #161925;
+  --bg-stage: #131620;
+  --bg-insp: #161925;
+  --bg-elevated: #202435;
+  --bg-card: #1d2131;
+  --bg-input: #22273a;
+  --bg-hover: rgba(165, 178, 255, 0.07);
+  --bg-selected: rgba(124, 140, 255, 0.18);
+
+  --line: rgba(255, 255, 255, 0.075);
+  --line-soft: rgba(255, 255, 255, 0.04);
+
+  --text-0: #eef0f8;
+  --text-1: #c9cee2;
+  --text-2: #8e95b0;
+  --text-3: #666d87;
+
+  --accent: #7c8cff;
+  --accent-hover: #8f9dff;
+  --accent-soft: rgba(124, 140, 255, 0.18);
+  --accent-fg: #0d101b;
+
+  --bubble-in: #1f2334;
+  --bubble-out: #39437d;
+  --bubble-out-text: #f4f5ff;
+  --bubble-out-muted: rgba(244, 245, 255, 0.7);
+  --bubble-radius-in: 21px 21px 21px 6px;
+  --bubble-radius-out: 21px 21px 6px 21px;
+  --bubble-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+
+  --radius-control: 14px;
+  --radius-card: 18px;
+  --radius-media: 15px;
+  --radius-pill: 9999px;
+  --composer-radius: 9999px;
+
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.16);
+  --success: #34d399;
+  --success-fg: #042f1d;
+  --success-soft: rgba(52, 211, 153, 0.16);
+  --warning: #fbbf24;
+  --shadow-float: 0 16px 42px rgba(0, 0, 0, 0.52);
+}
+
+[data-style="tonal"][data-mode="light"] {
+  color-scheme: light;
+  --shell-pad: 7px;
+  --shell-gap: 7px;
+  --pane-radius: 18px;
+  --pane-border: 1px solid rgba(79, 94, 232, 0.08);
+  --pane-shadow: 0 2px 10px rgba(30, 35, 70, 0.05);
+
+  --bg-frame: #e4e8f4;
+  --bg-side: #f8f9fd;
+  --bg-stage: #ffffff;
+  --bg-insp: #f8f9fd;
+  --bg-elevated: #ffffff;
+  --bg-card: #f0f2fa;
+  --bg-input: #eceffa;
+  --bg-hover: rgba(79, 94, 232, 0.06);
+  --bg-selected: rgba(79, 94, 232, 0.13);
+
+  --line: rgba(30, 35, 70, 0.085);
+  --line-soft: rgba(30, 35, 70, 0.045);
+
+  --text-0: #181b29;
+  --text-1: #3b4059;
+  --text-2: #686f8c;
+  --text-3: #959bb5;
+
+  --accent: #4f5ee8;
+  --accent-hover: #4250d6;
+  --accent-soft: rgba(79, 94, 232, 0.12);
+  --accent-fg: #ffffff;
+
+  --bubble-in: #f0f2fa;
+  --bubble-out: #dfe3ff;
+  --bubble-out-text: #1c2252;
+  --bubble-out-muted: rgba(28, 34, 82, 0.62);
+  --bubble-radius-in: 21px 21px 21px 6px;
+  --bubble-radius-out: 21px 21px 6px 21px;
+  --bubble-shadow: none;
+
+  --radius-control: 14px;
+  --radius-card: 18px;
+  --radius-media: 15px;
+  --radius-pill: 9999px;
+  --composer-radius: 9999px;
+
+  --danger: #e11d48;
+  --danger-soft: rgba(225, 29, 72, 0.11);
+  --success: #059669;
+  --success-fg: #ffffff;
+  --success-soft: rgba(5, 150, 105, 0.12);
+  --warning: #d97706;
+  --shadow-float: 0 16px 38px rgba(24, 27, 41, 0.14);
+}
+
+/* --------------------------------------------------------------------------
+   3. HUB DE COMUNIDADES (Discord Moderno / Fóruns & Galerias Amplas)
+   -------------------------------------------------------------------------- */
+[data-style="community"][data-mode="dark"] {
+  color-scheme: dark;
+  --shell-pad: 0px;
+  --shell-gap: 0px;
+  --pane-radius: 0px;
+  --pane-border: 1px solid rgba(255, 255, 255, 0.045);
+  --pane-shadow: none;
+
+  --bg-frame: #18191c;
+  --bg-side: #1e1f23;
+  --bg-stage: #26282d;
+  --bg-insp: #1e1f23;
+  --bg-elevated: #2f3137;
+  --bg-card: #2b2d33;
+  --bg-input: #1b1c20;
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --bg-selected: rgba(88, 101, 242, 0.2);
+
+  --line: rgba(255, 255, 255, 0.075);
+  --line-soft: rgba(255, 255, 255, 0.04);
+
+  --text-0: #f2f3f5;
+  --text-1: #dbdee1;
+  --text-2: #949ba4;
+  --text-3: #6d747e;
+
+  --accent: #5865f2;
+  --accent-hover: #6975f5;
+  --accent-soft: rgba(88, 101, 242, 0.2);
+  --accent-fg: #ffffff;
+
+  --bubble-in: transparent;
+  --bubble-out: transparent;
+  --bubble-out-text: #f2f3f5;
+  --bubble-out-muted: #949ba4;
+  --bubble-radius-in: 12px;
+  --bubble-radius-out: 12px;
+  --bubble-shadow: none;
+
+  --radius-control: 9px;
+  --radius-card: 12px;
+  --radius-media: 10px;
+  --radius-pill: 8px;
+  --composer-radius: 12px;
+
+  --danger: #f23f43;
+  --danger-soft: rgba(242, 63, 67, 0.16);
+  --success: #23a55a;
+  --success-fg: #ffffff;
+  --success-soft: rgba(35, 165, 90, 0.16);
+  --warning: #f0b232;
+  --shadow-float: 0 14px 36px rgba(0, 0, 0, 0.5);
+}
+
+[data-style="community"][data-mode="light"] {
+  color-scheme: light;
+  --shell-pad: 0px;
+  --shell-gap: 0px;
+  --pane-radius: 0px;
+  --pane-border: 1px solid rgba(30, 31, 34, 0.075);
+  --pane-shadow: none;
+
+  --bg-frame: #ebedef;
+  --bg-side: #f2f3f5;
+  --bg-stage: #ffffff;
+  --bg-insp: #f2f3f5;
+  --bg-elevated: #ffffff;
+  --bg-card: #f6f7f9;
+  --bg-input: #e6e8ec;
+  --bg-hover: rgba(30, 31, 34, 0.05);
+  --bg-selected: rgba(71, 82, 196, 0.13);
+
+  --line: rgba(30, 31, 34, 0.09);
+  --line-soft: rgba(30, 31, 34, 0.05);
+
+  --text-0: #1e1f22;
+  --text-1: #313338;
+  --text-2: #5c6370;
+  --text-3: #878e99;
+
+  --accent: #4752c4;
+  --accent-hover: #3c45a5;
+  --accent-soft: rgba(71, 82, 196, 0.13);
+  --accent-fg: #ffffff;
+
+  --bubble-in: transparent;
+  --bubble-out: transparent;
+  --bubble-out-text: #1e1f22;
+  --bubble-out-muted: #5c6370;
+  --bubble-radius-in: 12px;
+  --bubble-radius-out: 12px;
+  --bubble-shadow: none;
+
+  --radius-control: 9px;
+  --radius-card: 12px;
+  --radius-media: 10px;
+  --radius-pill: 8px;
+  --composer-radius: 12px;
+
+  --danger: #da373c;
+  --danger-soft: rgba(218, 55, 60, 0.11);
+  --success: #1a8f4c;
+  --success-fg: #ffffff;
+  --success-soft: rgba(26, 143, 76, 0.12);
+  --warning: #c88a14;
+  --shadow-float: 0 14px 34px rgba(30, 31, 34, 0.15);
+}
+
+/* --------------------------------------------------------------------------
+   4. EDITORIAL QUENTE (Mensageiro Autoral Contemporâneo — Pedra & Terracota)
+   -------------------------------------------------------------------------- */
+[data-style="warm"][data-mode="dark"] {
+  color-scheme: dark;
+  --shell-pad: 6px;
+  --shell-gap: 6px;
+  --pane-radius: 14px;
+  --pane-border: 1px solid rgba(255, 248, 240, 0.065);
+  --pane-shadow: 0 3px 14px rgba(0, 0, 0, 0.24);
+
+  --bg-frame: #121110;
+  --bg-side: #1b1917;
+  --bg-stage: #161413;
+  --bg-insp: #1b1917;
+  --bg-elevated: #262320;
+  --bg-card: #221f1c;
+  --bg-input: #272420;
+  --bg-hover: rgba(255, 245, 235, 0.055);
+  --bg-selected: rgba(224, 122, 95, 0.17);
+
+  --line: rgba(255, 245, 235, 0.085);
+  --line-soft: rgba(255, 245, 235, 0.045);
+
+  --text-0: #f6f3ee;
+  --text-1: #dad3c9;
+  --text-2: #9e958a;
+  --text-3: #756d64;
+
+  --accent: #e07a5f;
+  --accent-hover: #ea8a70;
+  --accent-soft: rgba(224, 122, 95, 0.17);
+  --accent-fg: #ffffff;
+
+  --bubble-in: #23201d;
+  --bubble-out: #422e28;
+  --bubble-out-text: #faf5f2;
+  --bubble-out-muted: rgba(250, 245, 242, 0.68);
+  --bubble-radius-in: 16px 16px 16px 4px;
+  --bubble-radius-out: 16px 16px 4px 16px;
+  --bubble-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
+
+  --radius-control: 11px;
+  --radius-card: 14px;
+  --radius-media: 11px;
+  --radius-pill: 9999px;
+  --composer-radius: 16px;
+
+  --danger: #ef5753;
+  --danger-soft: rgba(239, 87, 83, 0.16);
+  --success: #52b788;
+  --success-fg: #042f1d;
+  --success-soft: rgba(82, 183, 136, 0.16);
+  --warning: #e9b44c;
+  --shadow-float: 0 16px 40px rgba(0, 0, 0, 0.52);
+}
+
+[data-style="warm"][data-mode="light"] {
+  color-scheme: light;
+  --shell-pad: 6px;
+  --shell-gap: 6px;
+  --pane-radius: 14px;
+  --pane-border: 1px solid rgba(45, 35, 25, 0.08);
+  --pane-shadow: 0 2px 8px rgba(45, 35, 25, 0.05);
+
+  --bg-frame: #ebe6de;
+  --bg-side: #f7f4ef;
+  --bg-stage: #fcfbf9;
+  --bg-insp: #f7f4ef;
+  --bg-elevated: #ffffff;
+  --bg-card: #f2ede6;
+  --bg-input: #ede8df;
+  --bg-hover: rgba(45, 35, 25, 0.048);
+  --bg-selected: rgba(200, 90, 59, 0.12);
+
+  --line: rgba(45, 35, 25, 0.09);
+  --line-soft: rgba(45, 35, 25, 0.05);
+
+  --text-0: #211e1b;
+  --text-1: #443e38;
+  --text-2: #787067;
+  --text-3: #a39a90;
+
+  --accent: #c85a3b;
+  --accent-hover: #b54c2e;
+  --accent-soft: rgba(200, 90, 59, 0.12);
+  --accent-fg: #ffffff;
+
+  --bubble-in: #f1ede6;
+  --bubble-out: #fae5dd;
+  --bubble-out-text: #3a1c13;
+  --bubble-out-muted: rgba(58, 28, 19, 0.62);
+  --bubble-radius-in: 16px 16px 16px 4px;
+  --bubble-radius-out: 16px 16px 4px 16px;
+  --bubble-shadow: 0 1px 2px rgba(45, 35, 25, 0.05);
+
+  --radius-control: 11px;
+  --radius-card: 14px;
+  --radius-media: 11px;
+  --radius-pill: 9999px;
+  --composer-radius: 16px;
+
+  --danger: #d63638;
+  --danger-soft: rgba(214, 54, 56, 0.11);
+  --success: #1f8a5b;
+  --success-fg: #ffffff;
+  --success-soft: rgba(31, 138, 91, 0.12);
+  --warning: #c27d18;
+  --shadow-float: 0 16px 36px rgba(33, 30, 27, 0.13);
+}

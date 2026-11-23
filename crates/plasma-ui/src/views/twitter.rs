@@ -3,7 +3,8 @@
 use crate::downloads::{
     new_download_id, push_download, sanitize_filename, update_download, DownloadRecord,
 };
-use crate::state::{push_toast, AppServices, ToastKind, UiState};
+use crate::icons::{Icon, IconName};
+use crate::state::{push_toast, AppServices, Tab, ToastKind, UiState};
 use dioxus::prelude::*;
 use plasma_twitter::{NativeFormatOption, NativeMediaInfo, NativeProfileInfo};
 use std::path::Path;
@@ -11,7 +12,7 @@ use std::path::Path;
 #[component]
 pub fn TwitterView() -> Element {
     let services = use_context::<AppServices>();
-    let ui = use_context::<UiState>();
+    let mut ui = use_context::<UiState>();
     let mut profile_mode = use_signal(|| false);
     let mut url = use_signal(String::new);
     let mut cookies = use_signal(String::new);
@@ -152,29 +153,48 @@ pub fn TwitterView() -> Element {
         section { class: "twitter-view",
             div { class: "twitter-inner",
                 header { class: "twitter-heading",
-                    div {
-                        h1 { "X / Twitter" }
-                        p { class: "muted",
-                            "Analisador nativo de posts e perfis, com download direto das \
-                             variantes de vídeo e das mídias do perfil. Cookies são opcionais."
+                    div { class: "page-title-row",
+                        if !ui.shell.sidebar_open() {
+                            button {
+                                class: "icon-button",
+                                title: "Mostrar lista de conversas (Ctrl+B)",
+                                aria_label: "Mostrar lista de conversas",
+                                onclick: move |_| ui.shell.sidebar_open.set(true),
+                                Icon { name: IconName::LayoutSidebar, size: 18, class: "icon" }
+                            }
+                        }
+                        div {
+                            h1 { "Estúdio X / Twitter" }
+                            p { class: "muted",
+                                "Analise posts ou perfis completos, baixe mídias em alta qualidade \
+                                 ou siga perfis como galerias sincronizadas."
+                            }
                         }
                     }
-                    div { class: "segmented",
-                        button {
-                            class: if !current_mode { "active" } else { "" },
-                            onclick: move |_| {
-                                profile_mode.set(false);
-                                error.set(None);
-                            },
-                            "Post"
+                    div { class: "downloads-heading-actions",
+                        div { class: "segmented",
+                            button {
+                                class: if !current_mode { "active" } else { "" },
+                                onclick: move |_| {
+                                    profile_mode.set(false);
+                                    error.set(None);
+                                },
+                                "Post"
+                            }
+                            button {
+                                class: if current_mode { "active" } else { "" },
+                                onclick: move |_| {
+                                    profile_mode.set(true);
+                                    error.set(None);
+                                },
+                                "Perfil"
+                            }
                         }
                         button {
-                            class: if current_mode { "active" } else { "" },
-                            onclick: move |_| {
-                                profile_mode.set(true);
-                                error.set(None);
-                            },
-                            "Perfil"
+                            class: "btn small soft",
+                            onclick: move |_| ui.shell.tab.set(Tab::Downloads),
+                            Icon { name: IconName::ProgressDown, size: 15, class: "icon" }
+                            "Downloads"
                         }
                     }
                 }
@@ -254,7 +274,7 @@ pub fn TwitterView() -> Element {
 }
 
 #[component]
-fn TweetCard(tweet: NativeMediaInfo, cookies: String) -> Element {
+pub(crate) fn TweetCard(tweet: NativeMediaInfo, cookies: String) -> Element {
     let services = use_context::<AppServices>();
     let ui = use_context::<UiState>();
     let mut formats = tweet.formats.video.clone();
@@ -346,7 +366,7 @@ fn TweetCard(tweet: NativeMediaInfo, cookies: String) -> Element {
 }
 
 #[component]
-fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
+pub(crate) fn ProfileCard(profile: NativeProfileInfo, cookies: String) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
     let avatar = profile.avatar_url.clone();
@@ -656,7 +676,7 @@ fn finish_twitter_download(
     }
 }
 
-fn looks_like_profile(input: &str) -> bool {
+pub(crate) fn looks_like_profile(input: &str) -> bool {
     let trimmed = input.trim();
     let handle = trimmed.trim_start_matches('@');
     if !handle.is_empty()

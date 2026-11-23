@@ -5,10 +5,13 @@ use crate::downloads::{
     complete_download_record, new_download_id, push_download, sanitize_filename, update_download,
     DownloadRecord,
 };
-use crate::state::{AppServices, UiState};
+use crate::icons::{Icon, IconName};
+use crate::state::{push_toast, AppServices, Tab, ToastKind, UiState};
 use crate::views::select::{Select, SelectOption};
+use crate::views::twitter::{looks_like_profile, ProfileCard, TweetCard};
 use dioxus::prelude::*;
 use plasma_extract::{FormatOption, MediaInfo};
+use plasma_twitter::{NativeMediaInfo, NativeProfileInfo};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -42,6 +45,13 @@ impl DownloadFilter {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    Universal,
+    TwitterPost,
+    TwitterProfile,
+}
+
 #[derive(Clone)]
 enum ListEntry {
     Single(Box<DownloadRecord>),
@@ -55,16 +65,135 @@ enum ListEntry {
 pub fn DownloadsView() -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
+    let mut import_mode = use_signal(|| {
+        if ui.shell.tab() == Tab::Twitter {
+            ImportMode::TwitterPost
+        } else {
+            ImportMode::Universal
+        }
+    });
+    use_effect(move || {
+        if ui.shell.tab() == Tab::Twitter && *import_mode.peek() == ImportMode::Universal {
+            import_mode.set(ImportMode::TwitterPost);
+        }
+    });
     let mut url = use_signal(String::new);
     let mut file_name = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut analysis_error = use_signal(|| None::<String>);
     let mut analysis = use_signal(|| None::<MediaInfo>);
+    let mut tweet_result = use_signal(|| None::<NativeMediaInfo>);
+    let mut profile_result = use_signal(|| None::<NativeProfileInfo>);
+    let mut cookies = use_signal(String::new);
+    let mut cookies_loading = use_signal(|| true);
     let mut selected_format = use_signal(String::new);
-    let analyzing = use_signal(|| false);
+    let mut analyzing = use_signal(|| false);
     let analysis_generation = use_signal(|| 0u64);
     let mut filter = use_signal(|| DownloadFilter::All);
     let expanded_batches = use_signal(HashSet::<String>::new);
+
+    let cookie_services = services.clone();
+    use_future(move || {
+        let cookie_services = cookie_services.clone();
+        async move {
+            if let Ok(value) = cookie_services.twitter.load_cookies().await {
+                cookies.set(value);
+            }
+            cookies_loading.set(false);
+        }
+    });
+
+    let save_cookies = {
+        let services = services.clone();
+        move || {
+            let value = cookies();
+            let services = services.clone();
+            spawn(async move {
+                match services.twitter.save_cookies(value).await {
+                    Ok(()) => push_toast(
+                        ui.shell.toasts,
+                        "Cookies do X/Twitter salvos localmente.",
+                        ToastKind::Success,
+                    ),
+                    Err(err) => push_toast(
+                        ui.shell.toasts,
+                        format!("Falha ao salvar cookies: {err}"),
+                        ToastKind::Error,
+                    ),
+                }
+            });
+        }
+    };
+
+    let mut run_unified_analyze = {
+        let services = services.clone();
+        move || {
+            let raw = url().trim().to_string();
+            if raw.is_empty() {
+                analysis_error.set(Some(
+                    "Informe uma URL ou @perfil para analisar.".to_string(),
+                ));
+                return;
+            }
+            error.set(None);
+            analysis_error.set(None);
+            analysis.set(None);
+            tweet_result.set(None);
+            profile_result.set(None);
+
+            let mut effective_mode = import_mode();
+            if effective_mode != ImportMode::TwitterProfile && looks_like_profile(&raw) {
+                effective_mode = ImportMode::TwitterProfile;
+                import_mode.set(effective_mode);
+            }
+
+            match effective_mode {
+                ImportMode::Universal => {
+                    analyze_current(
+                        services.clone(),
+                        url,
+                        analysis,
+                        analyzing,
+                        analysis_error,
+                        analysis_generation,
+                        selected_format,
+                    );
+                }
+                ImportMode::TwitterPost | ImportMode::TwitterProfile => {
+                    let cookie_val = {
+                        let trimmed = cookies().trim().to_string();
+                        (!trimmed.is_empty()).then_some(trimmed)
+                    };
+                    let wants_profile = effective_mode == ImportMode::TwitterProfile;
+                    let target_url = if wants_profile && !raw.contains("://") {
+                        format!("https://x.com/{}", raw.trim_start_matches('@'))
+                    } else {
+                        raw
+                    };
+                    analyzing.set(true);
+                    let services = services.clone();
+                    spawn(async move {
+                        if wants_profile {
+                            match services
+                                .twitter
+                                .analyze_profile(target_url, cookie_val)
+                                .await
+                            {
+                                Ok(info) => profile_result.set(Some(info)),
+                                Err(err) => analysis_error.set(Some(err.to_string())),
+                            }
+                        } else {
+                            match services.twitter.analyze_tweet(target_url, cookie_val).await {
+                                Ok(info) => tweet_result.set(Some(info)),
+                                Err(err) => analysis_error.set(Some(err.to_string())),
+                            }
+                        }
+                        analyzing.set(false);
+                    });
+                }
+            }
+        }
+    };
 
     let mut shared_url = ui.shell.shared_url;
     let shared_services = services.clone();
@@ -72,6 +201,9 @@ pub fn DownloadsView() -> Element {
         if let Some(value) = shared_url() {
             shared_url.set(None);
             let normalized = value.trim().to_string();
+            import_mode.set(ImportMode::Universal);
+            tweet_result.set(None);
+            profile_result.set(None);
             url.set(normalized);
             analyze_current(
                 shared_services.clone(),
@@ -128,22 +260,7 @@ pub fn DownloadsView() -> Element {
         .collect();
     let has_finished = items.iter().any(|item| !item.is_active());
 
-    let analyze_enter = {
-        let services = services.clone();
-        move |event: KeyboardEvent| {
-            if event.key() == Key::Enter {
-                analyze_current(
-                    services.clone(),
-                    url,
-                    analysis,
-                    analyzing,
-                    analysis_error,
-                    analysis_generation,
-                    selected_format,
-                );
-            }
-        }
-    };
+    let mut analyze_on_enter = run_unified_analyze.clone();
     let direct_enter = {
         let services = services.clone();
         move |event: KeyboardEvent| {
@@ -152,15 +269,34 @@ pub fn DownloadsView() -> Element {
             }
         }
     };
+    let mode = import_mode();
+    let current_cookies = cookies();
+    let current_tweet = tweet_result();
+    let current_profile = profile_result();
+    let url_lower = url().to_ascii_lowercase();
+    let show_twitter_cookies = mode != ImportMode::Universal
+        || url_lower.contains("x.com/")
+        || url_lower.contains("twitter.com/");
 
     rsx! {
         section { class: "downloads-view",
             div { class: "downloads-inner",
                 header { class: "downloads-heading",
-                    div {
-                        h1 { "Downloads" }
-                        p { class: "muted",
-                            "Importe links, acompanhe lotes e retome o histórico salvo no SQLite."
+                    div { class: "page-title-row",
+                        if !ui.shell.sidebar_open() {
+                            button {
+                                class: "icon-button",
+                                title: "Mostrar lista de conversas (Ctrl+B)",
+                                aria_label: "Mostrar lista de conversas",
+                                onclick: move |_| ui.shell.sidebar_open.set(true),
+                                Icon { name: IconName::LayoutSidebar, size: 18, class: "icon" }
+                            }
+                        }
+                        div {
+                            h1 { "Downloads" }
+                            p { class: "muted",
+                                "Importe links universais, analise posts e perfis do X/Twitter e acompanhe seus downloads."
+                            }
                         }
                     }
                     div { class: "downloads-heading-actions",
@@ -172,7 +308,8 @@ pub fn DownloadsView() -> Element {
                                     let _ = plasma_platform::reveal_path(&dir);
                                 }
                             },
-                            "Pasta"
+                            Icon { name: IconName::Folder, size: 15, class: "icon" }
+                            "Abrir pasta"
                         }
                         if !cancelable_active.is_empty() {
                             button {
@@ -254,59 +391,107 @@ pub fn DownloadsView() -> Element {
                 }
 
                 section { class: "download-card",
-                    h2 { "Importar link" }
-                    p { class: "hint",
-                        "Cole uma URL de post/vídeo para analisar formatos, ou use “Baixar URL” \
-                         para um arquivo HTTPS direto."
+                    div { class: "drawer-section-header",
+                        div {
+                            h2 { "Importar & Analisar" }
+                            p { class: "hint",
+                                match mode {
+                                    ImportMode::Universal => {
+                                        "YouTube, TikTok, Instagram, Reddit, X ou arquivo HTTPS direto."
+                                    }
+                                    ImportMode::TwitterPost => {
+                                        "Analisador nativo de posts do X/Twitter com todas as variantes de vídeo."
+                                    }
+                                    ImportMode::TwitterProfile => {
+                                        "Carregue mídias de um perfil @usuario para baixar tudo ou criar uma galeria."
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "segmented",
+                            button {
+                                class: if mode == ImportMode::Universal { "active" } else { "" },
+                                onclick: move |_| {
+                                    import_mode.set(ImportMode::Universal);
+                                    analysis_error.set(None);
+                                    error.set(None);
+                                },
+                                "Link / Vídeo"
+                            }
+                            button {
+                                class: if mode == ImportMode::TwitterPost { "active" } else { "" },
+                                onclick: move |_| {
+                                    import_mode.set(ImportMode::TwitterPost);
+                                    analysis_error.set(None);
+                                    error.set(None);
+                                },
+                                "Post X"
+                            }
+                            button {
+                                class: if mode == ImportMode::TwitterProfile { "active" } else { "" },
+                                onclick: move |_| {
+                                    import_mode.set(ImportMode::TwitterProfile);
+                                    analysis_error.set(None);
+                                    error.set(None);
+                                },
+                                "Perfil X"
+                            }
+                        }
                     }
+
                     div { class: "download-form",
                         input {
                             class: "download-input",
-                            r#type: "url",
-                            placeholder: "https://youtube.com/watch?v=... ou link direto",
+                            r#type: "text",
+                            placeholder: match mode {
+                                ImportMode::Universal => {
+                                    "https://youtube.com/watch?v=..., post ou link direto"
+                                }
+                                ImportMode::TwitterPost => "https://x.com/usuario/status/123...",
+                                ImportMode::TwitterProfile => "https://x.com/usuario ou @usuario",
+                            },
                             value: "{url}",
                             oninput: move |event| {
                                 url.set(event.value());
                                 analysis.set(None);
+                                tweet_result.set(None);
+                                profile_result.set(None);
                                 analysis_error.set(None);
                                 selected_format.set(String::new());
                                 error.set(None);
                             },
-                            onkeydown: analyze_enter,
+                            onkeydown: move |event: KeyboardEvent| {
+                                if event.key() == Key::Enter {
+                                    analyze_on_enter();
+                                }
+                            },
                         }
-                        input {
-                            class: "download-input download-name",
-                            r#type: "text",
-                            placeholder: "nome opcional (baixar direto)",
-                            value: "{file_name}",
-                            oninput: move |event| file_name.set(event.value()),
-                            onkeydown: direct_enter,
+                        if mode == ImportMode::Universal {
+                            input {
+                                class: "download-input download-name",
+                                r#type: "text",
+                                placeholder: "nome opcional (baixar direto)",
+                                value: "{file_name}",
+                                oninput: move |event| file_name.set(event.value()),
+                                onkeydown: direct_enter,
+                            }
                         }
                         div { class: "download-form-actions",
                             button {
                                 class: "btn primary",
                                 disabled: analyzing(),
-                                onclick: {
-                                    let services = services.clone();
-                                    move |_| analyze_current(
-                                        services.clone(),
-                                        url,
-                                        analysis,
-                                        analyzing,
-                                        analysis_error,
-                                        analysis_generation,
-                                        selected_format,
-                                    )
-                                },
-                                if analyzing() { "Analisando..." } else { "Analisar" }
+                                onclick: move |_| run_unified_analyze(),
+                                if analyzing() { "Analisando…" } else { "Analisar" }
                             }
-                            button {
-                                class: "btn small ghost",
-                                onclick: {
-                                    let services = services.clone();
-                                    move |_| submit_url(services.clone(), ui, url, file_name, error)
-                                },
-                                "Baixar URL"
+                            if mode == ImportMode::Universal {
+                                button {
+                                    class: "btn small ghost",
+                                    onclick: {
+                                        let services = services.clone();
+                                        move |_| submit_url(services.clone(), ui, url, file_name, error)
+                                    },
+                                    "Baixar URL"
+                                }
                             }
                         }
                     }
@@ -316,8 +501,31 @@ pub fn DownloadsView() -> Element {
                     if let Some(message) = analysis_error() {
                         p { class: "error-banner", "{message}" }
                     }
+
+                    if show_twitter_cookies {
+                        details { class: "twitter-cookies",
+                            summary { "Cookies opcionais do X / Twitter" }
+                            p { class: "hint",
+                                "Cole auth_token / ct0 do x.com para acessar posts protegidos ou perfis com restrição de idade."
+                            }
+                            textarea {
+                                class: "twitter-cookies-input",
+                                placeholder: "auth_token=...; ct0=...",
+                                value: "{cookies}",
+                                disabled: cookies_loading(),
+                                oninput: move |event| cookies.set(event.value()),
+                            }
+                            button {
+                                class: "btn small soft",
+                                disabled: cookies_loading(),
+                                onclick: move |_| save_cookies(),
+                                "Salvar cookies"
+                            }
+                        }
+                    }
+
                     p { class: "download-destination",
-                        strong { "Pasta: " }
+                        strong { "Pasta padrão: " }
                         code { "{download_dir}" }
                     }
                 }
@@ -332,6 +540,12 @@ pub fn DownloadsView() -> Element {
                         analysis_error,
                         error,
                     }
+                }
+                if let Some(tweet) = current_tweet {
+                    TweetCard { tweet, cookies: current_cookies.clone() }
+                }
+                if let Some(profile) = current_profile {
+                    ProfileCard { profile, cookies: current_cookies }
                 }
 
                 section { class: "download-card downloads-list-card",
@@ -1542,6 +1756,218 @@ fn format_bytes(size: Option<i64>) -> String {
         format!("{:.1} KB", size / 1024.0)
     } else {
         format!("{size:.0} B")
+    }
+}
+
+/// Compact downloads queue & quick URL catcher docked inside the Right Context Drawer.
+#[component]
+pub fn QuickQueueDrawer() -> Element {
+    let services = use_context::<AppServices>();
+    let mut ui = use_context::<UiState>();
+    let mut quick_url = use_signal(String::new);
+    let mut quick_busy = use_signal(|| false);
+    let mut quick_error = use_signal(|| None::<String>);
+
+    let items = ui.transfers.downloads();
+    let active_count = items.iter().filter(|item| item.is_active()).count();
+    let mut recent: Vec<DownloadRecord> = items;
+    recent.sort_by_key(|item| std::cmp::Reverse(item.created_at.unwrap_or_default()));
+    recent.truncate(30);
+
+    let trigger_quick = {
+        let services = services.clone();
+        move || {
+            let raw = quick_url().trim().to_string();
+            if raw.is_empty() {
+                quick_error.set(Some("Cole uma URL HTTPS para baixar.".to_string()));
+                return;
+            }
+            if !raw.starts_with("https://") {
+                quick_error.set(Some("Use uma URL iniciando com https://.".to_string()));
+                return;
+            }
+            quick_busy.set(true);
+            quick_error.set(None);
+            let services = services.clone();
+            spawn(async move {
+                match services.extract.analyze(raw.clone()).await {
+                    Ok(info) => {
+                        let formats = downloadable_formats(&info);
+                        if let Some((best, is_audio)) = formats
+                            .iter()
+                            .find(|(opt, _)| opt.best.unwrap_or(false))
+                            .or_else(|| formats.first())
+                            .cloned()
+                        {
+                            download_media(services, ui, &info, &best, is_audio, quick_error);
+                            quick_url.set(String::new());
+                        } else {
+                            let dummy_name = Signal::new(String::new());
+                            submit_url(services, ui, quick_url, dummy_name, quick_error);
+                        }
+                    }
+                    Err(_) => {
+                        let dummy_name = Signal::new(String::new());
+                        submit_url(services, ui, quick_url, dummy_name, quick_error);
+                    }
+                }
+                quick_busy.set(false);
+            });
+        }
+    };
+
+    rsx! {
+        section { class: "drawer-section",
+            div { class: "drawer-section-header",
+                div {
+                    strong { "Fila de Transferências" }
+                    p { class: "hint",
+                        if active_count > 0 {
+                            "{active_count} em andamento"
+                        } else {
+                            "Acompanhe sem sair do chat"
+                        }
+                    }
+                }
+                button {
+                    class: "btn small soft",
+                    onclick: move |_| ui.shell.tab.set(Tab::Downloads),
+                    "Expandir"
+                }
+            }
+
+            div { class: "drawer-quick-form",
+                input {
+                    class: "download-input",
+                    r#type: "url",
+                    placeholder: "Colar link rápido (YouTube, X…)",
+                    aria_label: "Colar link para download rápido",
+                    value: "{quick_url}",
+                    oninput: move |event| {
+                        quick_url.set(event.value());
+                        quick_error.set(None);
+                    },
+                    onkeydown: {
+                        let mut trigger = trigger_quick.clone();
+                        move |event: KeyboardEvent| {
+                            if event.key() == Key::Enter {
+                                trigger();
+                            }
+                        }
+                    },
+                }
+                button {
+                    class: "icon-button accent",
+                    disabled: quick_busy(),
+                    title: if quick_busy() { "Analisando…" } else { "Baixar melhor formato" },
+                    aria_label: "Baixar link",
+                    onclick: {
+                        let mut trigger = trigger_quick;
+                        move |_| trigger()
+                    },
+                    Icon { name: IconName::Download, size: 16, class: "icon" }
+                }
+            }
+
+            if let Some(err) = quick_error() {
+                p { class: "error-banner", "{err}" }
+            }
+
+            if recent.is_empty() {
+                div { class: "empty-state",
+                    p { class: "hint", "Nenhum download recente." }
+                }
+            } else {
+                div { class: "drawer-quick-list",
+                    for item in recent {
+                        {
+                            let id = item.id.clone();
+                            let completed = item.status == "completed";
+                            let can_cancel = item.can_cancel.unwrap_or_else(|| item.is_active());
+                            let path = item.file_path.clone();
+                            let cancel_services = services.clone();
+                            rsx! {
+                                div {
+                                    key: "{id}",
+                                    class: "drawer-item-card",
+                                    oncontextmenu: {
+                                        let record = item.clone();
+                                        move |event: Event<MouseData>| {
+                                            event.prevent_default();
+                                            let point = event.data().client_coordinates();
+                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
+                                                point.x,
+                                                point.y,
+                                                ContextTarget::Download {
+                                                    record: Box::new(record.clone()),
+                                                },
+                                            )));
+                                        }
+                                    },
+                                    div { class: "drawer-item-top",
+                                        strong { title: "{item.title()}", "{item.title()}" }
+                                        span { class: "pill",
+                                            if item.is_active() {
+                                                "{item.percent().round() as i64}%"
+                                            } else {
+                                                "{status_label(&item.status)}"
+                                            }
+                                        }
+                                    }
+                                    if item.is_active() {
+                                        div { class: "progress-track",
+                                            div {
+                                                class: "progress-fill",
+                                                style: "width: {item.percent()}%;",
+                                            }
+                                        }
+                                    }
+                                    div { class: "drawer-item-top",
+                                        span { class: "hint", "{platform_label(item.platform.as_deref())}" }
+                                        div { class: "download-row-actions",
+                                            if can_cancel {
+                                                button {
+                                                    class: "btn small ghost",
+                                                    onclick: {
+                                                        let id = id.clone();
+                                                        move |_| {
+                                                            if cancel_services.downloads.cancel(&id) {
+                                                                update_download(
+                                                                    cancel_services.clone(),
+                                                                    ui,
+                                                                    &id,
+                                                                    |rec| {
+                                                                        rec.status = "canceled".to_string();
+                                                                        rec.can_cancel = Some(false);
+                                                                        rec.can_retry = Some(true);
+                                                                    },
+                                                                    true,
+                                                                );
+                                                            }
+                                                        }
+                                                    },
+                                                    "Cancelar"
+                                                }
+                                            } else if completed {
+                                                if let Some(path) = path {
+                                                    button {
+                                                        class: "btn small soft",
+                                                        onclick: move |_| {
+                                                            let _ = plasma_platform::open_path(&path);
+                                                        },
+                                                        "Abrir"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

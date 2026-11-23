@@ -1,4 +1,4 @@
-//! Open conversation title, search and topic chips.
+//! Open conversation header, inline/global search capsule, drawer toggles and forum topic chips.
 
 use super::conversation::{
     bump_epoch, chat_summary, run_global_search, run_message_search, SearchWatch,
@@ -6,8 +6,10 @@ use super::conversation::{
 use crate::context::{ContextMenuState, ContextTarget};
 use crate::icons::{Icon, IconName};
 use crate::state::{
-    push_toast, topic_download_key, topic_visibility_key, AppServices, ToastKind, UiState,
+    open_drawer_tab, push_toast, set_drawer_open, topic_download_key, topic_visibility_key,
+    AppServices, DrawerTab, ToastKind, UiState,
 };
+use crate::theme::{avatar_gradient, avatar_initials};
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibChatInfo, TdlibForumTopicInfo, TdlibGlobalSearchMessage};
 
@@ -127,15 +129,14 @@ pub(super) fn ConversationHeader(
     mut global_results: Signal<Vec<TdlibGlobalSearchMessage>>,
     mut global_offset: Signal<String>,
     mut global_loading_more: Signal<bool>,
-    mut shared_open: Signal<bool>,
     mut search_epoch: Signal<u64>,
 ) -> Element {
     let mut ui = use_context::<UiState>();
     let services = use_context::<AppServices>();
     let search_placeholder = if global_search() {
-        "Buscar em todas as conversas"
+        "Buscar em todos os chats…"
     } else {
-        "Buscar mensagens"
+        "Buscar na conversa…"
     };
     let topics = ui.conversation.topics();
     let hidden_keys = ui.conversation.hidden_topics();
@@ -151,9 +152,10 @@ pub(super) fn ConversationHeader(
         })
         .cloned()
         .collect();
+    let is_twitter_fake = crate::twitter_fake::is_twitter_fake_chat_id(&chat.id);
     let subtitle = if let Some(topic) = topic.as_ref() {
         format!("Tópico: {}", topic.title)
-    } else if crate::twitter_fake::is_twitter_fake_chat_id(&chat.id) {
+    } else if is_twitter_fake {
         let sync = twitter_sync
             .as_ref()
             .filter(|status| status.chat_id == chat.id);
@@ -164,41 +166,157 @@ pub(super) fn ConversationHeader(
         } else if let Some(at) = sync.and_then(|status| status.last_at_ms) {
             format!("Última sync: {}", format_sync_time(at))
         } else {
-            "Galeria X · Atualizar para sincronizar".to_string()
+            "Galeria X · Sincronização ativa".to_string()
         }
     } else {
         chat_summary(&chat)
     };
 
+    let trigger_search = {
+        let services = services.clone();
+        move || {
+            let query = message_query().trim().to_string();
+            if query.is_empty() {
+                bump_epoch(search_epoch);
+                search_active.set(false);
+                global_results.set(Vec::new());
+                global_offset.set(String::new());
+                global_loading_more.set(false);
+                ui.conversation.search_results.set(Vec::new());
+                ui.conversation.search_error.set(None);
+                ui.conversation.search_loading.set(false);
+                return;
+            }
+            search_active.set(true);
+            if global_search() {
+                ui.conversation.search_results.set(Vec::new());
+                global_loading_more.set(false);
+                run_global_search(
+                    services.clone(),
+                    ui,
+                    global_results,
+                    global_offset,
+                    query,
+                    SearchWatch {
+                        query: message_query,
+                        epoch: search_epoch,
+                        global: global_search,
+                    },
+                );
+            } else {
+                let Some(chat) = ui.conversation.selected_chat() else {
+                    return;
+                };
+                global_results.set(Vec::new());
+                global_offset.set(String::new());
+                global_loading_more.set(false);
+                run_message_search(
+                    services.clone(),
+                    ui,
+                    chat,
+                    ui.conversation.selected_topic(),
+                    query,
+                    SearchWatch {
+                        query: message_query,
+                        epoch: search_epoch,
+                        global: global_search,
+                    },
+                );
+            }
+        }
+    };
+
+    let mut trigger_search_enter = trigger_search.clone();
+    let mut trigger_search_click = trigger_search;
+    let gradient = avatar_gradient(&chat.id);
+    let initials = avatar_initials(&chat.title);
+    let drawer_open = ui.shell.drawer_open();
+    let drawer_tab = ui.shell.drawer_tab();
+
     rsx! {
-                    header { class: "chat-header",
-                        div { class: "chat-header-title",
-                            button {
-                                class: "mobile-nav-back",
-                                title: "Voltar para a lista de chats",
-                                aria_label: "Voltar para a lista de chats",
-                                onclick: move |_| ui.conversation.mobile_show_list.set(true),
-                                Icon { name: IconName::ChevronLeft, size: 18, class: "icon" }
-                            }
-                            if let Some(avatar) = ui.session.avatar() {
-                                img { class: "chat-header-avatar", src: "{avatar}", alt: "" }
+        div { class: "chat-header-wrap",
+            header { class: "chat-header",
+                div { class: "chat-header-title",
+                    button {
+                        class: "icon-button mobile-nav-back",
+                        title: "Voltar para a lista de chats",
+                        aria_label: "Voltar para a lista de chats",
+                        onclick: move |_| ui.conversation.mobile_show_list.set(true),
+                        Icon { name: IconName::ChevronLeft, size: 18, class: "icon" }
+                    }
+                    if !ui.shell.sidebar_open() {
+                        button {
+                            class: "icon-button",
+                            title: "Mostrar lista de conversas (Ctrl+B)",
+                            aria_label: "Mostrar lista de conversas",
+                            onclick: move |_| ui.shell.sidebar_open.set(true),
+                            Icon { name: IconName::LayoutSidebar, size: 18, class: "icon" }
+                        }
+                    }
+                    div {
+                        class: "chat-header-avatar",
+                        style: "background: {gradient};",
+                        if let Some(avatar) = ui.session.avatar() {
+                            img { src: "{avatar}", alt: "" }
+                        } else {
+                            span { "{initials}" }
+                        }
+                    }
+                    div { class: "chat-header-copy",
+                        strong { "{chat.title}" }
+                        span { "{subtitle}" }
+                    }
+                }
+
+                div { class: "chat-header-actions",
+                    div { class: "header-search-pill",
+                        button {
+                            class: if global_search() { "icon-button small active" } else { "icon-button small" },
+                            title: if global_search() {
+                                "Busca global ativa (clique para buscar só nesta conversa)"
                             } else {
-                                div { class: "chat-header-avatar", "{chat.title.chars().next().unwrap_or('?')}" }
-                            }
-                            div { class: "chat-header-copy",
-                                strong { "{chat.title}" }
-                                span { "{subtitle}" }
+                                "Buscar em todas as conversas"
+                            },
+                            aria_label: "Alternar busca global",
+                            onclick: move |_| {
+                                let next = !global_search();
+                                global_search.set(next);
+                                bump_epoch(search_epoch);
+                                search_active.set(false);
+                                global_results.set(Vec::new());
+                                global_offset.set(String::new());
+                                global_loading_more.set(false);
+                                ui.conversation.search_results.set(Vec::new());
+                                ui.conversation.search_error.set(None);
+                                ui.conversation.search_loading.set(false);
+                            },
+                            Icon {
+                                name: if global_search() { IconName::WorldCheck } else { IconName::World },
+                                size: 15,
+                                class: "icon",
                             }
                         }
-                        div { class: "chat-header-actions",
+                        input {
+                            r#type: "search",
+                            placeholder: "{search_placeholder}",
+                            aria_label: "{search_placeholder}",
+                            value: "{message_query}",
+                            oninput: move |event| message_query.set(event.value()),
+                            onkeydown: move |event: KeyboardEvent| {
+                                if event.key() == Key::Enter {
+                                    trigger_search_enter();
+                                }
+                            },
+                        }
+                        if in_search {
                             button {
-                                class: if global_search() { "btn small active global-toggle" } else { "btn small ghost global-toggle" },
-                                title: if global_search() { "Buscando em todas as conversas" } else { "Buscar em todas as conversas" },
+                                class: "icon-button small",
+                                title: "Limpar busca",
+                                aria_label: "Limpar busca",
                                 onclick: move |_| {
-                                    let next = !global_search();
-                                    global_search.set(next);
                                     bump_epoch(search_epoch);
                                     search_active.set(false);
+                                    message_query.set(String::new());
                                     global_results.set(Vec::new());
                                     global_offset.set(String::new());
                                     global_loading_more.set(false);
@@ -206,227 +324,200 @@ pub(super) fn ConversationHeader(
                                     ui.conversation.search_error.set(None);
                                     ui.conversation.search_loading.set(false);
                                 },
-                                Icon {
-                                    name: if global_search() { IconName::WorldCheck } else { IconName::World },
-                                    size: 17,
-                                    class: "icon",
-                                }
+                                Icon { name: IconName::Close, size: 14, class: "icon" }
                             }
-                            input {
-                                class: "chat-search-input header-search",
-                                r#type: "search",
-                                placeholder: "{search_placeholder}",
-                                value: "{message_query}",
-                                oninput: move |event| message_query.set(event.value()),
-                            }
+                        } else {
                             button {
-                                class: "btn small primary header-icon-button",
+                                class: "icon-button small",
                                 disabled: ui.conversation.search_loading(),
-                                title: if ui.conversation.search_loading() { "Buscando..." } else { "Buscar mensagens" },
-                                aria_label: if ui.conversation.search_loading() { "Buscando..." } else { "Buscar mensagens" },
-                                onclick: {
-                                    let services = services.clone();
-                                    move |_| {
-                                        let query = message_query().trim().to_string();
-                                        if query.is_empty() {
-                                            bump_epoch(search_epoch);
-                                            search_active.set(false);
-                                            global_results.set(Vec::new());
-                                            global_offset.set(String::new());
-                                            global_loading_more.set(false);
-                                            ui.conversation.search_results.set(Vec::new());
-                                            ui.conversation.search_error.set(None);
-                                            ui.conversation.search_loading.set(false);
-                                            return;
-                                        }
-                                        search_active.set(true);
-                                        if global_search() {
-                                            ui.conversation.search_results.set(Vec::new());
-                                            global_loading_more.set(false);
-                                            run_global_search(
-                                                services.clone(),
-                                                ui,
-                                                global_results,
-                                                global_offset,
-                                                query,
-                                                SearchWatch {
-                                                    query: message_query,
-                                                    epoch: search_epoch,
-                                                    global: global_search,
-                                                },
-                                            );
-                                        } else {
-                                            let Some(chat) = ui.conversation.selected_chat() else {
-                                                return;
-                                            };
-                                            global_results.set(Vec::new());
-                                            global_offset.set(String::new());
-                                            global_loading_more.set(false);
-                                            run_message_search(
-                                                services.clone(),
-                                                ui,
-                                                chat,
-                                                ui.conversation.selected_topic(),
-                                                query,
-                                                SearchWatch {
-                                                    query: message_query,
-                                                    epoch: search_epoch,
-                                                    global: global_search,
-                                                },
-                                            );
-                                        }
-                                    }
-                                },
-                                Icon { name: IconName::Search, size: 16, class: "icon" }
-                            }
-                            if in_search {
-                                button {
-                                    class: "btn small ghost",
-                                    onclick: move |_| {
-                                        bump_epoch(search_epoch);
-                                        search_active.set(false);
-                                        message_query.set(String::new());
-                                        global_results.set(Vec::new());
-                                        global_offset.set(String::new());
-                                        global_loading_more.set(false);
-                                        ui.conversation.search_results.set(Vec::new());
-                                        ui.conversation.search_error.set(None);
-                                        ui.conversation.search_loading.set(false);
-                                    },
-                                    "Limpar"
-                                }
-                            }
-                            if crate::twitter_fake::is_twitter_fake_chat_id(&chat.id) {
-                                button {
-                                    class: "btn small ghost header-icon-button",
-                                    title: "Atualizar mídias do X",
-                                    aria_label: "Atualizar mídias do X",
-                                    onclick: {
-                                        let services = services.clone();
-                                        let chat_id = chat.id.clone();
-                                        move |_| {
-                                            let services = services.clone();
-                                            let chat_id = chat_id.clone();
-                                            spawn(async move {
-                                                refresh_twitter_fake_chat(services, ui, chat_id)
-                                                    .await;
-                                            });
-                                        }
-                                    },
-                                    Icon { name: IconName::Refresh, size: 16, class: "icon" }
-                                }
-                            }
-                            button {
-                                class: "btn small ghost header-icon-button",
-                                title: "Baixar todas as mídias desta conversa",
-                                aria_label: "Baixar todas as mídias desta conversa",
-                                onclick: move |_| ui.transfers.mass_download_open.set(true),
-                                Icon { name: IconName::CloudDownload, size: 16, class: "icon" }
-                            }
-                            if !crate::twitter_fake::is_twitter_fake_chat_id(&chat.id) {
-                                button {
-                                    class: "btn small ghost header-icon-button",
-                                    title: "Mídia compartilhada",
-                                    aria_label: "Mídia compartilhada",
-                                    onclick: move |_| shared_open.set(true),
-                                    Icon { name: IconName::Info, size: 16, class: "icon" }
-                                }
+                                title: "Buscar mensagens",
+                                aria_label: "Buscar mensagens",
+                                onclick: move |_| trigger_search_click(),
+                                Icon { name: IconName::Search, size: 15, class: "icon" }
                             }
                         }
                     }
 
-                    if chat.has_topics {
-                        div { class: "topics-bar",
-                            if topics.is_empty() {
-                                span { class: "topic-chip", "Carregando tópicos..." }
-                            } else {
-                            button {
-                                class: if topic.is_none() { "topic-chip active" } else { "topic-chip" },
-                                onclick: move |_| {
-                                    ui.conversation.selected_topic.set(None);
-                                    ui.panels.reply_to.set(None);
-                                },
-                                oncontextmenu: move |event: Event<MouseData>| {
-                                    event.prevent_default();
-                                    event.stop_propagation();
-                                    let point = event.data().client_coordinates();
-                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
-                                        point.x,
-                                        point.y,
-                                        ContextTarget::Topics {
-                                            browser_open: ui.conversation.topic_browser_open(),
-                                        },
-                                    )));
-                                },
-                                "Todos"
+                    if is_twitter_fake {
+                        button {
+                            class: "icon-button",
+                            title: "Sincronizar novas mídias do X",
+                            aria_label: "Sincronizar novas mídias do X",
+                            onclick: {
+                                let services = services.clone();
+                                let chat_id = chat.id.clone();
+                                move |_| {
+                                    let services = services.clone();
+                                    let chat_id = chat_id.clone();
+                                    spawn(async move {
+                                        refresh_twitter_fake_chat(services, ui, chat_id).await;
+                                    });
+                                }
+                            },
+                            Icon { name: IconName::Refresh, size: 17, class: "icon" }
+                        }
+                    }
+
+                    button {
+                        class: if drawer_open && drawer_tab == DrawerTab::MassDownload {
+                            "icon-button active"
+                        } else {
+                            "icon-button"
+                        },
+                        title: "Download em massa desta conversa",
+                        aria_label: "Download em massa desta conversa",
+                        onclick: {
+                            let services = services.clone();
+                            move |_| {
+                                ui.transfers.mass_download_topic.set(None);
+                                open_drawer_tab(&services, ui, DrawerTab::MassDownload);
                             }
-                            for item in listed_topics {
-                                {
-                                    let key = topic_download_key(item.id, &item.kind);
-                                    let has_new = topics_with_new_media.contains(&key);
-                                    let active = topic.as_ref().map(|current| current.id) == Some(item.id);
-                                    let mut class = if active {
-                                        "topic-chip active".to_string()
-                                    } else {
-                                        "topic-chip".to_string()
-                                    };
-                                    if has_new {
-                                        class.push_str(" has-new-media");
-                                    }
-                                    rsx! {
-                                        button {
-                                            key: "{item.kind}:{item.id}",
-                                            class: "{class}",
-                                            title: if has_new { "Há mídia nova desde o último download em massa" } else { "" },
-                                            onclick: {
-                                                let item = item.clone();
-                                                move |_| {
-                                                    ui.conversation.selected_topic.set(Some(item.clone()));
-                                                    ui.panels.reply_to.set(None);
-                                                }
-                                            },
-                                            oncontextmenu: {
-                                                let item = item.clone();
-                                                let hidden = hidden_keys
-                                                    .iter()
-                                                    .any(|key| *key == topic_visibility_key(&item));
-                                                move |event: Event<MouseData>| {
-                                                    event.prevent_default();
-                                                    event.stop_propagation();
-                                                    let point = event.data().client_coordinates();
-                                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
-                                                        point.x,
-                                                        point.y,
-                                                        ContextTarget::Topic {
-                                                            chat_id: timeline_chat_id,
-                                                            topic: Box::new(item.clone()),
-                                                            hidden,
-                                                            browser_open: ui.conversation.topic_browser_open(),
-                                                        },
-                                                    )));
-                                                }
-                                            },
-                                            if item.is_closed { "🔒 " }
-                                            "{item.title}"
-                                            if has_new {
-                                                span { class: "topic-new-media", "•" }
+                        },
+                        Icon { name: IconName::CloudDownload, size: 18, class: "icon" }
+                    }
+
+                    if !is_twitter_fake {
+                        button {
+                            class: if drawer_open && drawer_tab == DrawerTab::Media {
+                                "icon-button active"
+                            } else {
+                                "icon-button"
+                            },
+                            title: "Mídias compartilhadas",
+                            aria_label: "Mídias compartilhadas",
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    ui.panels.user_media.set(None);
+                                    open_drawer_tab(&services, ui, DrawerTab::Media);
+                                }
+                            },
+                            Icon { name: IconName::Media, size: 18, class: "icon" }
+                        }
+                    }
+
+                    button {
+                        class: if drawer_open { "icon-button active" } else { "icon-button" },
+                        title: "Alternar gaveta lateral (Ctrl+J)",
+                        aria_label: "Alternar gaveta lateral",
+                        onclick: {
+                            let services = services.clone();
+                            move |_| set_drawer_open(&services, ui, !drawer_open)
+                        },
+                        Icon { name: IconName::LayoutSidebarRight, size: 18, class: "icon" }
+                    }
+                }
+            }
+
+            if chat.has_topics {
+                div { class: "topic-strip",
+                    if topics.is_empty() {
+                        span { class: "topic-chip", "Carregando tópicos…" }
+                    } else {
+                        button {
+                            class: if topic.is_none() { "topic-chip active" } else { "topic-chip" },
+                            onclick: move |_| {
+                                ui.conversation.selected_topic.set(None);
+                                ui.panels.reply_to.set(None);
+                            },
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                let point = event.data().client_coordinates();
+                                ui.panels.context_menu.set(Some(ContextMenuState::new(
+                                    point.x,
+                                    point.y,
+                                    ContextTarget::Topics {
+                                        browser_open: drawer_open && drawer_tab == DrawerTab::Topics,
+                                    },
+                                )));
+                            },
+                            "Todos"
+                        }
+                        for item in listed_topics {
+                            {
+                                let key = topic_download_key(item.id, &item.kind);
+                                let has_new = topics_with_new_media.contains(&key);
+                                let active = topic.as_ref().map(|current| current.id) == Some(item.id);
+                                let hidden = hidden_keys
+                                    .iter()
+                                    .any(|vis| *vis == topic_visibility_key(&item));
+                                let mut class = if active {
+                                    "topic-chip active".to_string()
+                                } else {
+                                    "topic-chip".to_string()
+                                };
+                                if hidden {
+                                    class.push_str(" hidden-topic");
+                                }
+                                rsx! {
+                                    button {
+                                        key: "{item.kind}:{item.id}",
+                                        class: "{class}",
+                                        title: if has_new {
+                                            "Há mídia nova desde o último download em massa"
+                                        } else {
+                                            ""
+                                        },
+                                        onclick: {
+                                            let item = item.clone();
+                                            move |_| {
+                                                ui.conversation.selected_topic.set(Some(item.clone()));
+                                                ui.panels.reply_to.set(None);
                                             }
-                                            if item.unread_count > 0 {
-                                                span { class: "topic-unread", "{item.unread_count}" }
+                                        },
+                                        oncontextmenu: {
+                                            let item = item.clone();
+                                            move |event: Event<MouseData>| {
+                                                event.prevent_default();
+                                                event.stop_propagation();
+                                                let point = event.data().client_coordinates();
+                                                ui.panels.context_menu.set(Some(ContextMenuState::new(
+                                                    point.x,
+                                                    point.y,
+                                                    ContextTarget::Topic {
+                                                        chat_id: timeline_chat_id,
+                                                        topic: Box::new(item.clone()),
+                                                        hidden,
+                                                        browser_open: drawer_open
+                                                            && drawer_tab == DrawerTab::Topics,
+                                                    },
+                                                )));
                                             }
+                                        },
+                                        if item.is_closed { "🔒 " }
+                                        "{item.title}"
+                                        if has_new {
+                                            span { class: "topic-new-dot" }
+                                        }
+                                        if item.unread_count > 0 {
+                                            span { class: "topic-chip-badge", "{item.unread_count}" }
                                         }
                                     }
                                 }
                             }
-                            }
+                        }
+                        button {
+                            class: "topic-chip",
+                            title: "Ver todos os tópicos na gaveta lateral",
+                            onclick: {
+                                let services = services.clone();
+                                move |_| open_drawer_tab(&services, ui, DrawerTab::Topics)
+                            },
+                            Icon { name: IconName::List, size: 14, class: "icon" }
+                            "Lista"
                         }
                     }
+                }
+            }
+        }
     }
 }
 
 fn format_sync_time(at_ms: i64) -> String {
-    let secs = (at_ms / 1000).max(0);
-    let minutes = secs / 60;
+    let now = crate::state::now_millis();
+    let elapsed_secs = ((now - at_ms).max(0)) / 1000;
+    let minutes = elapsed_secs / 60;
     if minutes < 1 {
         "agora".into()
     } else if minutes < 60 {

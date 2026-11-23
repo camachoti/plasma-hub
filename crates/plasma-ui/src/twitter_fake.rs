@@ -615,6 +615,8 @@ impl TwitterFakeMessage {
             grouped_id: None,
             video_duration: None,
             media_size: self.media_size,
+            media_width: None,
+            media_height: None,
             thumbnail_path: self.thumbnail_url.clone().or_else(|| {
                 if has_media && !self.is_video {
                     self.url.clone()

@@ -1,16 +1,20 @@
 //! Telegram view: real TDLib chats, topics, search and cache when signed in;
 //! a local preview on the same shell before login.
 
+use crate::icons::{Icon, IconName};
 use crate::state::DuplicateSearchMedia;
 use crate::state::{
     forum_decision, load_hidden_topics, message_cache_key, prepare_forum_view, push_toast,
     recall_cached_topics, recall_forum_flag, refresh_topics_with_new_media, remember_chat_list,
-    set_chat_has_topics, set_if_changed, AppServices, ForumDecision, ForwardState, LightboxMedia,
-    LightboxState, ToastKind, UiState,
+    set_chat_has_topics, set_drawer_open, set_if_changed, AppServices, DrawerTab, ForumDecision,
+    ForwardState, LightboxMedia, LightboxState, Tab, ToastKind, UiState,
 };
 use crate::views::chat_list;
+use crate::views::downloads::{DownloadsView, QuickQueueDrawer};
 use crate::views::duplicate_search::DuplicateSearchDialog;
 use crate::views::global_search::GlobalSearchResults;
+use crate::views::settings::SettingsView;
+use crate::views::spike::VirtualTimeline;
 use crate::views::timeline::{format_timestamp, MessageAction, MessageTimeline};
 use crate::views::topics::TopicBrowser;
 use dioxus::prelude::*;
@@ -44,7 +48,7 @@ use conversation_header::ConversationHeader;
 use forward::ForwardDialog;
 use mass_download::MassDownloadPanel;
 use media::{MediaLightbox, MediaPanel};
-use preview::PreviewTelegram;
+use preview::{PreviewSidebar, PreviewStage};
 
 #[derive(Clone, PartialEq)]
 struct PendingSearchJump {
@@ -123,7 +127,94 @@ pub fn TelegramView() -> Element {
     if ui.session.auth_state() == "ready" {
         rsx! { RealTelegram {} }
     } else {
-        rsx! { PreviewTelegram {} }
+        rsx! { PreviewWorkspace {} }
+    }
+}
+
+#[component]
+fn PreviewWorkspace() -> Element {
+    let services = use_context::<AppServices>();
+    let ui = use_context::<UiState>();
+    let preview_selected = use_signal(|| 0usize);
+    let active_tab = ui.shell.tab();
+    let drawer_open = ui.shell.drawer_open();
+    let mobile_list = active_tab == Tab::Telegram && ui.conversation.mobile_show_list();
+    let shell_class = if mobile_list {
+        "workspace-shell mobile-show-list"
+    } else {
+        "workspace-shell mobile-show-stage"
+    };
+
+    rsx! {
+        div { class: "{shell_class}",
+            PreviewSidebar { selected: preview_selected }
+            main { class: "stage-pane",
+                match active_tab {
+                    Tab::Telegram => rsx! { PreviewStage { selected: preview_selected } },
+                    Tab::Downloads | Tab::Twitter => rsx! { DownloadsView {} },
+                    Tab::Settings => rsx! { SettingsView {} },
+                }
+            }
+            if drawer_open {
+                aside { class: "drawer-pane", aria_label: "Painel lateral",
+                    header { class: "drawer-header",
+                        div { class: "drawer-tabs",
+                            button { class: "drawer-tab active", "Fila" }
+                        }
+                        button {
+                            class: "icon-button small",
+                            title: "Fechar gaveta (Ctrl+J)",
+                            aria_label: "Fechar gaveta",
+                            onclick: move |_| set_drawer_open(&services, ui, false),
+                            Icon { name: IconName::Close, size: 15, class: "icon" }
+                        }
+                    }
+                    div { class: "drawer-body",
+                        QuickQueueDrawer {}
+                    }
+                }
+            }
+            MobileBottomNav {}
+        }
+    }
+}
+
+#[component]
+fn MobileBottomNav() -> Element {
+    let mut ui = use_context::<UiState>();
+    let tab = ui.shell.tab();
+    let in_downloads = matches!(tab, Tab::Downloads | Tab::Twitter);
+
+    rsx! {
+        nav { class: "mobile-bottom-bar", aria_label: "Navegação móvel",
+            button {
+                class: if tab == Tab::Telegram { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Telegram);
+                    ui.conversation.mobile_show_list.set(true);
+                },
+                Icon { name: IconName::BrandTelegram, size: 18, class: "icon" }
+                span { "Chats" }
+            }
+            button {
+                class: if in_downloads { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Downloads);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                Icon { name: IconName::ProgressDown, size: 18, class: "icon" }
+                span { "Downloads" }
+            }
+            button {
+                class: if tab == Tab::Settings { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Settings);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                Icon { name: IconName::Settings, size: 18, class: "icon" }
+                span { "Ajustes" }
+            }
+        }
     }
 }
 
@@ -164,7 +255,6 @@ fn RealTelegram() -> Element {
     };
     let dragging_over = use_signal(|| false);
     let mut drag_depth = use_signal(|| 0u32);
-    let mut shared_open = use_signal(|| false);
     let mut selected_messages = use_signal(Vec::<i64>::new);
     let mut shared_items = use_signal(Vec::<TdlibSharedMediaItem>::new);
     let mut shared_loading = use_signal(|| false);
@@ -636,7 +726,10 @@ fn RealTelegram() -> Element {
 
     let shared_services = services.clone();
     use_effect(move || {
-        if !shared_open() {
+        let wants_shared = ui.shell.drawer_open()
+            && ui.shell.drawer_tab() == DrawerTab::Media
+            && ui.panels.user_media().is_none();
+        if !wants_shared {
             return;
         }
         let Some(chat_id) = ui
@@ -644,6 +737,7 @@ fn RealTelegram() -> Element {
             .selected_chat()
             .and_then(|chat| parse_chat_id(&chat))
         else {
+            shared_items.set(Vec::new());
             return;
         };
         let services = shared_services.clone();
@@ -651,16 +745,16 @@ fn RealTelegram() -> Element {
         shared_error.set(None);
         spawn(async move {
             let result = services.telegram.shared_media(chat_id, 80).await;
-            let still_here = shared_open()
+            let still_here = ui.shell.drawer_open()
+                && ui.shell.drawer_tab() == DrawerTab::Media
+                && ui.panels.user_media().is_none()
                 && ui
                     .conversation
                     .selected_chat()
                     .and_then(|chat| parse_chat_id(&chat))
                     == Some(chat_id);
             if !still_here {
-                if !shared_open() {
-                    shared_loading.set(false);
-                }
+                shared_loading.set(false);
                 return;
             }
             match result {
@@ -930,455 +1024,566 @@ fn RealTelegram() -> Element {
     let mass_chat = selected.clone();
     let mass_topics = topics.clone();
     let browser_chat = selected.clone();
-    let mobile_list = selected.is_none() || ui.conversation.mobile_show_list();
+    let active_tab = ui.shell.tab();
+    let drawer_open = ui.shell.drawer_open();
+    let drawer_tab = ui.shell.drawer_tab();
+    let mass_initial_topic = ui.transfers.mass_download_topic().or_else(|| topic.clone());
+    let drop_target_chat = selected_id.clone();
+    let mobile_list =
+        active_tab == Tab::Telegram && (selected.is_none() || ui.conversation.mobile_show_list());
     let layout_class = if mobile_list {
-        "telegram-layout mobile-list"
+        "workspace-shell mobile-show-list"
     } else {
-        "telegram-layout mobile-chat"
+        "workspace-shell mobile-show-stage"
     };
 
     rsx! {
         div { class: "{layout_class}",
-                ChatListColumn {
-                    chat_filter,
-                    search_active,
-                    message_query,
-                    global_results,
-                    global_offset,
-                    global_loading_more,
-                    pending_search_jump,
-                    search_epoch,
-                    chats_full_refresh,
-                }
+            ChatListColumn {
+                chat_filter,
+                search_active,
+                message_query,
+                global_results,
+                global_offset,
+                global_loading_more,
+                pending_search_jump,
+                search_epoch,
+                chats_full_refresh,
+            }
 
-            main {
-                class: if dragging_over() { "chat-main dragging-over" } else { "chat-main" },
-                ondragenter: move |event: Event<DragData>| {
-                    event.prevent_default();
-                    if !media_disabled && !sending() {
-                        // Drag enter/leave fire for every child element. Track
-                        // depth so moving across the composer/timeline does not
-                        // flicker the overlay off and on again.
-                        drag_depth.set(drag_depth().saturating_add(1));
-                        set_if_changed(dragging_over, true);
-                    }
-                },
-                ondragover: move |event: Event<DragData>| {
-                    event.prevent_default();
-                    if !media_disabled && !sending() {
-                        set_if_changed(dragging_over, true);
-                    }
-                },
-                ondragleave: move |_event: Event<DragData>| {
-                    let next = drag_depth().saturating_sub(1);
-                    drag_depth.set(next);
-                    if next == 0 {
-                        set_if_changed(dragging_over, false);
-                    }
-                },
-                ondrop: move |event: Event<DragData>| {
-                    event.prevent_default();
-                    drag_depth.set(0);
-                    set_if_changed(dragging_over, false);
-                    if sending() {
-                        push_toast(
-                            ui.shell.toasts,
-                            "Aguarde o envio atual terminar.",
-                            ToastKind::Info,
-                        );
-                        return;
-                    }
-                    if media_disabled {
-                        push_toast(
-                            ui.shell.toasts,
-                            "Envio de mídia indisponível nesta conversa.",
-                            ToastKind::Error,
-                        );
-                        return;
-                    }
-                    let Some(target_chat) = selected_id.clone() else {
-                        push_toast(
-                            ui.shell.toasts,
-                            "Escolha uma conversa para enviar mídias.",
-                            ToastKind::Error,
-                        );
-                        return;
-                    };
-                    let selection = collect_dropped_media(&event.data());
-                    if selection.files.is_empty() {
-                        push_toast(
-                            ui.shell.toasts,
-                            if selection.skipped > 0 {
-                                format!(
-                                    "Nenhum arquivo compatível. Use fotos/vídeos de até 2 GB (máx. {}).",
-                                    MAX_DROPPED_MEDIA_FILES
-                                )
-                            } else {
-                                "Arraste fotos ou vídeos para enviar.".to_string()
+            main { class: "stage-pane",
+                match active_tab {
+                    Tab::Downloads | Tab::Twitter => rsx! { DownloadsView {} },
+                    Tab::Settings => rsx! { SettingsView {} },
+                    Tab::Telegram => rsx! {
+                        div {
+                            class: if dragging_over() { "chat-main dragging-over" } else { "chat-main" },
+                            ondragenter: move |event: Event<DragData>| {
+                                event.prevent_default();
+                                if !media_disabled && !sending() {
+                                    drag_depth.set(drag_depth().saturating_add(1));
+                                    set_if_changed(dragging_over, true);
+                                }
                             },
-                            ToastKind::Error,
-                        );
-                        return;
-                    }
-                    if selection.skipped > 0 {
-                        push_toast(
-                            ui.shell.toasts,
-                            format!(
-                                "{} arquivo(s) ignorado(s) por tipo, tamanho ou limite de {}.",
-                                selection.skipped, MAX_DROPPED_MEDIA_FILES
-                            ),
-                            ToastKind::Info,
-                        );
-                    }
-                    open_dropped_media_preview(
-                        drop_preview_services.clone(),
-                        drop,
-                        target_chat,
-                        selection.files,
-                    );
-                },
-                if let Some(chat) = selected {
-                    ConversationHeader {
-                        chat: chat.clone(),
-                        topic: topic.clone(),
-                        timeline_chat_id,
-                        in_search,
-                        global_search,
-                        search_active,
-                        message_query,
-                        global_results,
-                        global_offset,
-                        global_loading_more,
-                        shared_open,
-                        search_epoch,
-                    }
+                            ondragover: move |event: Event<DragData>| {
+                                event.prevent_default();
+                                if !media_disabled && !sending() {
+                                    set_if_changed(dragging_over, true);
+                                }
+                            },
+                            ondragleave: move |_event: Event<DragData>| {
+                                let next = drag_depth().saturating_sub(1);
+                                drag_depth.set(next);
+                                if next == 0 {
+                                    set_if_changed(dragging_over, false);
+                                }
+                            },
+                            ondrop: move |event: Event<DragData>| {
+                                event.prevent_default();
+                                drag_depth.set(0);
+                                set_if_changed(dragging_over, false);
+                                if sending() {
+                                    push_toast(
+                                        ui.shell.toasts,
+                                        "Aguarde o envio atual terminar.",
+                                        ToastKind::Info,
+                                    );
+                                    return;
+                                }
+                                if media_disabled {
+                                    push_toast(
+                                        ui.shell.toasts,
+                                        "Envio de mídia indisponível nesta conversa.",
+                                        ToastKind::Error,
+                                    );
+                                    return;
+                                }
+                                let Some(target_chat) = drop_target_chat.clone() else {
+                                    push_toast(
+                                        ui.shell.toasts,
+                                        "Escolha uma conversa para enviar mídias.",
+                                        ToastKind::Error,
+                                    );
+                                    return;
+                                };
+                                let selection = collect_dropped_media(&event.data());
+                                if selection.files.is_empty() {
+                                    push_toast(
+                                        ui.shell.toasts,
+                                        if selection.skipped > 0 {
+                                            format!(
+                                                "Nenhum arquivo compatível. Use fotos/vídeos de até 2 GB (máx. {}).",
+                                                MAX_DROPPED_MEDIA_FILES
+                                            )
+                                        } else {
+                                            "Arraste fotos ou vídeos para enviar.".to_string()
+                                        },
+                                        ToastKind::Error,
+                                    );
+                                    return;
+                                }
+                                if selection.skipped > 0 {
+                                    push_toast(
+                                        ui.shell.toasts,
+                                        format!(
+                                            "{} arquivo(s) ignorado(s) por tipo, tamanho ou limite de {}.",
+                                            selection.skipped, MAX_DROPPED_MEDIA_FILES
+                                        ),
+                                        ToastKind::Info,
+                                    );
+                                }
+                                open_dropped_media_preview(
+                                    drop_preview_services.clone(),
+                                    drop,
+                                    target_chat,
+                                    selection.files,
+                                );
+                            },
+                            if ui.shell.show_spike() {
+                                VirtualTimeline {}
+                            } else if let Some(chat) = selected.clone() {
+                                ConversationHeader {
+                                    chat: chat.clone(),
+                                    topic: topic.clone(),
+                                    timeline_chat_id,
+                                    in_search,
+                                    global_search,
+                                    search_active,
+                                    message_query,
+                                    global_results,
+                                    global_offset,
+                                    global_loading_more,
+                                    search_epoch,
+                                }
 
-                    div { class: "chat-body",
-                        if let Some(error) = active_error {
-                            div { class: "error-banner timeline-error", "{error}" }
-                        }
-                        if is_global_search {
-                            if active_loading && global_search_results.is_empty() {
-                                div { class: "timeline-loading",
-                                    div { class: "spinner" }
-                                    span { "Buscando mensagens..." }
+                                div { class: "chat-body",
+                                    if let Some(error) = active_error {
+                                        div { class: "error-banner timeline-error", "{error}" }
+                                    }
+                                    if is_global_search {
+                                        if active_loading && global_search_results.is_empty() {
+                                            div { class: "timeline-loading",
+                                                div { class: "spinner" }
+                                                span { "Buscando mensagens…" }
+                                            }
+                                        } else {
+                                            GlobalSearchResults {
+                                                query: message_query(),
+                                                results: global_search_results,
+                                                has_more: !global_offset().is_empty(),
+                                                loading_more: global_loading_more(),
+                                                on_open: {
+                                                    let services = services.clone();
+                                                    move |item: TdlibGlobalSearchMessage| {
+                                                        let services = services.clone();
+                                                        let chat_id = item.chat_id.clone();
+                                                        let topic_id = item.message.topic_id;
+                                                        let topic_kind = item.message.topic_kind.clone();
+                                                        let message_id = item.message.id;
+                                                        search_active.set(false);
+                                                        message_query.set(String::new());
+                                                        global_results.set(Vec::new());
+                                                        global_offset.set(String::new());
+                                                        global_loading_more.set(false);
+                                                        ui.conversation.search_error.set(None);
+                                                        ui.conversation.search_loading.set(false);
+                                                        spawn(async move {
+                                                            let chat = match chat_id.parse::<i64>() {
+                                                                Ok(id) => services
+                                                                    .telegram
+                                                                    .get_chat(id)
+                                                                    .await
+                                                                    .unwrap_or_else(|_| {
+                                                                        chat_from_global_result(&item)
+                                                                    }),
+                                                                Err(_) => chat_from_global_result(&item),
+                                                            };
+                                                            chat_list::open_chat(services.clone(), ui, chat);
+                                                            let topic = topic_id.map(|id| {
+                                                                let kind = topic_kind
+                                                                    .clone()
+                                                                    .unwrap_or_else(|| "forum".to_string());
+                                                                TdlibForumTopicInfo {
+                                                                    id,
+                                                                    title: search_topic_title(&kind).to_string(),
+                                                                    kind,
+                                                                    is_closed: false,
+                                                                    is_pinned: false,
+                                                                    unread_count: 0,
+                                                                }
+                                                            });
+                                                            ui.conversation.selected_topic.set(topic);
+                                                            pending_search_jump.set(Some(PendingSearchJump {
+                                                                chat_id,
+                                                                topic_id,
+                                                                topic_kind,
+                                                                message_id,
+                                                            }));
+                                                        });
+                                                    }
+                                                },
+                                                on_load_more: {
+                                                    let services = services.clone();
+                                                    move |_| {
+                                                        run_global_search_more(
+                                                            services.clone(),
+                                                            ui,
+                                                            global_results,
+                                                            global_offset,
+                                                            global_loading_more,
+                                                            message_query(),
+                                                            SearchWatch {
+                                                                query: message_query,
+                                                                epoch: search_epoch,
+                                                                global: global_search,
+                                                            },
+                                                        );
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    } else if active_loading && display_messages.is_empty() {
+                                        div { class: "timeline-loading",
+                                            div { class: "spinner" }
+                                            span {
+                                                if in_search { "Buscando mensagens…" } else { "Carregando mensagens…" }
+                                            }
+                                        }
+                                    } else {
+                                        div { class: "timeline-shell",
+                                            if !in_search && ui.conversation.messages_has_more() {
+                                                div { class: "timeline-toolbar",
+                                                    button {
+                                                        class: "btn small soft",
+                                                        disabled: loading_older(),
+                                                        onclick: {
+                                                            let services = services.clone();
+                                                            move |_| {
+                                                                let Some(chat) = ui.conversation.selected_chat() else { return; };
+                                                                load_older(
+                                                                    services.clone(),
+                                                                    ui,
+                                                                    chat,
+                                                                    ui.conversation.selected_topic(),
+                                                                    loading_older,
+                                                                );
+                                                            }
+                                                        },
+                                                        if loading_older() { "Carregando…" } else { "Carregar mensagens antigas" }
+                                                    }
+                                                    span { class: "hint", "{display_messages.len()} mensagens" }
+                                                }
+                                            }
+                                            if in_search {
+                                                div { class: "timeline-search-label",
+                                                    span { class: "pill accent", "Busca: {message_query}" }
+                                                    span { class: "hint", "{display_messages.len()} resultados" }
+                                                }
+                                            }
+                                            div { class: "timeline-fill",
+                                                MessageTimeline {
+                                                    chat_id: timeline_chat_id,
+                                                    messages: ui.conversation.messages,
+                                                    search_results: ui.conversation.search_results,
+                                                    show_search: search_active,
+                                                    empty_label: if in_search { "Nenhum resultado" } else { "Sem mensagens" },
+                                                    selected: selected_messages(),
+                                                    on_toggle_select: {
+                                                        move |message_id| {
+                                                            let mut current = selected_messages();
+                                                            if let Some(position) =
+                                                                current.iter().position(|id| *id == message_id)
+                                                            {
+                                                                current.remove(position);
+                                                            } else {
+                                                                current.push(message_id);
+                                                            }
+                                                            selected_messages.set(current);
+                                                        }
+                                                    },
+                                                    on_action: on_message_action,
+                                                    on_select_album: move |ids: Vec<i64>| {
+                                                        let mut current = selected_messages();
+                                                        let all_selected =
+                                                            ids.iter().all(|id| current.contains(id));
+                                                        if all_selected {
+                                                            current.retain(|id| !ids.contains(id));
+                                                        } else {
+                                                            for id in ids {
+                                                                if !current.contains(&id) {
+                                                                    current.push(id);
+                                                                }
+                                                            }
+                                                        }
+                                                        selected_messages.set(current);
+                                                    },
+                                                    jump_to,
+                                                    on_jump_to_message: {
+                                                        let services = services.clone();
+                                                        let conversation_epoch =
+                                                            conversation_epoch_timeline.clone();
+                                                        move |message_id| {
+                                                            jump_to_message(
+                                                                services.clone(),
+                                                                ui,
+                                                                message_id,
+                                                                jump_to,
+                                                                search_active(),
+                                                                loading_older,
+                                                                conversation_epoch.clone(),
+                                                            );
+                                                        }
+                                                    },
+                                                    on_reach_start: {
+                                                        let services = services.clone();
+                                                        move |_| {
+                                                            if in_search
+                                                                || !ui.conversation.messages_has_more()
+                                                                || loading_older()
+                                                            {
+                                                                return;
+                                                            }
+                                                            let Some(chat) = ui.conversation.selected_chat() else { return; };
+                                                            load_older(
+                                                                services.clone(),
+                                                                ui,
+                                                                chat,
+                                                                ui.conversation.selected_topic(),
+                                                                loading_older,
+                                                            );
+                                                        }
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !selected_messages().is_empty() {
+                                    div { class: "selection-bar",
+                                        div { class: "selection-bar-copy",
+                                            span { class: "pill accent", "{selected_messages().len()} selecionada(s)" }
+                                            span { class: "hint", "Mídias marcadas na conversa." }
+                                        }
+                                        div { class: "selection-bar-actions",
+                                            button {
+                                                class: "btn small primary",
+                                                disabled: selection_duplicate_items.is_empty()
+                                                    || cfg!(target_os = "android"),
+                                                onclick: {
+                                                    let items = selection_duplicate_items.clone();
+                                                    move |_| {
+                                                        if cfg!(target_os = "android") {
+                                                            return;
+                                                        }
+                                                        ui.transfers.duplicate_search.set(Some(items.clone()));
+                                                    }
+                                                },
+                                                "Procurar no sistema"
+                                            }
+                                            button {
+                                                class: "btn small ghost",
+                                                onclick: move |_| selected_messages.set(Vec::new()),
+                                                "Limpar"
+                                            }
+                                        }
+                                    }
+                                }
+
+                                MessageComposer {
+                                    input: ComposerInput {
+                                        text: composer,
+                                        sending,
+                                        error: composer_error,
+                                    },
+                                    disabled: composer_disabled,
+                                    media_disabled,
+                                    topic_closed,
                                 }
                             } else {
-                                GlobalSearchResults {
-                                    query: message_query(),
-                                    results: global_search_results,
-                                    has_more: !global_offset().is_empty(),
-                                    loading_more: global_loading_more(),
-                                    on_open: {
-                                        let services = services.clone();
-                                        move |item: TdlibGlobalSearchMessage| {
-                                            let services = services.clone();
-                                            let chat_id = item.chat_id.clone();
-                                            let topic_id = item.message.topic_id;
-                                            let topic_kind = item.message.topic_kind.clone();
-                                            let message_id = item.message.id;
-                                            search_active.set(false);
-                                            message_query.set(String::new());
-                                            global_results.set(Vec::new());
-                                            global_offset.set(String::new());
-                                            global_loading_more.set(false);
-                                            ui.conversation.search_error.set(None);
-                                            ui.conversation.search_loading.set(false);
-                                            spawn(async move {
-                                                // Resolve the real chat so a result outside
-                                                // the loaded list still gets a working
-                                                // composer and the correct capabilities.
-                                                let chat = match chat_id.parse::<i64>() {
-                                                    Ok(id) => services
-                                                        .telegram
-                                                        .get_chat(id)
-                                                        .await
-                                                        .unwrap_or_else(|_| {
-                                                            chat_from_global_result(&item)
-                                                        }),
-                                                    Err(_) => chat_from_global_result(&item),
-                                                };
-                                                chat_list::open_chat(services.clone(), ui, chat);
-                                                let topic = topic_id.map(|id| {
-                                                    let kind = topic_kind
-                                                        .clone()
-                                                        .unwrap_or_else(|| "forum".to_string());
-                                                    TdlibForumTopicInfo {
-                                                        id,
-                                                        title: search_topic_title(&kind).to_string(),
-                                                        kind,
-                                                        is_closed: false,
-                                                        is_pinned: false,
-                                                        unread_count: 0,
-                                                    }
-                                                });
-                                                ui.conversation.selected_topic.set(topic);
-                                                pending_search_jump.set(Some(PendingSearchJump {
-                                                    chat_id,
-                                                    topic_id,
-                                                    topic_kind,
-                                                    message_id,
-                                                }));
-                                            });
+                                div { class: "empty-state",
+                                    div { class: "empty-card",
+                                        div { class: "empty-icon",
+                                            Icon { name: IconName::BrandTelegram, size: 24, class: "icon" }
                                         }
-                                    },
-                                    on_load_more: {
-                                        let services = services.clone();
-                                        move |_| {
-                                            run_global_search_more(
-                                                services.clone(),
-                                                ui,
-                                                global_results,
-                                                global_offset,
-                                                global_loading_more,
-                                                message_query(),
-                                                SearchWatch {
-                                                    query: message_query,
-                                                    epoch: search_epoch,
-                                                    global: global_search,
-                                                },
-                                            );
-                                        }
-                                    },
+                                        h2 { "Selecione uma conversa" }
+                                        p { "Escolha qualquer conversa ou galeria à esquerda para ler mensagens e mídias." }
+                                    }
                                 }
                             }
-                        } else if active_loading && display_messages.is_empty() {
-                            div { class: "timeline-loading",
-                                div { class: "spinner" }
-                                span {
-                                    if in_search { "Buscando mensagens..." } else { "Carregando mensagens..." }
+                        }
+                    },
+                }
+            }
+
+            if drawer_open {
+                aside { class: "drawer-pane", aria_label: "Painel contextual",
+                    header { class: "drawer-header",
+                        div { class: "drawer-tabs", role: "tablist",
+                            for item in [
+                                DrawerTab::Queue,
+                                DrawerTab::Media,
+                                DrawerTab::Topics,
+                                DrawerTab::MassDownload,
+                            ] {
+                                button {
+                                    key: "{item.label()}",
+                                    role: "tab",
+                                    aria_selected: "{drawer_tab == item}",
+                                    class: if drawer_tab == item { "drawer-tab active" } else { "drawer-tab" },
+                                    onclick: move |_| ui.shell.drawer_tab.set(item),
+                                    "{item.label()}"
                                 }
                             }
-                        } else {
-                            div { class: "timeline-shell",
-                                if !in_search && ui.conversation.messages_has_more() {
-                                    div { class: "timeline-toolbar",
-                                        button {
-                                            class: "btn small ghost",
-                                            disabled: loading_older(),
-                                            onclick: {
+                        }
+                        button {
+                            class: "icon-button small",
+                            title: "Fechar gaveta (Ctrl+J)",
+                            aria_label: "Fechar gaveta",
+                            onclick: {
+                                let services = services.clone();
+                                move |_| set_drawer_open(&services, ui, false)
+                            },
+                            Icon { name: IconName::Close, size: 15, class: "icon" }
+                        }
+                    }
+
+                    div { class: "drawer-body",
+                        match drawer_tab {
+                            DrawerTab::Queue => rsx! { QuickQueueDrawer {} },
+                            DrawerTab::Media => {
+                                if let Some(target) = user_media_target {
+                                    rsx! {
+                                        MediaPanel {
+                                            panel_id: "user-media-panel".to_string(),
+                                            chat_id: target.chat_id,
+                                            title: "Mídias enviadas".to_string(),
+                                            subtitle: format!("por {}", target.display_name()),
+                                            items: user_media_panel_items,
+                                            loading: user_media_panel_loading,
+                                            error: user_media_panel_error,
+                                            empty_title: "Nenhuma mídia".to_string(),
+                                            empty_message:
+                                                "Não foram encontradas fotos ou vídeos deste usuário."
+                                                    .to_string(),
+                                            group_albums: true,
+                                            bulk_download: true,
+                                            bulk_disabled: user_media_loading_more(),
+                                            on_back_to_all: Some(EventHandler::new(move |_| {
+                                                ui.panels.user_media.set(None);
+                                            })),
+                                            on_close: {
                                                 let services = services.clone();
-                                                move |_| {
-                                                    let Some(chat) = ui.conversation.selected_chat() else { return; };
-                                                    load_older(
-                                                        services.clone(),
-                                                        ui,
-                                                        chat,
-                                                        ui.conversation.selected_topic(),
-                                                        loading_older,
-                                                    );
+                                                move |_| set_drawer_open(&services, ui, false)
+                                            },
+                                            on_open: {
+                                                let target = target.clone();
+                                                move |(item, album): (TdlibSharedMediaItem, Vec<LightboxMedia>)| {
+                                                    let title = if item.sender_name.trim().is_empty() {
+                                                        target.display_name().to_string()
+                                                    } else {
+                                                        item.sender_name.clone()
+                                                    };
+                                                    ui.panels.lightbox.set(Some(LightboxState::from_shared(
+                                                        target.chat_id,
+                                                        &item,
+                                                        title,
+                                                        album,
+                                                    )));
                                                 }
                                             },
-                                            if loading_older() { "Carregando..." } else { "Carregar mensagens antigas" }
                                         }
-                                        span { class: "hint", "{display_messages.len()} mensagens" }
                                     }
-                                }
-                                if in_search {
-                                    div { class: "timeline-search-label",
-                                        span { class: "pill", "Busca: {message_query}" }
-                                        span { class: "hint", "{display_messages.len()} resultados" }
-                                    }
-                                }
-                                div { class: "timeline-fill",
-                                    MessageTimeline {
-                                        chat_id: timeline_chat_id,
-                                        messages: ui.conversation.messages,
-                                        search_results: ui.conversation.search_results,
-                                        show_search: search_active,
-                                        empty_label: if in_search { "Nenhum resultado" } else { "Sem mensagens" },
-                                        selected: selected_messages(),
-                                        on_toggle_select: {
-                                            move |message_id| {
-                                                let mut current = selected_messages();
-                                                if let Some(position) =
-                                                    current.iter().position(|id| *id == message_id)
-                                                {
-                                                    current.remove(position);
-                                                } else {
-                                                    current.push(message_id);
-                                                }
-                                                selected_messages.set(current);
-                                            }
-                                        },
-                                        on_action: on_message_action,
-                                        on_select_album: move |ids: Vec<i64>| {
-                                            let mut current = selected_messages();
-                                            let all_selected =
-                                                ids.iter().all(|id| current.contains(id));
-                                            if all_selected {
-                                                current.retain(|id| !ids.contains(id));
-                                            } else {
-                                                for id in ids {
-                                                    if !current.contains(&id) {
-                                                        current.push(id);
-                                                    }
-                                                }
-                                            }
-                                            selected_messages.set(current);
-                                        },
-                                        jump_to,
-                                        on_jump_to_message: {
-                                            let services = services.clone();
-                                            let conversation_epoch =
-                                                conversation_epoch_timeline.clone();
-                                            move |message_id| {
-                                                jump_to_message(
-                                                    services.clone(),
-                                                    ui,
-                                                    message_id,
-                                                    jump_to,
-                                                    search_active(),
-                                                    loading_older,
-                                                    conversation_epoch.clone(),
-                                                );
-                                            }
-                                        },
-                                        on_reach_start: {
-                                            let services = services.clone();
-                                            move |_| {
-                                                if in_search
-                                                    || !ui.conversation.messages_has_more()
-                                                    || loading_older()
-                                                {
-                                                    return;
-                                                }
-                                                let Some(chat) = ui.conversation.selected_chat() else { return; };
-                                                load_older(
-                                                    services.clone(),
-                                                    ui,
-                                                    chat,
-                                                    ui.conversation.selected_topic(),
-                                                    loading_older,
-                                                );
-                                            }
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !selected_messages().is_empty() {
-                        div { class: "selection-bar",
-                            div { class: "selection-bar-copy",
-                                span { class: "pill", "{selected_messages().len()} selecionada(s)" }
-                                span { class: "hint", "Mídias marcadas na conversa." }
-                            }
-                            div { class: "selection-bar-actions",
-                                button {
-                                    class: "btn small",
-                                    disabled: selection_duplicate_items.is_empty()
-                                        || cfg!(target_os = "android"),
-                                    onclick: {
-                                        let items = selection_duplicate_items.clone();
-                                        move |_| {
-                                            if cfg!(target_os = "android") {
-                                                return;
-                                            }
-                                            ui.transfers.duplicate_search.set(Some(items.clone()));
+                                } else if selected.is_some() {
+                                    rsx! {
+                                        MediaPanel {
+                                            panel_id: "shared-media-panel".to_string(),
+                                            chat_id: timeline_chat_id,
+                                            title: "Mídias da conversa".to_string(),
+                                            subtitle: selected_id
+                                                .as_deref()
+                                                .and_then(|id| ui.conversation.chats().into_iter().find(|chat| chat.id == id))
+                                                .map(|chat| chat.title)
+                                                .unwrap_or_else(|| "Conversa".to_string()),
+                                            items: shared_items(),
+                                            loading: shared_loading(),
+                                            error: shared_error(),
+                                            empty_title: "Nenhuma mídia".to_string(),
+                                            empty_message:
+                                                "Esta conversa ainda não tem fotos ou vídeos disponíveis."
+                                                    .to_string(),
+                                            group_albums: true,
+                                            bulk_download: true,
+                                            bulk_disabled: false,
+                                            on_back_to_all: None,
+                                            on_close: {
+                                                let services = services.clone();
+                                                move |_| set_drawer_open(&services, ui, false)
+                                            },
+                                            on_open: move |(item, album): (TdlibSharedMediaItem, Vec<LightboxMedia>)| {
+                                                ui.panels.lightbox.set(Some(LightboxState::from_shared(
+                                                    timeline_chat_id,
+                                                    &item,
+                                                    item.sender_name.clone(),
+                                                    album,
+                                                )));
+                                            },
                                         }
-                                    },
-                                    "Procurar no sistema"
+                                    }
+                                } else {
+                                    rsx! {
+                                        div { class: "empty-state",
+                                            p { class: "hint", "Selecione uma conversa para explorar suas mídias." }
+                                        }
+                                    }
                                 }
-                                button {
-                                    class: "btn small ghost",
-                                    onclick: move |_| selected_messages.set(Vec::new()),
-                                    "Limpar"
+                            }
+                            DrawerTab::Topics => {
+                                if let Some(chat) = browser_chat {
+                                    rsx! {
+                                        TopicBrowser {
+                                            chat,
+                                            on_close: {
+                                                let services = services.clone();
+                                                move |_| set_drawer_open(&services, ui, false)
+                                            },
+                                        }
+                                    }
+                                } else {
+                                    rsx! {
+                                        div { class: "empty-state",
+                                            p { class: "hint", "Selecione uma conversa para ver seus tópicos." }
+                                        }
+                                    }
+                                }
+                            }
+                            DrawerTab::MassDownload => {
+                                if let Some(chat) = mass_chat {
+                                    rsx! {
+                                        MassDownloadPanel {
+                                            chat,
+                                            topics: mass_topics,
+                                            initial_topic: mass_initial_topic,
+                                            on_close: {
+                                                let services = services.clone();
+                                                move |_| set_drawer_open(&services, ui, false)
+                                            },
+                                        }
+                                    }
+                                } else {
+                                    rsx! {
+                                        div { class: "empty-state",
+                                            p { class: "hint", "Selecione uma conversa ou galeria para baixar em massa." }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-
-                    MessageComposer {
-                        input: ComposerInput {
-                            text: composer,
-                            sending,
-                            error: composer_error,
-                        },
-                        disabled: composer_disabled,
-                        media_disabled,
-                        topic_closed,
-                    }
-
-                } else {
-                    div { class: "empty-state",
-                        div { class: "empty-card",
-                            div { class: "empty-icon", "TG" }
-                            h2 { "Escolha uma conversa" }
-                            p { "As conversas são carregadas do TDLib e guardadas no SQLite local." }
-                        }
-                    }
                 }
             }
 
-            if shared_open() {
-                MediaPanel {
-                    panel_id: "shared-media-panel".to_string(),
-                    chat_id: timeline_chat_id,
-                    title: "Mídia compartilhada".to_string(),
-                    subtitle: selected_id
-                        .as_deref()
-                        .and_then(|id| ui.conversation.chats().into_iter().find(|chat| chat.id == id))
-                        .map(|chat| chat.title)
-                        .unwrap_or_else(|| "Mídia".to_string()),
-                    items: shared_items(),
-                    loading: shared_loading(),
-                    error: shared_error(),
-                    empty_title: "Nenhuma mídia".to_string(),
-                    empty_message:
-                        "Esta conversa ainda não tem fotos ou vídeos em cache no TDLib."
-                            .to_string(),
-                    group_albums: false,
-                    bulk_download: false,
-                    bulk_disabled: false,
-                    on_close: move |_| shared_open.set(false),
-                    on_open: move |(item, album): (TdlibSharedMediaItem, Vec<LightboxMedia>)| {
-                        ui.panels.lightbox.set(Some(LightboxState::from_shared(
-                            timeline_chat_id,
-                            &item,
-                            item.sender_name.clone(),
-                            album,
-                        )));
-                    },
-                }
-            }
-
-            if let Some(target) = user_media_target {
-                MediaPanel {
-                    panel_id: "user-media-panel".to_string(),
-                    chat_id: target.chat_id,
-                    title: "Mídias enviadas".to_string(),
-                    subtitle: format!("por {}", target.display_name()),
-                    items: user_media_panel_items,
-                    loading: user_media_panel_loading,
-                    error: user_media_panel_error,
-                    empty_title: "Nenhuma mídia encontrada".to_string(),
-                    empty_message:
-                        "Não foram encontradas fotos ou vídeos enviados por este usuário."
-                            .to_string(),
-                    group_albums: true,
-                    bulk_download: true,
-                    bulk_disabled: user_media_loading_more(),
-                    on_close: move |_| ui.panels.user_media.set(None),
-                    on_open: {
-                        let target = target.clone();
-                        move |(item, album): (TdlibSharedMediaItem, Vec<LightboxMedia>)| {
-                            let title = if item.sender_name.trim().is_empty() {
-                                target.display_name().to_string()
-                            } else {
-                                item.sender_name.clone()
-                            };
-                            ui.panels.lightbox.set(Some(LightboxState::from_shared(
-                                target.chat_id,
-                                &item,
-                                title,
-                                album,
-                            )));
-                        }
-                    },
-                }
-            }
+            MobileBottomNav {}
 
             if let Some(state) = lightbox_state {
                 MediaLightbox {
@@ -1443,24 +1648,6 @@ fn RealTelegram() -> Element {
                 DuplicateSearchDialog {
                     items,
                     on_close: move |_| ui.transfers.duplicate_search.set(None),
-                }
-            }
-            if ui.conversation.topic_browser_open() {
-                if let Some(chat) = browser_chat {
-                    TopicBrowser {
-                        chat,
-                        on_close: move |_| ui.conversation.topic_browser_open.set(false),
-                    }
-                }
-            }
-            if ui.transfers.mass_download_open() {
-                if let Some(chat) = mass_chat {
-                    MassDownloadPanel {
-                        chat,
-                        topics: mass_topics,
-                        initial_topic: topic.clone(),
-                        on_close: move |_| ui.transfers.mass_download_open.set(false),
-                    }
                 }
             }
         }

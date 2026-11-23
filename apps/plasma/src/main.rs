@@ -130,7 +130,15 @@ fn run() -> Result<(), String> {
             .with_always_on_top(false);
         // The default Dioxus menu bar (Window/Edit/Help) is a native GTK menu
         // that does not belong to the Plasma Hub interface, so it is removed.
-        let config = Config::new().with_window(window).with_menu(None);
+        // Dioxus otherwise forces GDK_BACKEND=x11. On this GNOME/NVIDIA
+        // session that XWayland client is what Mutter drops ("Pipe quebrado").
+        // DMA-BUF stays off so WebKit does not come up blank.
+        #[cfg(target_os = "linux")]
+        prefer_native_wayland();
+        let config = Config::new()
+            .with_window(window)
+            .with_menu(None)
+            .with_disable_dma_buf_on_wayland(false);
 
         dioxus::LaunchBuilder::desktop()
             .with_context(services)
@@ -177,6 +185,25 @@ fn prepare_webview_cache(env: &AppEnv) -> Result<(), String> {
     // Must be set before WebKitGTK is initialized by Dioxus.
     std::env::set_var("XDG_CACHE_HOME", &root);
     Ok(())
+}
+
+/// Keeps the GTK window on the Wayland session instead of XWayland.
+///
+/// Dioxus 0.7 turns off DMA-BUF by also setting `GDK_BACKEND=x11`. Mutter then
+/// logs `WL: error in client communication` and GTK exits with a broken X pipe.
+/// The blank-window workaround only needs the WebKit renderer flag.
+#[cfg(target_os = "linux")]
+fn prefer_native_wayland() {
+    if std::env::var("XDG_SESSION_TYPE").unwrap_or_default() != "wayland" {
+        return;
+    }
+    if std::path::Path::new("/dev/dri").exists() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    if std::env::var_os("GDK_BACKEND").is_some() {
+        std::env::remove_var("GDK_BACKEND");
+    }
+    tracing::info!("WebView staying on native Wayland");
 }
 
 fn run_telegram_smoke(

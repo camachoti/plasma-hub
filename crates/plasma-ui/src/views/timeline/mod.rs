@@ -16,6 +16,7 @@ use crate::state::{
     push_toast, react_to_message, set_if_changed, AppServices, LightboxMedia, ReactionPickerState,
     ToastKind, UiState,
 };
+use crate::theme::{avatar_gradient, avatar_initials, sender_color};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibMessageInfo;
 use std::collections::{HashMap, HashSet};
@@ -165,7 +166,9 @@ const MEASURE_ROWS_SCRIPT: &str = r#"
         if (element && element !== container) bind();
     });
     watcher.observe(document.body, { childList: true, subtree: true });
+    window.__plasmaTimelineMarkAll = markAll;
     window.__plasmaTimelineMeasureCleanup = () => {
+        window.__plasmaTimelineMarkAll = null;
         mutations.disconnect();
         watcher.disconnect();
         window.removeEventListener("resize", markAll);
@@ -309,11 +312,17 @@ pub fn MessageTimeline(
     };
     let items_memo = use_memo(move || group_albums(&source()));
     let mut measured_heights = use_signal(HashMap::<String, f64>::new);
-    // Heights are scoped by chat id in the key, but clearing on switch avoids
-    // carrying hundreds of stale entries across conversations.
+    // Heights are scoped by chat id in the key; also clear and re-measure when
+    // the user switches visual style or density so bubble vs. community rows
+    // resize cleanly in a single frame.
     use_effect(move || {
-        let _ = chat_id;
+        let _ = (chat_id, ui.shell.style(), ui.shell.density());
         measured_heights.set(HashMap::new());
+        spawn(async move {
+            let _ =
+                document::eval("requestAnimationFrame(() => window.__plasmaTimelineMarkAll?.());")
+                    .await;
+        });
     });
     let mut highlighted_message = use_signal(|| None::<i64>);
     // Replies to messages outside the loaded page are fetched by id and kept
@@ -666,73 +675,107 @@ pub fn MessageTimeline(
                                                 }
                                             },
                                             if !message.out {
-                                                div {
-                                                    class: "avatar",
-                                                    oncontextmenu: {
-                                                        let message = message.clone();
-                                                        move |event: Event<MouseData>| {
-                                                            if message.sender_id.trim().is_empty() {
-                                                                return;
-                                                            }
-                                                            event.prevent_default();
-                                                            event.stop_propagation();
-                                                            let point = event.data().client_coordinates();
-                                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
-                                                                point.x,
-                                                                point.y,
-                                                                ContextTarget::User {
-                                                                    chat_id,
-                                                                    sender_id: message.sender_id.clone(),
-                                                                    sender_name: message.sender_name.clone(),
-                                                                },
-                                                            )));
-                                                        }
-                                                    },
-                                                    "{message.sender_name.chars().next().unwrap_or('?')}"
-                                                }
-                                            }
-                                            div { class: "message-bubble",
-                                                if !message.out {
-                                                    div { class: "message-meta",
-                                                        strong {
+                                                {
+                                                    let seed = if message.sender_id.trim().is_empty() {
+                                                        &message.sender_name
+                                                    } else {
+                                                        &message.sender_id
+                                                    };
+                                                    let grad = avatar_gradient(seed);
+                                                    let mono = avatar_initials(&message.sender_name);
+                                                    rsx! {
+                                                        div {
+                                                            class: "avatar",
+                                                            style: "background: {grad};",
                                                             oncontextmenu: {
                                                                 let message = message.clone();
                                                                 move |event: Event<MouseData>| {
-                                                                    if message
-                                                                        .sender_id
-                                                                        .trim()
-                                                                        .is_empty()
-                                                                    {
+                                                                    if message.sender_id.trim().is_empty() {
                                                                         return;
                                                                     }
                                                                     event.prevent_default();
                                                                     event.stop_propagation();
-                                                                    let point = event
-                                                                        .data()
-                                                                        .client_coordinates();
-                                                                    ui.panels.context_menu.set(Some(
-                                                                        ContextMenuState::new(
-                                                                            point.x,
-                                                                            point.y,
-                                                                            ContextTarget::User {
-                                                                                chat_id,
-                                                                                sender_id: message
-                                                                                    .sender_id
-                                                                                    .clone(),
-                                                                                sender_name: message
-                                                                                    .sender_name
-                                                                                    .clone(),
-                                                                            },
-                                                                        ),
-                                                                    ));
+                                                                    let point = event.data().client_coordinates();
+                                                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
+                                                                        point.x,
+                                                                        point.y,
+                                                                        ContextTarget::User {
+                                                                            chat_id,
+                                                                            sender_id: message.sender_id.clone(),
+                                                                            sender_name: message.sender_name.clone(),
+                                                                        },
+                                                                    )));
                                                                 }
                                                             },
-                                                            if message.sender_name.trim().is_empty() {
-                                                                "Mensagem"
-                                                            } else {
-                                                                "{message.sender_name}"
+                                                            "{mono}"
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                div {
+                                                    class: "avatar own-avatar",
+                                                    "V"
+                                                }
+                                            }
+                                            div { class: "message-bubble",
+                                                if !message.out {
+                                                    {
+                                                        let seed = if message.sender_id.trim().is_empty() {
+                                                            &message.sender_name
+                                                        } else {
+                                                            &message.sender_id
+                                                        };
+                                                        let name_color = sender_color(seed);
+                                                        rsx! {
+                                                            div { class: "message-meta",
+                                                                strong {
+                                                                    style: "color: {name_color};",
+                                                                    oncontextmenu: {
+                                                                        let message = message.clone();
+                                                                        move |event: Event<MouseData>| {
+                                                                            if message
+                                                                                .sender_id
+                                                                                .trim()
+                                                                                .is_empty()
+                                                                            {
+                                                                                return;
+                                                                            }
+                                                                            event.prevent_default();
+                                                                            event.stop_propagation();
+                                                                            let point = event
+                                                                                .data()
+                                                                                .client_coordinates();
+                                                                            ui.panels.context_menu.set(Some(
+                                                                                ContextMenuState::new(
+                                                                                    point.x,
+                                                                                    point.y,
+                                                                                    ContextTarget::User {
+                                                                                        chat_id,
+                                                                                        sender_id: message
+                                                                                            .sender_id
+                                                                                            .clone(),
+                                                                                        sender_name: message
+                                                                                            .sender_name
+                                                                                            .clone(),
+                                                                                    },
+                                                                                ),
+                                                                            ));
+                                                                        }
+                                                                    },
+                                                                    if message.sender_name.trim().is_empty() {
+                                                                        "Mensagem"
+                                                                    } else {
+                                                                        "{message.sender_name}"
+                                                                    }
+                                                                }
+                                                                span { class: "msg-inline-time", "{format_timestamp(message.date)}" }
                                                             }
                                                         }
+                                                    }
+                                                } else {
+                                                    div { class: "message-meta own-meta",
+                                                        strong { "Você" }
+                                                        span { class: "msg-inline-time", "{format_timestamp(message.date)}" }
                                                     }
                                                 }
                                                 if let Some((reply_id, reply_sender, reply_text)) = reply_quote {
@@ -918,6 +961,7 @@ pub fn MessageTimeline(
                                         row_class.push_str(" highlight");
                                     }
                                     let columns = if album.len() == 1 { 1 } else { 2 };
+                                    let cell_aspects = album_cell_aspects(&album);
                                     let span_last = album.len() > 2 && album.len() % 2 == 1;
                                     let grid_class = if span_last {
                                         "album-grid span-last"
@@ -953,73 +997,103 @@ pub fn MessageTimeline(
                                                 }
                                             },
                                             if !first.out {
-                                                div {
-                                                    class: "avatar",
-                                                    oncontextmenu: {
-                                                        let first = first.clone();
-                                                        move |event: Event<MouseData>| {
-                                                            if first.sender_id.trim().is_empty() {
-                                                                return;
-                                                            }
-                                                            event.prevent_default();
-                                                            event.stop_propagation();
-                                                            let point = event.data().client_coordinates();
-                                                            ui.panels.context_menu.set(Some(ContextMenuState::new(
-                                                                point.x,
-                                                                point.y,
-                                                                ContextTarget::User {
-                                                                    chat_id,
-                                                                    sender_id: first.sender_id.clone(),
-                                                                    sender_name: first.sender_name.clone(),
-                                                                },
-                                                            )));
+                                                {
+                                                    let seed = if first.sender_id.trim().is_empty() {
+                                                        &first.sender_name
+                                                    } else {
+                                                        &first.sender_id
+                                                    };
+                                                    let grad = avatar_gradient(seed);
+                                                    let mono = avatar_initials(&first.sender_name);
+                                                    rsx! {
+                                                        div {
+                                                            class: "avatar",
+                                                            style: "background: {grad};",
+                                                            oncontextmenu: {
+                                                                let first = first.clone();
+                                                                move |event: Event<MouseData>| {
+                                                                    if first.sender_id.trim().is_empty() {
+                                                                        return;
+                                                                    }
+                                                                    event.prevent_default();
+                                                                    event.stop_propagation();
+                                                                    let point = event.data().client_coordinates();
+                                                                    ui.panels.context_menu.set(Some(ContextMenuState::new(
+                                                                        point.x,
+                                                                        point.y,
+                                                                        ContextTarget::User {
+                                                                            chat_id,
+                                                                            sender_id: first.sender_id.clone(),
+                                                                            sender_name: first.sender_name.clone(),
+                                                                        },
+                                                                    )));
+                                                                }
+                                                            },
+                                                            "{mono}"
                                                         }
-                                                    },
-                                                    "{first.sender_name.chars().next().unwrap_or('?')}"
+                                                    }
+                                                }
+                                            } else {
+                                                div {
+                                                    class: "avatar own-avatar",
+                                                    "V"
                                                 }
                                             }
                                             div { class: "message-bubble album-bubble",
                                                 div { class: "message-meta",
                                                     if !first.out {
-                                                        strong {
-                                                            oncontextmenu: {
-                                                                let first = first.clone();
-                                                                move |event: Event<MouseData>| {
-                                                                    if first
-                                                                        .sender_id
-                                                                        .trim()
-                                                                        .is_empty()
-                                                                    {
-                                                                        return;
-                                                                    }
-                                                                    event.prevent_default();
-                                                                    event.stop_propagation();
-                                                                    let point = event
-                                                                        .data()
-                                                                        .client_coordinates();
-                                                                    ui.panels.context_menu.set(Some(
-                                                                        ContextMenuState::new(
-                                                                            point.x,
-                                                                            point.y,
-                                                                            ContextTarget::User {
-                                                                                chat_id,
-                                                                                sender_id: first
-                                                                                    .sender_id
-                                                                                    .clone(),
-                                                                                sender_name: first
-                                                                                    .sender_name
-                                                                                    .clone(),
-                                                                            },
-                                                                        ),
-                                                                    ));
-                                                                }
-                                                            },
-                                                            if first.sender_name.trim().is_empty() {
-                                                                "Mensagem"
+                                                        {
+                                                            let seed = if first.sender_id.trim().is_empty() {
+                                                                &first.sender_name
                                                             } else {
-                                                                "{first.sender_name}"
+                                                                &first.sender_id
+                                                            };
+                                                            let name_color = sender_color(seed);
+                                                            rsx! {
+                                                                strong {
+                                                                    style: "color: {name_color};",
+                                                                    oncontextmenu: {
+                                                                        let first = first.clone();
+                                                                        move |event: Event<MouseData>| {
+                                                                            if first
+                                                                                .sender_id
+                                                                                .trim()
+                                                                                .is_empty()
+                                                                            {
+                                                                                return;
+                                                                            }
+                                                                            event.prevent_default();
+                                                                            event.stop_propagation();
+                                                                            let point = event
+                                                                                .data()
+                                                                                .client_coordinates();
+                                                                            ui.panels.context_menu.set(Some(
+                                                                                ContextMenuState::new(
+                                                                                    point.x,
+                                                                                    point.y,
+                                                                                    ContextTarget::User {
+                                                                                        chat_id,
+                                                                                        sender_id: first
+                                                                                            .sender_id
+                                                                                            .clone(),
+                                                                                        sender_name: first
+                                                                                            .sender_name
+                                                                                            .clone(),
+                                                                                    },
+                                                                                ),
+                                                                            ));
+                                                                        }
+                                                                    },
+                                                                    if first.sender_name.trim().is_empty() {
+                                                                        "Mensagem"
+                                                                    } else {
+                                                                        "{first.sender_name}"
+                                                                    }
+                                                                }
                                                             }
                                                         }
+                                                    } else {
+                                                        strong { class: "own-meta", "Você" }
                                                     }
                                                     span { class: "pill", "álbum · {count}" }
                                                 }
@@ -1031,7 +1105,7 @@ pub fn MessageTimeline(
                                                 div {
                                                     class: "{grid_class}",
                                                     style: "--album-cols: {columns};",
-                                                    for media in album.iter().cloned() {
+                                                    for (index, media) in album.iter().cloned().enumerate() {
                                                         {
                                                             let media_id = media.id;
                                                             let is_selected = selected.contains(&media_id);
@@ -1040,12 +1114,19 @@ pub fn MessageTimeline(
                                                             } else {
                                                                 "album-cell"
                                                             };
+                                                            let aspect = cell_aspects
+                                                                .get(index)
+                                                                .copied()
+                                                                .unwrap_or(1.52);
+                                                            let cell_style =
+                                                                format!("--album-aspect: {aspect:.3};");
                                                             let anchor_id = media_id;
                                                             let context_album = album.clone();
                                                             rsx! {
                                                                 div {
                                                                     key: "{media_id}",
                                                                     class: "{cell_class}",
+                                                                    style: "{cell_style}",
                                                                     oncontextmenu: {
                                                                         let context_album = context_album.clone();
                                                                         move |event: Event<MouseData>| {
@@ -1198,6 +1279,8 @@ mod tests {
             grouped_id: None,
             video_duration: None,
             media_size: None,
+            media_width: None,
+            media_height: None,
             thumbnail_path: None,
             is_deleted: false,
             reactions: Vec::new(),
@@ -1366,6 +1449,23 @@ mod tests {
         }]);
         assert!(estimate_item_height(&three) > estimate_item_height(&two));
         assert!(estimate_item_height(&caption) > estimate_item_height(&three));
+    }
+
+    #[test]
+    fn portrait_albums_are_taller_than_landscape_albums() {
+        let mut portrait = photo(1, "7");
+        portrait.media_width = Some(900);
+        portrait.media_height = Some(1600);
+        let mut second = portrait.clone();
+        second.id = 2;
+        let mut landscape = photo(3, "8");
+        landscape.media_width = Some(1600);
+        landscape.media_height = Some(900);
+        let mut landscape_next = landscape.clone();
+        landscape_next.id = 4;
+        let portrait_album = TimelineItem::Album(vec![portrait, second]);
+        let landscape_album = TimelineItem::Album(vec![landscape, landscape_next]);
+        assert!(estimate_item_height(&portrait_album) > estimate_item_height(&landscape_album));
     }
 
     #[test]

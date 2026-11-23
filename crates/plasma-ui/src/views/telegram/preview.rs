@@ -1,108 +1,132 @@
-//! Local preview shown before Telegram is ready.
+//! Local preview components shown when browsing without an authenticated TDLib session.
 
+use super::chat_column::SidebarFooterBar;
 use crate::icons::{Icon, IconName};
-use crate::state::{push_toast, ToastKind, UiState};
+use crate::state::{open_drawer_tab, push_toast, AppServices, DrawerTab, Tab, ToastKind, UiState};
+use crate::theme::{avatar_gradient, avatar_initials};
 use crate::views::spike::VirtualTimeline;
 use dioxus::prelude::*;
 
-/* ------------------------------------------------------------------------- */
-/* Preview before login                                                      */
-/* ------------------------------------------------------------------------- */
-
 #[derive(Clone, Copy)]
 pub(super) struct PreviewChat {
-    name: &'static str,
-    preview: &'static str,
-    time: &'static str,
-    unread: u32,
-    tone: &'static str,
+    pub(super) name: &'static str,
+    pub(super) preview: &'static str,
+    pub(super) time: &'static str,
+    pub(super) unread: u32,
 }
 
-pub(super) const PREVIEW_CHATS: [PreviewChat; 6] = [
+pub(super) const PREVIEW_CHATS: [PreviewChat; 5] = [
     PreviewChat {
         name: "Plasma Hub",
-        preview: "A migração para Rust começou 🚀",
+        preview: "Bem-vindo ao novo mensageiro multi-estilo ✨",
         time: "agora",
-        unread: 3,
-        tone: "P",
+        unread: 2,
     },
     PreviewChat {
-        name: "Design System",
-        preview: "Paletas, densidade e tokens prontos.",
-        time: "09:42",
+        name: "Design & Mídia",
+        preview: "🖼 Teste os 4 estilos visuais em Ajustes",
+        time: "14:20",
         unread: 0,
-        tone: "D",
     },
     PreviewChat {
-        name: "Android",
-        preview: "NDK 27 e target aarch64 validados.",
+        name: "Central de Downloads",
+        preview: "🎬 Baixe vídeos e álbuns sem sair da conversa",
         time: "ontem",
         unread: 1,
-        tone: "A",
     },
     PreviewChat {
-        name: "Rust Rewrite",
-        preview: "Fase 3: TDLib, timeline e cache.",
-        time: "ontem",
-        unread: 0,
-        tone: "R",
-    },
-    PreviewChat {
-        name: "Downloads",
-        preview: "Fila, retry e histórico na fase 5.",
+        name: "Galerias X / Twitter",
+        preview: "Siga perfis do X como galerias sincronizadas",
         time: "seg",
         unread: 0,
-        tone: "↓",
     },
     PreviewChat {
-        name: "Twitter / X",
-        preview: "Cookies continuam em disco.",
+        name: "Virtualização 5k",
+        preview: "Timeline fluida com alturas medidas em tempo real",
         time: "seg",
         unread: 0,
-        tone: "X",
     },
 ];
 
 #[component]
-pub(super) fn PreviewTelegram() -> Element {
+pub(super) fn PreviewSidebar(mut selected: Signal<usize>) -> Element {
+    let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
-    let mut selected = use_signal(|| 0usize);
-    let mut show_list = use_signal(|| true);
-    let chat = PREVIEW_CHATS[selected()];
-    let layout_class = if show_list() {
-        "telegram-layout mobile-list"
+    let active_tab = ui.shell.tab();
+    let downloads = ui.transfers.downloads();
+    let active_downloads = downloads.iter().filter(|item| item.is_active()).count();
+    let failed_downloads = downloads.iter().any(|item| item.status == "failed");
+    let sidebar_class = if ui.shell.sidebar_open() {
+        "sidebar-pane"
     } else {
-        "telegram-layout mobile-chat"
+        "sidebar-pane collapsed"
     };
 
     rsx! {
-        div { class: "{layout_class}",
-            aside { class: "chat-list-panel",
-                header { class: "chat-list-header",
-                    div { class: "chat-list-title-row",
-                        h2 { "Conversas" }
-                        span { class: "pill", "prévia" }
+        aside { class: "{sidebar_class}", aria_label: "Conversas de demonstração",
+            div { class: "sidebar-top",
+                div { class: "sidebar-search-bar",
+                    div { class: "pill-search",
+                        Icon { name: IconName::Search, size: 16, class: "icon" }
+                        input {
+                            r#type: "search",
+                            placeholder: "Modo sem conta…",
+                            disabled: true,
+                        }
+                    }
+                    button {
+                        class: "icon-button accent",
+                        title: "Importar link",
+                        onclick: move |_| {
+                            ui.shell.tab.set(Tab::Downloads);
+                            ui.conversation.mobile_show_list.set(false);
+                        },
+                        Icon { name: IconName::Plus, size: 17, class: "icon" }
                     }
                 }
-                div { class: "chat-list",
-                    for (index, item) in PREVIEW_CHATS.iter().enumerate() {
-                        button {
-                            key: "{item.name}",
-                            class: if selected() == index { "chat-row active" } else { "chat-row" },
-                            onclick: move |_| {
-                                selected.set(index);
-                                show_list.set(false);
-                                ui.shell.show_spike.set(false);
-                            },
-                            div { class: "chat-avatar", "{item.tone}" }
-                            div { class: "chat-copy",
-                                span { class: "chat-name", "{item.name}" }
-                                span { class: "chat-preview", "{item.preview}" }
-                            }
-                            div { class: "chat-meta",
-                                span { class: "chat-time", "{item.time}" }
-                                if item.unread > 0 {
-                                    span { class: "unread", "{item.unread}" }
+            }
+
+            div { class: "sidebar-preview-banner",
+                span { "Prévia sem login" }
+                button {
+                    class: "btn small primary",
+                    onclick: move |_| ui.shell.logged_in.set(false),
+                    "Conectar"
+                }
+            }
+
+            div { class: "chat-list",
+                for (index, item) in PREVIEW_CHATS.iter().enumerate() {
+                    {
+                        let gradient = avatar_gradient(item.name);
+                        let initials = avatar_initials(item.name);
+                        let is_active = active_tab == Tab::Telegram && selected() == index;
+                        rsx! {
+                            button {
+                                key: "{item.name}",
+                                class: if is_active { "chat-row active" } else { "chat-row" },
+                                onclick: move |_| {
+                                    selected.set(index);
+                                    ui.shell.tab.set(Tab::Telegram);
+                                    ui.conversation.mobile_show_list.set(false);
+                                    ui.shell.show_spike.set(index == 4);
+                                },
+                                div {
+                                    class: "chat-avatar",
+                                    style: "background: {gradient};",
+                                    span { "{initials}" }
+                                }
+                                div { class: "chat-copy",
+                                    div { class: "chat-name-row",
+                                        span { class: "chat-name", "{item.name}" }
+                                        span { class: "chat-time", "{item.time}" }
+                                    }
+                                    div { class: "chat-preview-row",
+                                        span { class: "chat-preview", "{item.preview}" }
+                                        if item.unread > 0 {
+                                            span { class: "unread", "{item.unread}" }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -110,94 +134,129 @@ pub(super) fn PreviewTelegram() -> Element {
                 }
             }
 
-            main { class: "chat-main",
+            SidebarFooterBar {
+                active_downloads,
+                failed_downloads,
+                on_open_queue: {
+                    let services = services.clone();
+                    move |_| open_drawer_tab(&services, ui, DrawerTab::Queue)
+                },
+            }
+        }
+    }
+}
+
+#[component]
+pub(super) fn PreviewStage(selected: Signal<usize>) -> Element {
+    let services = use_context::<AppServices>();
+    let mut ui = use_context::<UiState>();
+    let chat = PREVIEW_CHATS[selected().min(PREVIEW_CHATS.len() - 1)];
+    let gradient = avatar_gradient(chat.name);
+    let initials = avatar_initials(chat.name);
+
+    rsx! {
+        div { class: "chat-main",
+            div { class: "chat-header-wrap",
                 header { class: "chat-header",
                     div { class: "chat-header-title",
                         button {
-                            class: "mobile-nav-back",
-                            title: "Voltar para a lista de chats",
-                            aria_label: "Voltar para a lista de chats",
-                            onclick: move |_| show_list.set(true),
+                            class: "icon-button mobile-nav-back",
+                            title: "Voltar para conversas",
+                            aria_label: "Voltar para conversas",
+                            onclick: move |_| ui.conversation.mobile_show_list.set(true),
                             Icon { name: IconName::ChevronLeft, size: 18, class: "icon" }
+                        }
+                        if !ui.shell.sidebar_open() {
+                            button {
+                                class: "icon-button",
+                                title: "Mostrar lista de conversas (Ctrl+B)",
+                                aria_label: "Mostrar lista de conversas",
+                                onclick: move |_| ui.shell.sidebar_open.set(true),
+                                Icon { name: IconName::LayoutSidebar, size: 18, class: "icon" }
+                            }
+                        }
+                        div {
+                            class: "chat-header-avatar",
+                            style: "background: {gradient};",
+                            "{initials}"
                         }
                         div { class: "chat-header-copy",
                             strong { "{chat.name}" }
-                            span { "Prévia local · entre para carregar suas conversas" }
+                            span { "Modo demonstração · Conecte sua conta para sincronizar chats" }
                         }
                     }
-                    div { class: "topbar-actions",
+                    div { class: "chat-header-actions",
                         button {
-                            class: "btn small ghost",
+                            class: "btn small soft",
                             onclick: move |_| {
                                 let next = !ui.shell.show_spike();
                                 ui.shell.show_spike.set(next);
                                 if next {
                                     push_toast(
                                         ui.shell.toasts,
-                                        "Spike: 5.000 mensagens com alturas variáveis.",
+                                        "Demonstrando 5.000 mensagens virtualizadas.",
                                         ToastKind::Info,
                                     );
                                 }
                             },
-                            if ui.shell.show_spike() { "Fechar spike" } else { "Spike 5k" }
-                        }
-                        button {
-                            class: "btn small ghost",
-                            onclick: move |_| {
-                                let next = ui.conversation.telegram_tick().wrapping_add(1);
-                                ui.conversation.telegram_tick.set(next);
-                                ui.shell.logged_in.set(false);
-                            },
-                            "Entrar"
+                            if ui.shell.show_spike() { "Ver resumo" } else { "Testar 5k msgs" }
                         }
                         button {
                             class: "btn small primary",
-                            onclick: move |_| push_toast(
-                                ui.shell.toasts,
-                                "Composer, envio e mídia entram na fase 4.",
-                                ToastKind::Info,
-                            ),
-                            "Nova mensagem"
+                            onclick: move |_| ui.shell.logged_in.set(false),
+                            "Conectar Telegram"
+                        }
+                        button {
+                            class: if ui.shell.drawer_open() { "icon-button active" } else { "icon-button" },
+                            title: "Alternar gaveta lateral (Ctrl+J)",
+                            aria_label: "Alternar gaveta lateral",
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    let next = !ui.shell.drawer_open();
+                                    crate::state::set_drawer_open(&services, ui, next);
+                                }
+                            },
+                            Icon { name: IconName::LayoutSidebarRight, size: 18, class: "icon" }
                         }
                     }
                 }
-                div { class: "chat-body",
-                    if ui.shell.show_spike() {
-                        VirtualTimeline {}
-                    } else {
-                        div { class: "empty-state",
-                            div { class: "empty-card",
-                                div { class: "empty-icon", "P" },
-                                h2 { "{chat.name}" }
-                                p {
-                                    "Esta é a prévia da interface Rust. Entre com o Telegram para \
-                                     carregar conversas, tópicos, busca e timeline reais."
+            }
+
+            div { class: "chat-body",
+                if ui.shell.show_spike() {
+                    VirtualTimeline {}
+                } else {
+                    div { class: "empty-state",
+                        div { class: "empty-card",
+                            div { class: "empty-icon",
+                                Icon { name: IconName::BrandTelegram, size: 24, class: "icon" }
+                            }
+                            h2 { "{chat.name}" }
+                            p {
+                                "Você está navegando sem conta conectada. Os downloads universais \
+                                 e o analisador nativo do X/Twitter já estão 100% funcionais."
+                            }
+                            div { class: "mock-messages",
+                                div { class: "mock-message",
+                                    strong { "Helena · 14:18" }
+                                    p { "Você pode alternar entre os 4 estilos visuais em Ajustes a qualquer momento." }
                                 }
-                                div { class: "mock-messages",
-                                    div { class: "mock-message",
-                                        strong { "Ana" }
-                                        p { "O backend já está em crates separados e o Tauri continua funcionando." }
-                                    }
-                                    div { class: "mock-message",
-                                        strong { "Bruno" }
-                                        p { "A timeline real usa virtualização e cache SQLite, sem mudar o app React." }
-                                    }
-                                    div { class: "mock-message own",
-                                        strong { "Você" }
-                                        p { "O shell Rust abre, autentica no TDLib e lê mensagens." }
-                                    }
+                                div { class: "mock-message own",
+                                    strong { "Você · 14:20" }
+                                    p { "E acompanhar a fila de downloads na gaveta à direita sem sair da conversa!" }
                                 }
-                                div { class: "login-actions",
-                                    button {
-                                        class: "btn primary",
-                                        onclick: move |_| ui.shell.logged_in.set(false),
-                                        "Entrar com Telegram"
-                                    }
-                                    button {
-                                        class: "btn ghost",
-                                        onclick: move |_| ui.shell.show_spike.set(true),
-                                        "Abrir spike de virtualização"
-                                    }
+                            }
+                            div { class: "login-actions",
+                                button {
+                                    class: "btn primary",
+                                    onclick: move |_| ui.shell.logged_in.set(false),
+                                    "Entrar no Telegram"
+                                }
+                                button {
+                                    class: "btn ghost",
+                                    onclick: move |_| ui.shell.tab.set(Tab::Settings),
+                                    "Escolher Estilo Visual"
                                 }
                             }
                         }

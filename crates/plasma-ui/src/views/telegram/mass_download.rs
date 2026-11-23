@@ -1,5 +1,6 @@
 //! Mass download panel for one chat or topic.
 
+use crate::icons::{Icon, IconName};
 use crate::state::{AppServices, MassDownloadProgress, UiState};
 use crate::views::select::{Select, SelectOption};
 use dioxus::prelude::*;
@@ -41,7 +42,10 @@ pub(super) fn MassDownloadPanel(
         .as_ref()
         .map(|topic| topic.id.to_string())
         .unwrap_or_else(|| "all".to_string());
-    let mut selected_topic_id = use_signal(|| initial_topic_id);
+    let mut selected_topic_id = use_signal(|| initial_topic_id.clone());
+    use_effect(use_reactive!(|initial_topic_id| {
+        selected_topic_id.set(initial_topic_id);
+    }));
     let mut split_by_user = use_signal(|| false);
     let mut split_by_album = use_signal(|| false);
     let mut album_split_mode = use_signal(|| "separator".to_string());
@@ -61,10 +65,6 @@ pub(super) fn MassDownloadPanel(
         }));
         options
     };
-    let album_mode_options = vec![
-        SelectOption::new("separator", "Separador"),
-        SelectOption::new("comment", "Comentário"),
-    ];
 
     let running = ui.transfers.mass_download_running();
     let stopping = ui.transfers.mass_download_stopping();
@@ -189,190 +189,254 @@ pub(super) fn MassDownloadPanel(
         });
     };
 
+    let scanning = progress
+        .as_ref()
+        .is_some_and(|progress| progress.is_scanning);
     let percent = progress
         .as_ref()
         .filter(|progress| !progress.is_scanning && progress.total > 0)
         .map(|progress| (progress.downloaded / progress.total as f64 * 100.0).clamp(0.0, 100.0))
         .unwrap_or(0.0);
-    let bar_width = if progress
-        .as_ref()
-        .is_some_and(|progress| progress.is_scanning)
-    {
-        100.0
+    let percent_label = format!("{percent:.0}%");
+    let bar_style = if scanning {
+        String::new()
     } else {
-        percent
+        format!("width: {percent:.1}%")
     };
+    let folder_path = folder();
+    let (folder_name, folder_detail) = folder_caption(&folder_path);
+    let folder_empty = folder_path.trim().is_empty();
 
+    let _ = &on_close;
     rsx! {
-        div {
-            class: "mass-download-backdrop",
-            onclick: move |_| on_close.call(()),
-            section {
-                class: "mass-download-panel",
-                onclick: move |event| event.stop_propagation(),
-                header { class: "mass-download-header",
-                    div {
-                        strong { "Download em massa" }
-                        span { class: "hint", "{chat.title}" }
-                    }
-                    button {
-                        class: "btn small ghost",
-                        onclick: move |_| on_close.call(()),
-                        "Fechar"
-                    }
+        section {
+            class: "mass-panel-docked",
+            header { class: "mass-panel-header",
+                div { class: "mass-panel-mark",
+                    Icon { name: IconName::CloudDownload, size: 18, class: "icon" }
                 }
-                div { class: "mass-download-body",
-                    if let Some(message) = panel_error() {
-                        p { class: "error-banner", "{message}" }
-                    }
-                    label { class: "mass-download-field",
-                        span { "Pasta de destino" }
-                        div { class: "mass-download-folder-row",
-                            input {
-                                class: "download-input",
-                                readonly: true,
-                                value: "{folder}",
-                                placeholder: "Escolha uma pasta...",
+                div { class: "mass-panel-title",
+                    strong { "Download em massa" }
+                    p { class: "hint", "{chat.title}" }
+                }
+            }
+            div { class: "mass-panel-scroll",
+                if let Some(message) = panel_error() {
+                    p { class: "error-banner", "{message}" }
+                }
+                section { class: "mass-card",
+                    span { class: "mass-card-label", "Pasta de destino" }
+                    div { class: "mass-folder",
+                        span { class: "mass-folder-icon",
+                            Icon { name: IconName::Folder, size: 16, class: "icon" }
+                        }
+                        span { class: "mass-folder-copy",
+                            strong {
+                                class: if folder_empty { "is-empty" } else { "" },
+                                "{folder_name}"
                             }
-                            if cfg!(target_os = "android") {
-                                button {
-                                    class: "btn small ghost",
-                                    disabled: running,
-                                    onclick: choose_folder,
-                                    title: "Usa a pasta Downloads do app",
-                                    "Pasta do app"
-                                }
-                            } else {
-                                button {
-                                    class: "btn small ghost",
-                                    disabled: running,
-                                    onclick: choose_folder,
-                                    "Procurar"
-                                }
-                            }
+                            span { "{folder_detail}" }
                         }
                         if cfg!(target_os = "android") {
-                            span { class: "hint",
-                                "No Android os arquivos vão para a pasta Downloads do app."
-                            }
-                        }
-                    }
-                    if !topics.is_empty() {
-                        label { class: "mass-download-field",
-                            span { "Tópico" }
-                            Select {
-                                value: selected_topic_id(),
-                                options: topic_options.clone(),
-                                placeholder: "Todos os tópicos",
-                                disabled: running,
-                                on_change: move |value| selected_topic_id.set(value),
-                            }
-                        }
-                    }
-                    div { class: "mass-download-options",
-                        label {
-                            input {
-                                r#type: "checkbox",
-                                checked: split_by_user(),
-                                disabled: running,
-                                onchange: move |event| split_by_user.set(event.checked()),
-                            }
-                            span { "Dividir por usuário" }
-                        }
-                        label {
-                            input {
-                                r#type: "checkbox",
-                                checked: split_by_album(),
-                                disabled: running,
-                                onchange: move |event| split_by_album.set(event.checked()),
-                            }
-                            span { "Dividir por álbum" }
-                        }
-                        if split_by_album() {
-                            div { class: "mass-download-album-mode",
-                                Select {
-                                    value: album_split_mode(),
-                                    options: album_mode_options.clone(),
-                                    placeholder: "Modo",
-                                    disabled: running,
-                                    on_change: move |value| album_split_mode.set(value),
-                                }
-                            }
-                        }
-                    }
-                    div { class: "mass-download-actions",
-                        if running {
                             button {
-                                class: "btn primary",
-                                disabled: stopping,
-                                onclick: stop,
-                                if stopping { "Parando..." } else { "Parar download" }
+                                class: "btn small ghost",
+                                disabled: running,
+                                onclick: choose_folder,
+                                title: "Usa a pasta Downloads do app",
+                                "App"
                             }
                         } else {
                             button {
-                                class: "btn primary",
-                                disabled: folder().trim().is_empty(),
-                                onclick: start,
-                                "Iniciar download"
+                                class: "btn small soft",
+                                disabled: running,
+                                onclick: choose_folder,
+                                "Escolher"
+                            }
+                        }
+                    }
+                    if cfg!(target_os = "android") {
+                        span { class: "hint",
+                            "No Android os arquivos vão para a pasta Downloads do app."
+                        }
+                    }
+                }
+                if !topics.is_empty() {
+                    section { class: "mass-card",
+                        span { class: "mass-card-label", "Tópico" }
+                        Select {
+                            value: selected_topic_id(),
+                            options: topic_options.clone(),
+                            placeholder: "Todos os tópicos",
+                            disabled: running,
+                            on_change: move |value| selected_topic_id.set(value),
+                        }
+                    }
+                }
+                section { class: "mass-card mass-options",
+                    span { class: "mass-card-label", "Organização" }
+                    div { class: "mass-toggles",
+                        label {
+                            class: if running { "mass-toggle is-disabled" } else { "mass-toggle" },
+                            span { class: "mass-toggle-copy",
+                                strong { "Por usuário" }
+                                span { "Uma subpasta para cada remetente" }
+                            }
+                            span { class: "mass-switch",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: split_by_user(),
+                                    disabled: running,
+                                    onchange: move |event| split_by_user.set(event.checked()),
+                                }
+                                span { class: "mass-switch-track" }
+                            }
+                        }
+                        label {
+                            class: if running { "mass-toggle is-disabled" } else { "mass-toggle" },
+                            span { class: "mass-toggle-copy",
+                                strong { "Por álbum" }
+                                span { "Separa as mídias de cada álbum" }
+                            }
+                            span { class: "mass-switch",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: split_by_album(),
+                                    disabled: running,
+                                    onchange: move |event| split_by_album.set(event.checked()),
+                                }
+                                span { class: "mass-switch-track" }
+                            }
+                        }
+                    }
+                    if split_by_album() {
+                        div { class: "segmented mass-album-mode",
+                            button {
+                                class: if album_split_mode() == "separator" { "active" } else { "" },
+                                disabled: running,
+                                onclick: move |_| album_split_mode.set("separator".to_string()),
+                                "Separador"
+                            }
+                            button {
+                                class: if album_split_mode() == "comment" { "active" } else { "" },
+                                disabled: running,
+                                onclick: move |_| album_split_mode.set("comment".to_string()),
+                                "Comentário"
                             }
                         }
                     }
                 }
                 if let Some(progress) = progress {
-                    div { class: "mass-download-progress",
-                        div { class: "mass-download-progress-head",
-                            span { "{progress.current_file}" }
-                            strong {
+                    section { class: "mass-card mass-progress",
+                        div { class: "mass-progress-top",
+                            span { class: "hint", "{progress.current_file}" }
+                            strong { class: "mass-progress-count tabular",
                                 if progress.is_scanning {
-                                    "Escaneando..."
+                                    "Escaneando…"
                                 } else {
-                                    "{progress.downloaded.floor()} de {progress.total}"
+                                    "{progress.downloaded.floor()} / {progress.total} · {percent_label}"
                                 }
                             }
                         }
-                        div { class: "download-progress-bar",
+                        div { class: "progress-track",
                             div {
-                                class: if progress.is_scanning { "download-progress-fill scanning" } else { "download-progress-fill" },
-                                style: "width: {bar_width}%",
+                                class: if scanning { "progress-fill indeterminate" } else { "progress-fill" },
+                                style: "{bar_style}",
                             }
                         }
                         if !progress.is_scanning && progress.total > 0 {
-                            div { class: "mass-download-summary",
-                                span { "Baixados: {mass_status_count(&progress, \"completed\")}" }
-                                span { "Já existem: {mass_status_count(&progress, \"skipped\")}" }
-                                span { "Falharam: {mass_status_count(&progress, \"failed\")}" }
-                                span { "Na fila: {mass_status_count(&progress, \"pending\") + mass_status_count(&progress, \"downloading\")}" }
+                            div { class: "downloads-stats",
+                                span { class: "pill good", "OK {mass_status_count(&progress, \"completed\")}" }
+                                span { class: "pill", "Pulados {mass_status_count(&progress, \"skipped\")}" }
+                                if mass_status_count(&progress, "failed") > 0 {
+                                    span { class: "pill failed", "Falhas {mass_status_count(&progress, \"failed\")}" }
+                                }
                             }
                         }
-                        div { class: "mass-download-list",
-                            for item in progress.items.iter().take(500) {
-                                div {
-                                    key: "{item.message_id}",
-                                    class: "mass-download-item {item.status}",
-                                    div { class: "mass-download-item-name",
-                                        span { "{item.name}" }
-                                        if item.size > 0 {
-                                            small { "{format_bytes(item.size)}" }
+                        if !progress.items.is_empty() {
+                            div { class: "mass-items-log",
+                                for item in progress.items.iter().rev().take(500) {
+                                    div {
+                                        key: "{item.message_id}",
+                                        class: mass_item_class(&item.status),
+                                        div { class: "download-row-title",
+                                            strong { "{item.name}" }
+                                            if item.size > 0 {
+                                                span { class: "hint", "{format_bytes(item.size)}" }
+                                            }
                                         }
-                                    }
-                                    span { class: "mass-download-item-status",
-                                        "{mass_status_label(&item.status)}"
-                                        if item.status == "downloading" {
-                                            " {item.progress}%"
+                                        span { class: mass_status_class(&item.status),
+                                            "{mass_status_label(&item.status)}"
+                                            if item.status == "downloading" {
+                                                " {item.progress}%"
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if progress.items.len() > 500 {
-                                p { class: "hint",
-                                    "Mostrando 500 de {progress.items.len()} arquivos."
+                                if progress.items.len() > 500 {
+                                    p { class: "hint",
+                                        "Mostrando os 500 mais recentes de {progress.items.len()} arquivos."
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            div { class: "mass-actions",
+                if running {
+                    button {
+                        class: "btn danger",
+                        disabled: stopping,
+                        onclick: stop,
+                        Icon { name: IconName::Stop, size: 15, class: "icon" }
+                        if stopping { "Parando…" } else { "Parar download" }
+                    }
+                } else {
+                    button {
+                        class: "btn primary",
+                        disabled: folder_empty,
+                        onclick: start,
+                        Icon { name: IconName::Download, size: 16, class: "icon" }
+                        "Iniciar download em massa"
+                    }
+                }
+            }
         }
+    }
+}
+
+fn folder_caption(path: &str) -> (String, String) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return (
+            "Nenhuma pasta escolhida".to_string(),
+            "Escolha onde salvar os arquivos".to_string(),
+        );
+    }
+    let name = trimmed
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(trimmed)
+        .to_string();
+    (name, trimmed.to_string())
+}
+
+fn mass_item_class(status: &str) -> &'static str {
+    match status {
+        "downloading" => "mass-item-row is-active",
+        "failed" => "mass-item-row is-failed",
+        _ => "mass-item-row",
+    }
+}
+
+fn mass_status_class(status: &str) -> &'static str {
+    match status {
+        "completed" => "pill good",
+        "failed" | "stopped" => "pill failed",
+        "downloading" => "pill busy",
+        _ => "pill",
     }
 }
 

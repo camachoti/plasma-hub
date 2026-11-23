@@ -48,6 +48,14 @@ pub enum IconName {
     ChevronRight,
     World,
     WorldCheck,
+    Plus,
+    Sun,
+    Moon,
+    LayoutSidebar,
+    LayoutSidebarRight,
+    Palette,
+    Command,
+    Logout,
 }
 
 impl IconName {
@@ -204,6 +212,36 @@ impl IconName {
                 "M12.5 3a16.997 16.997 0 0 1 2.311 12.001",
                 "M15 19l2 2l4 -4",
             ],
+            IconName::Plus => &["M12 5l0 14", "M5 12l14 0"],
+            IconName::Sun => &[
+                "M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0",
+                "M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7",
+            ],
+            IconName::Moon => &[
+                "M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z",
+            ],
+            IconName::LayoutSidebar => &[
+                "M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z",
+                "M9 4l0 16",
+            ],
+            IconName::LayoutSidebarRight => &[
+                "M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z",
+                "M15 4l0 16",
+            ],
+            IconName::Palette => &[
+                "M12 21a9 9 0 0 1 0 -18c4.97 0 9 3.582 9 8c0 1.06 -.474 2.078 -1.318 2.828c-.844 .75 -1.989 1.172 -3.182 1.172h-2.5a2 2 0 0 0 -1 3.75a1.3 1.3 0 0 1 -1 2.25",
+                "M8.5 10.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+                "M12.5 7.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+                "M16.5 10.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+            ],
+            IconName::Command => &[
+                "M7 9a2 2 0 1 1 2 -2v10a2 2 0 1 1 -2 -2h10a2 2 0 1 1 -2 2v-10a2 2 0 1 1 2 2h-10",
+            ],
+            IconName::Logout => &[
+                "M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2",
+                "M9 12h12l-3 -3",
+                "M18 15l3 -3",
+            ],
         }
     }
 }
@@ -222,6 +260,7 @@ pub fn Icon(name: IconName, size: u32, class: String) -> Element {
             stroke_width: "2",
             stroke_linecap: "round",
             stroke_linejoin: "round",
+            "aria-hidden": "true",
             for path in name.paths() {
                 path { d: "{path}" }
             }

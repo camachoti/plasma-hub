@@ -720,19 +720,26 @@ pub(super) fn MessageComposer(
     let can_send = !text().trim().is_empty();
 
     rsx! {
-        div { class: "composer",
+        div { class: "composer-shell",
             if let Some(reply) = ui.panels.reply_to() {
                 if !disabled {
-                    div { class: "reply-banner",
-                        div {
-                            span { class: "hint", "Respondendo a" }
-                            strong { " {reply.sender_name}" }
-                            p { "{reply.text}" }
+                    div { class: "composer-reply-banner",
+                        div { class: "composer-reply-copy",
+                            strong { "Respondendo a {reply.sender_name}" }
+                            span {
+                                if reply.text.trim().is_empty() {
+                                    "Mídia"
+                                } else {
+                                    "{reply.text}"
+                                }
+                            }
                         }
                         button {
-                            class: "btn small ghost",
+                            class: "icon-button small",
+                            title: "Cancelar resposta",
+                            aria_label: "Cancelar resposta",
                             onclick: move |_| ui.panels.reply_to.set(None),
-                            "Cancelar"
+                            Icon { name: IconName::Close, size: 15, class: "icon" }
                         }
                     }
                 }
@@ -742,26 +749,53 @@ pub(super) fn MessageComposer(
             }
             if disabled {
                 div { class: "composer-readonly",
-                    span { class: "composer-readonly-icon",
-                        Icon { name: IconName::Info, size: 14, class: "icon" }
-                    }
+                    Icon { name: IconName::Info, size: 15, class: "icon" }
                     span {
                         if topic_closed {
                             "Este tópico está fechado."
                         } else {
-                            "Você não pode enviar mensagens nesta conversa."
+                            "Somente leitura nesta conversa."
                         }
                     }
                 }
             } else {
-                if media_disabled {
-                    p { class: "composer-warning", "Envio de mídia indisponível nesta conversa." }
-                }
-                div { class: "composer-row",
+                div { class: "composer-capsule",
+                    button {
+                        class: "icon-button",
+                        disabled: media_disabled || sending(),
+                        title: if media_disabled {
+                            "Envio de mídia indisponível nesta conversa"
+                        } else {
+                            "Anexar foto ou vídeo"
+                        },
+                        aria_label: "Anexar foto ou vídeo",
+                        onclick: {
+                            let services = services.clone();
+                            move |_| {
+                                let services = services.clone();
+                                spawn(async move {
+                                    let Some(path) = pick_media_file().await else {
+                                        return;
+                                    };
+                                    send_media_file(
+                                        services,
+                                        ui,
+                                        path.to_string_lossy().to_string(),
+                                        text,
+                                        sending,
+                                        error,
+                                        ui.panels.reply_to,
+                                    );
+                                });
+                            }
+                        },
+                        Icon { name: IconName::Paperclip, size: 19, class: "icon" }
+                    }
                     textarea {
                         class: "composer-input",
                         rows: "1",
-                        placeholder: "Escreva uma mensagem...",
+                        placeholder: "Mensagem…",
+                        aria_label: "Escrever mensagem",
                         value: "{text}",
                         oninput: move |event| text.set(event.value()),
                         onkeydown: {
@@ -785,67 +819,31 @@ pub(super) fn MessageComposer(
                             }
                         },
                     }
-                    div { class: "composer-actions",
-                        button {
-                            class: "btn small ghost composer-icon-button",
-                            disabled: media_disabled || sending(),
-                            title: "Anexar mídia",
-                            aria_label: "Anexar mídia",
-                            onclick: {
-                                let services = services.clone();
-                                move |_| {
-                                    let services = services.clone();
-                                    spawn(async move {
-                                        let Some(path) = pick_media_file().await else {
-                                            return;
-                                        };
-                                        send_media_file(
-                                            services,
-                                            ui,
-                                            path.to_string_lossy().to_string(),
-                                            text,
-                                            sending,
-                                            error,
-                                            ui.panels.reply_to,
-                                        );
-                                    });
-                                }
-                            },
-                            Icon { name: IconName::Paperclip, size: 18, class: "icon" }
-                        }
-                        button {
-                            class: "btn primary composer-icon-button composer-send-button",
-                            disabled: sending() || !can_send,
-                            title: if sending() {
-                                "Enviando..."
-                            } else if !can_send {
-                                "Digite uma mensagem"
-                            } else {
-                                "Enviar mensagem"
-                            },
-                            aria_label: if sending() {
-                                "Enviando..."
-                            } else if !can_send {
-                                "Digite uma mensagem"
-                            } else {
-                                "Enviar mensagem"
-                            },
-                            onclick: {
-                                let services = services.clone();
-                                move |_| send_text(
-                                    services.clone(),
-                                    ui,
-                                    text,
-                                    sending,
-                                    error,
-                                    ui.panels.reply_to,
-                                )
-                            },
-                            Icon { name: IconName::Send, size: 18, class: "icon" }
-                        }
+                    button {
+                        class: "composer-send",
+                        disabled: sending() || !can_send,
+                        title: if sending() {
+                            "Enviando…"
+                        } else if !can_send {
+                            "Digite uma mensagem"
+                        } else {
+                            "Enviar mensagem (Enter)"
+                        },
+                        aria_label: "Enviar mensagem",
+                        onclick: {
+                            let services = services.clone();
+                            move |_| send_text(
+                                services.clone(),
+                                ui,
+                                text,
+                                sending,
+                                error,
+                                ui.panels.reply_to,
+                            )
+                        },
+                        Icon { name: IconName::Send, size: 17, class: "icon" }
                     }
                 }
-                p { class: "hint composer-hint", "Enter envia · Shift+Enter quebra linha" }
             }
         }
     }

@@ -1,16 +1,15 @@
-//! Chat list rows with the real avatar of each conversation.
+//! Chat list rows with circular gradient monograms or real TDLib/X avatars.
 
 use crate::context::{ContextMenuState, ContextTarget};
-use crate::state::{prepare_forum_view, set_chat_has_topics, AppServices, ForumDecision, UiState};
+use crate::state::{
+    prepare_forum_view, set_chat_has_topics, AppServices, ForumDecision, Tab, UiState,
+};
+use crate::theme::{avatar_gradient, avatar_initials};
 use dioxus::prelude::*;
 use plasma_telegram::TdlibChatInfo;
 use std::collections::HashSet;
 
 /// Collapses whitespace and truncates a message preview.
-///
-/// The chat list and the conversation header only ever show a single line, so
-/// bounding the string keeps long bot/status messages from stretching the
-/// layout (and from being stored in the DOM in full).
 pub fn summarize_last_message(text: &str, limit: usize) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= limit {
@@ -21,7 +20,7 @@ pub fn summarize_last_message(text: &str, limit: usize) -> String {
     summary
 }
 
-/// A single conversation in the chat list.
+/// A single conversation row in the unified sidebar.
 #[component]
 pub fn ChatRow(
     chat: TdlibChatInfo,
@@ -48,6 +47,8 @@ pub fn ChatRow(
         chat.id.parse::<i64>().ok()
     };
     let title = chat.title.clone();
+    let initials = avatar_initials(&title);
+    let gradient = avatar_gradient(&chat.id);
     let preview = summarize_last_message(&chat.last_message_text, 90);
     let chat_id_key = chat.id.clone();
     let mut avatar_url = use_signal({
@@ -66,10 +67,6 @@ pub fn ChatRow(
     let mut avatar_requested = use_hook(|| CopyValue::new(false));
     use_effect(move || {
         let vis = visible_chats.read();
-        // Only rows reported by IntersectionObserver fetch avatars. When the set
-        // is still empty (before the first callback), every row would otherwise
-        // call TDLib at once after restoring a large cached list and freeze the
-        // whole window. Letter placeholders are fine until visibility arrives.
         let wanted = vis.contains(&chat_id_key);
         if avatar_url.peek().is_some() || !wanted || avatar_requested() {
             return;
@@ -91,6 +88,16 @@ pub fn ChatRow(
         });
     });
 
+    let media_prefix = if chat.last_message_is_video {
+        "🎬 "
+    } else if chat.last_message_is_photo {
+        "🖼 "
+    } else if chat.last_message_has_media {
+        "📎 "
+    } else {
+        ""
+    };
+
     rsx! {
         button {
             class: if active { "chat-row active" } else { "chat-row" },
@@ -107,40 +114,38 @@ pub fn ChatRow(
                 let chat = chat.clone();
                 move |_| on_open.call(chat.clone())
             },
-            if chat_id.is_some() {
-                div { class: "chat-avatar",
-                    if let Some(url) = avatar_url() {
-                        img { src: "{url}", alt: "" }
-                    } else {
-                        span { "{title.chars().next().unwrap_or('?')}" }
-                    }
-                }
-            } else {
-                div { class: "chat-avatar",
-                    span { "{title.chars().next().unwrap_or('?')}" }
+            div {
+                class: "chat-avatar",
+                style: "background: {gradient};",
+                if let Some(url) = avatar_url() {
+                    img { src: "{url}", alt: "" }
+                } else {
+                    span { "{initials}" }
                 }
             }
             div { class: "chat-copy",
-                span { class: "chat-name", "{chat.title}" }
-                span { class: "chat-preview",
-                    if chat.last_message_has_media { "▣ " }
-                    if preview.is_empty() {
-                        "{chat_kind(&chat)}"
-                    } else {
-                        "{preview}"
-                    }
+                div { class: "chat-name-row",
+                    span { class: "chat-name", "{chat.title}" }
+                    span { class: "chat-time", "{format_timestamp(chat.last_message_date)}" }
                 }
-            }
-            div { class: "chat-meta",
-                span { class: "chat-time", "{format_timestamp(chat.last_message_date)}" }
-                if let Some(count) = gallery_badge {
-                    span {
-                        class: "unread gallery-new",
-                        title: "Novas mídias do X",
-                        "{count}"
+                div { class: "chat-preview-row",
+                    span { class: "chat-preview",
+                        "{media_prefix}"
+                        if preview.is_empty() {
+                            "{chat_kind(&chat)}"
+                        } else {
+                            "{preview}"
+                        }
                     }
-                } else if chat.unread_count > 0 {
-                    span { class: "unread", "{chat.unread_count}" }
+                    if let Some(count) = gallery_badge {
+                        span {
+                            class: "unread gallery-new",
+                            title: "Novas mídias do X",
+                            "{count}"
+                        }
+                    } else if chat.unread_count > 0 {
+                        span { class: "unread", "{chat.unread_count}" }
+                    }
                 }
             }
         }
@@ -158,13 +163,15 @@ pub fn open_chat_menu(mut ui: UiState, chat: TdlibChatInfo, x: f64, y: f64) {
 
 fn chat_kind(chat: &TdlibChatInfo) -> &'static str {
     if crate::twitter_fake::is_twitter_fake_chat_id(&chat.id) {
-        "Twitter"
+        "Galeria X"
+    } else if chat.has_topics {
+        "Grupo Fórum"
     } else if chat.is_channel {
         "Canal"
     } else if chat.is_group {
         "Grupo"
     } else {
-        "Contato"
+        "Conversa"
     }
 }
 
@@ -172,7 +179,7 @@ fn format_timestamp(timestamp: i32) -> String {
     crate::views::timeline::format_timestamp(timestamp)
 }
 
-/// Marks a conversation as read and selects it.
+/// Marks a conversation as read, focuses the Telegram stage and selects it.
 pub fn open_chat(services: AppServices, mut ui: UiState, chat: TdlibChatInfo) {
     let mut selected = chat;
     selected.unread_count = 0;
@@ -184,13 +191,12 @@ pub fn open_chat(services: AppServices, mut ui: UiState, chat: TdlibChatInfo) {
             .write()
             .remove(&chat_id);
     }
-    // Paint a known forum immediately. The topic effect still refreshes the
-    // list, but the bar no longer waits for that round trip.
     let decision = if is_twitter_fake {
         ForumDecision::Plain
     } else {
         prepare_forum_view(&services, ui, &mut selected)
     };
+    ui.shell.tab.set(Tab::Telegram);
     ui.conversation.selected_chat.set(Some(selected.clone()));
     ui.conversation.mobile_show_list.set(false);
     if matches!(

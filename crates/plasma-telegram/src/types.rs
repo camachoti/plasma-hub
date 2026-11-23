@@ -176,6 +176,11 @@ pub struct TdlibMessageInfo {
     pub grouped_id: Option<String>,
     pub video_duration: Option<i32>,
     pub media_size: Option<i64>,
+    /// Pixel size reported by Telegram. Missing on older cached messages.
+    #[serde(default)]
+    pub media_width: Option<i32>,
+    #[serde(default)]
+    pub media_height: Option<i32>,
     pub thumbnail_path: Option<String>,
     pub is_deleted: bool,
     /// Emoji reactions; `#[serde(default)]` keeps old cached rows readable.

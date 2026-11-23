@@ -3,7 +3,7 @@
 use crate::context::ContextMenuState;
 use crate::downloads::{DownloadHandle, DownloadRecord};
 use crate::icons::IconName;
-use crate::theme::{Density, Palette};
+use crate::theme::{ColorMode, Density, UiStyle, COLOR_MODE_SETTING_KEY, STYLE_SETTING_KEY};
 use crate::twitter::TwitterHandle;
 use crate::views::select::SelectPortal;
 use dioxus::prelude::*;
@@ -483,12 +483,58 @@ impl UserMediaState {
     }
 }
 
-/// Chrome shared by every screen: navigation, theme, toasts and the open select.
+/// Dockable right-hand drawer sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawerTab {
+    Queue,
+    Media,
+    Topics,
+    MassDownload,
+}
+
+impl DrawerTab {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Queue => "Fila",
+            Self::Media => "Mídias",
+            Self::Topics => "Tópicos",
+            Self::MassDownload => "Download",
+        }
+    }
+}
+
+/// Quick filter pills in the unified conversation sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatScope {
+    All,
+    Unread,
+    Forums,
+    Twitter,
+}
+
+impl ChatScope {
+    pub const ALL: [Self; 4] = [Self::All, Self::Unread, Self::Forums, Self::Twitter];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todas",
+            Self::Unread => "Não lidas",
+            Self::Forums => "Fóruns",
+            Self::Twitter => "Galerias",
+        }
+    }
+}
+
+/// Chrome shared by every screen: navigation, multi-style theme, panels and toasts.
 #[derive(Clone, Copy)]
 pub struct ShellState {
     pub tab: Signal<Tab>,
-    pub palette: Signal<Palette>,
+    pub style: Signal<UiStyle>,
+    pub color_mode: Signal<ColorMode>,
     pub density: Signal<Density>,
+    pub sidebar_open: Signal<bool>,
+    pub drawer_open: Signal<bool>,
+    pub drawer_tab: Signal<DrawerTab>,
     pub logged_in: Signal<bool>,
     pub show_spike: Signal<bool>,
     pub show_palette: Signal<bool>,
@@ -605,12 +651,28 @@ impl ShellState {
         (self.tab)()
     }
 
-    pub fn palette(self) -> Palette {
-        (self.palette)()
+    pub fn style(self) -> UiStyle {
+        (self.style)()
+    }
+
+    pub fn color_mode(self) -> ColorMode {
+        (self.color_mode)()
     }
 
     pub fn density(self) -> Density {
         (self.density)()
+    }
+
+    pub fn sidebar_open(self) -> bool {
+        (self.sidebar_open)()
+    }
+
+    pub fn drawer_open(self) -> bool {
+        (self.drawer_open)()
+    }
+
+    pub fn drawer_tab(self) -> DrawerTab {
+        (self.drawer_tab)()
     }
 
     pub fn logged_in(self) -> bool {
@@ -842,18 +904,41 @@ pub fn push_toast(
     toasts.set(next);
 }
 
-pub fn apply_palette(services: &AppServices, mut ui: UiState, palette: Palette) {
-    ui.shell.palette.set(palette);
-    if let Err(error) = services.settings.set(
-        plasma_store::SettingKey::APPEARANCE_PALETTE,
-        palette.as_str(),
-    ) {
+pub fn apply_style(services: &AppServices, mut ui: UiState, style: UiStyle) {
+    ui.shell.style.set(style);
+    if let Err(error) = services.settings.set(STYLE_SETTING_KEY, style.as_str()) {
         push_toast(
             ui.shell.toasts,
-            format!("Falha ao salvar a paleta: {error}"),
+            format!("Falha ao salvar o estilo: {error}"),
             ToastKind::Error,
         );
     }
+}
+
+pub fn apply_color_mode(services: &AppServices, mut ui: UiState, mode: ColorMode) {
+    ui.shell.color_mode.set(mode);
+    if let Err(error) = services.settings.set(COLOR_MODE_SETTING_KEY, mode.as_str()) {
+        push_toast(
+            ui.shell.toasts,
+            format!("Falha ao salvar o modo de cor: {error}"),
+            ToastKind::Error,
+        );
+    }
+    let _ = services
+        .settings
+        .set(plasma_store::SettingKey::APPEARANCE_PALETTE, mode.as_str());
+}
+
+pub fn set_drawer_open(services: &AppServices, mut ui: UiState, open: bool) {
+    ui.shell.drawer_open.set(open);
+    let _ = services
+        .settings
+        .set_bool(plasma_store::SettingKey::INFO_PANEL_OPEN, open);
+}
+
+pub fn open_drawer_tab(services: &AppServices, mut ui: UiState, tab: DrawerTab) {
+    ui.shell.drawer_tab.set(tab);
+    set_drawer_open(services, ui, true);
 }
 
 pub fn apply_density(services: &AppServices, mut ui: UiState, density: Density) {
@@ -1322,6 +1407,8 @@ mod tests {
             grouped_id: None,
             video_duration: None,
             media_size: None,
+            media_width: None,
+            media_height: None,
             thumbnail_path: None,
             is_deleted: false,
             reactions: Vec::new(),

@@ -18,7 +18,6 @@ use downloads::{
     apply_download_done, apply_download_error, apply_download_progress,
     apply_telegram_media_progress, persist_downloads, sync_telegram_downloads, DownloadRecord,
 };
-use icons::Icon;
 use plasma_core::AppEvent;
 use plasma_duplicates::SearchMatch;
 use plasma_store::SettingKey;
@@ -26,26 +25,33 @@ use plasma_telegram::{TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, Tdl
 use state::{
     apply_auth_error, apply_auth_status, apply_chat_patch, apply_live_message,
     apply_message_content, bump_telegram_tick, clear_cached_chat_list, mark_deleted_messages,
-    recall_cached_chat_list, AppServices, ConversationState, DuplicateSearchMedia,
-    DuplicateSearchProgress, ForwardState, LightboxState, MassDownloadProgress, PanelState,
-    ReactionPickerState, SessionState, ShellState, Tab, ToastKind, TransferState, UiState,
-    UserMediaState,
+    recall_cached_chat_list, set_drawer_open, AppServices, ConversationState, DrawerTab,
+    DuplicateSearchMedia, DuplicateSearchProgress, ForwardState, LightboxState,
+    MassDownloadProgress, PanelState, ReactionPickerState, SessionState, ShellState, Tab,
+    ToastKind, TransferState, UiState, UserMediaState,
 };
-use theme::{Density, Palette};
+use theme::{ColorMode, Density, UiStyle};
 use views::{
     context_menu::ContextMenu,
-    downloads::DownloadsView,
     login::LoginView,
     palette::CommandPalette,
     reaction_picker::ReactionPicker,
     select::{SelectMenu, SelectPortal},
-    settings::SettingsView,
     telegram::TelegramView,
     toasts::ToastStack,
-    twitter::TwitterView,
 };
 
-const SHELL_CSS: &str = include_str!("../assets/shell.css");
+const SHELL_CSS: &str = concat!(
+    include_str!("../assets/tokens.css"),
+    "\n",
+    include_str!("../assets/base.css"),
+    "\n",
+    include_str!("../assets/layout.css"),
+    "\n",
+    include_str!("../assets/messenger.css"),
+    "\n",
+    include_str!("../assets/views.css"),
+);
 
 /// Root component. State is created once and shared through context.
 #[component]
@@ -63,12 +69,18 @@ pub fn App() -> Element {
             Tab::Telegram
         }
     });
-    let palette = use_signal(|| {
-        Palette::from_stored(settings.get(SettingKey::APPEARANCE_PALETTE).ok().flatten())
-    });
+    let style = use_signal(|| UiStyle::load(&settings));
+    let color_mode = use_signal(|| ColorMode::load(&settings));
     let density = use_signal(|| {
         Density::from_stored(settings.get(SettingKey::APPEARANCE_DENSITY).ok().flatten())
     });
+    let sidebar_open = use_signal(|| true);
+    let drawer_open = use_signal(|| {
+        settings
+            .get_bool(SettingKey::INFO_PANEL_OPEN)
+            .unwrap_or(false)
+    });
+    let drawer_tab = use_signal(|| DrawerTab::Queue);
     let logged_in = use_signal(|| skip_login || open_from_share);
     let show_spike = use_signal(|| false);
     let show_palette = use_signal(|| false);
@@ -140,8 +152,12 @@ pub fn App() -> Element {
     let mut ui = use_context_provider(|| UiState {
         shell: ShellState {
             tab,
-            palette,
+            style,
+            color_mode,
             density,
+            sidebar_open,
+            drawer_open,
+            drawer_tab,
             logged_in,
             show_spike,
             show_palette,
@@ -635,17 +651,14 @@ pub fn App() -> Element {
     });
 
     // Global shortcuts live in the webview, so they work regardless of which
-    // element currently has focus. The palette itself handles Enter/Escape
-    // while its input is focused; this listener adds Ctrl/Cmd+K from anywhere.
+    // element currently has focus.
+    let shortcut_services = services.clone();
     use_effect(move || {
         let mut ui = ui;
+        let services = shortcut_services.clone();
         spawn(async move {
             let mut eval = document::eval(
                 r#"
-                // The webview's native menu (Inspect Element, reload, ...) is
-                // never useful here: every right-click action is rendered by
-                // the app itself. Capture also covers elements that call
-                // stopPropagation in their own contextmenu handler.
                 document.addEventListener(
                     "contextmenu",
                     (event) => event.preventDefault(),
@@ -660,7 +673,13 @@ pub fn App() -> Element {
                          target.isContentEditable);
                     if ((event.ctrlKey || event.metaKey) && key === "k") {
                         event.preventDefault();
-                        dioxus.send("toggle");
+                        dioxus.send("toggle-palette");
+                    } else if ((event.ctrlKey || event.metaKey) && key === "b") {
+                        event.preventDefault();
+                        dioxus.send("toggle-sidebar");
+                    } else if ((event.ctrlKey || event.metaKey) && key === "j") {
+                        event.preventDefault();
+                        dioxus.send("toggle-drawer");
                     } else if (event.key === "Escape") {
                         dioxus.send("close");
                     } else if (
@@ -677,15 +696,34 @@ pub fn App() -> Element {
 
             while let Ok(command) = eval.recv::<String>().await {
                 match command.as_str() {
-                    "toggle" => {
+                    "toggle-palette" => {
                         let next = !ui.shell.show_palette();
                         ui.shell.show_palette.set(next);
                     }
+                    "toggle-sidebar" => {
+                        let next = !ui.shell.sidebar_open();
+                        ui.shell.sidebar_open.set(next);
+                    }
+                    "toggle-drawer" => {
+                        let next = !ui.shell.drawer_open();
+                        set_drawer_open(&services, ui, next);
+                    }
                     "close" => {
-                        ui.shell.show_palette.set(false);
-                        ui.panels.context_menu.set(None);
-                        ui.panels.user_media.set(None);
-                        ui.panels.lightbox.set(None);
+                        if ui.shell.show_palette() {
+                            ui.shell.show_palette.set(false);
+                        } else if ui.panels.context_menu().is_some() {
+                            ui.panels.context_menu.set(None);
+                        } else if ui.shell.select_portal().is_some() {
+                            ui.shell.select_portal.set(None);
+                        } else if ui.panels.reaction_picker().is_some() {
+                            ui.panels.reaction_picker.set(None);
+                        } else if ui.panels.lightbox().is_some() {
+                            ui.panels.lightbox.set(None);
+                        } else if ui.panels.forward_state().is_some() {
+                            ui.panels.forward_state.set(None);
+                        } else if ui.transfers.duplicate_search().is_some() {
+                            ui.transfers.duplicate_search.set(None);
+                        }
                     }
                     "lightbox-prev" => {
                         if let Some(state) = ui.panels.lightbox() {
@@ -707,7 +745,8 @@ pub fn App() -> Element {
         });
     });
 
-    let palette = ui.shell.palette();
+    let style = ui.shell.style();
+    let color_mode = ui.shell.color_mode();
     let density = ui.shell.density();
     let open_menu = ui.panels.context_menu();
 
@@ -715,7 +754,8 @@ pub fn App() -> Element {
         style { dangerous_inner_html: SHELL_CSS }
         div {
             class: "plasma-root",
-            "data-palette": palette.as_str(),
+            "data-style": style.as_str(),
+            "data-mode": color_mode.as_str(),
             "data-density": density.as_str(),
             if ui.shell.logged_in() {
                 Shell {}
@@ -798,112 +838,10 @@ fn mass_download_finished(current_file: &str, is_scanning: bool) -> bool {
         || current_file.starts_with("Parado:")
 }
 
-/// Class for a rail item, including Downloads feedback markers:
-/// `busy` while a download is running, `failed` when a download failed.
-fn rail_item_class(tab: Tab, item: Tab, download_active: bool, download_failed: bool) -> String {
-    let mut classes = if tab == item {
-        "rail-item active".to_string()
-    } else {
-        "rail-item".to_string()
-    };
-    if item == Tab::Downloads && download_active {
-        classes.push_str(" busy");
-    }
-    if item == Tab::Downloads && download_failed {
-        classes.push_str(" failed");
-    }
-    classes
-}
-
-/// Tooltip text for a rail item, surfacing the Downloads state when relevant.
-fn rail_item_tip(item: Tab, download_active: bool, download_failed: bool) -> &'static str {
-    if item == Tab::Downloads && download_active {
-        "Downloads: em andamento"
-    } else if item == Tab::Downloads && download_failed {
-        "Downloads: há falhas"
-    } else {
-        item.label()
-    }
-}
-
-/// App chrome: rail, top bar and the active view.
+/// Unified 3-pane Messenger Workspace shell.
 #[component]
 fn Shell() -> Element {
-    let mut ui = use_context::<UiState>();
-    let tab = ui.shell.tab();
-    let auth_user = ui.session.auth_user();
-    let preview = ui.session.preview_mode();
-    let download_active = ui.transfers.downloads().iter().any(|item| item.is_active());
-    let download_failed = ui
-        .transfers
-        .downloads()
-        .iter()
-        .any(|item| item.status == "failed");
-
     rsx! {
-        div { class: "shell",
-            nav { class: "rail",
-                div { class: "rail-brand", title: "Plasma Hub", "P" }
-                for item in Tab::ALL {
-                    button {
-                        key: "{item.label()}",
-                        class: rail_item_class(tab, item, download_active, download_failed),
-                        aria_label: "{item.label()}",
-                        "data-tip": rail_item_tip(item, download_active, download_failed),
-                        onclick: move |_| ui.shell.tab.set(item),
-                        Icon { name: item.rail_icon(), size: 20, class: "icon" }
-                        if item == Tab::Downloads && download_failed {
-                            span {
-                                class: "rail-dot",
-                                aria_label: "Há downloads com falha",
-                            }
-                        }
-                    }
-                }
-                div { class: "rail-spacer" }
-                button {
-                    class: "rail-item",
-                    aria_label: "Paleta de comandos",
-                    "data-tip": "Paleta de comandos",
-                    onclick: move |_| ui.shell.show_palette.set(true),
-                    "⌘"
-                }
-            }
-            div { class: "shell-main",
-                header { class: "topbar",
-                    div { class: "topbar-title",
-                        strong { "Plasma Hub" }
-                        span { "{tab.label()}" }
-                    }
-                    div { class: "topbar-actions",
-                        if preview {
-                            span { class: "pill", "Prévia sem conta" }
-                        }
-                        if let Some(name) = auth_user {
-                            span { class: "muted", "{name}" }
-                        }
-                        button {
-                            class: "btn small ghost",
-                            title: "Ctrl/Cmd + K",
-                            onclick: move |_| ui.shell.show_palette.set(true),
-                            "⌘K  Comandos"
-                        }
-                        button {
-                            class: "btn small ghost",
-                            onclick: move |_| ui.shell.logged_in.set(false),
-                            "Sair"
-                        }
-                    }
-                }
-                div { class: "content",
-                    {match tab {
-                        Tab::Telegram => rsx! { TelegramView {} },
-                        Tab::Downloads => rsx! { DownloadsView {} },
-                        Tab::Twitter => rsx! { TwitterView {} },
-                        Tab::Settings => rsx! { SettingsView {} },
-                    }}
-                }
-            }
-        }
+        TelegramView {}
     }
 }

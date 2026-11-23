@@ -156,6 +156,7 @@ pub(super) fn MediaPanel(
     group_albums: bool,
     bulk_download: bool,
     bulk_disabled: bool,
+    on_back_to_all: Option<EventHandler<()>>,
     on_close: EventHandler<()>,
     on_open: EventHandler<(TdlibSharedMediaItem, Vec<LightboxMedia>)>,
 ) -> Element {
@@ -202,255 +203,210 @@ pub(super) fn MediaPanel(
     let bulk_items = items.clone();
     let bulk_error_message = bulk_error();
 
-    // Focus the panel so Escape closes it without leaking a global listener.
-    let focus_id = panel_id.clone();
-    use_effect(move || {
-        let focus_id = focus_id.clone();
-        spawn(async move {
-            let id = serde_json::to_string(&focus_id).unwrap_or_else(|_| "\"\"".to_string());
-            let script = format!(
-                r#"
-                const panel = document.getElementById({id});
-                if (!panel) {{ return; }}
-                panel.focus();
-                panel.addEventListener("keydown", (event) => {{
-                    if (event.key === "Escape") {{
-                        event.preventDefault();
-                        dioxus.send("close");
-                    }}
-                }});
-                "#
-            );
-            let mut eval = document::eval(&script);
-            while let Ok(command) = eval.recv::<String>().await {
-                if command == "close" {
-                    on_close.call(());
-                    break;
-                }
-            }
-        });
-    });
-
+    let _ = &on_close;
     rsx! {
-        div { class: "media-panel-backdrop", onclick: move |_| on_close.call(()),
-            section {
-                id: "{panel_id}",
-                class: "media-panel",
-                tabindex: "-1",
-                onclick: move |event| event.stop_propagation(),
-                header { class: "media-panel-header",
-                    div {
-                        strong { "{title}" }
-                        span { class: "hint", "{subtitle_line}" }
+        section {
+            id: "{panel_id}",
+            class: "media-panel-docked",
+            header { class: "media-panel-header",
+                div { class: "media-panel-heading",
+                    strong { "{title}" }
+                    p { class: "hint", "{subtitle_line}" }
+                }
+                div { class: "media-panel-actions",
+                    if let Some(back) = on_back_to_all {
+                        button {
+                            class: "btn small soft",
+                            title: "Voltar para todas as mídias do chat",
+                            onclick: move |_| back.call(()),
+                            "Todas"
+                        }
                     }
-                    div { class: "media-panel-actions",
-                        if bulk_download && !items.is_empty() {
-                            button {
-                                class: "icon-button",
-                                title: if bulk_disabled {
-                                    "Aguarde o carregamento das mídias"
-                                } else {
-                                    "Baixar todas as mídias"
-                                },
-                                aria_label: "Baixar todas as mídias",
-                                disabled: bulk_disabled || bulk_saving() || saving_album().is_some(),
-                                onclick: {
+                    if bulk_download && !items.is_empty() {
+                        button {
+                            class: "btn small primary",
+                            title: if bulk_disabled {
+                                "Aguarde o carregamento das mídias"
+                            } else {
+                                "Baixar todas as mídias"
+                            },
+                            disabled: bulk_disabled || bulk_saving() || saving_album().is_some(),
+                            onclick: {
+                                let services = services.clone();
+                                let items = bulk_items.clone();
+                                let batch = download_batch.clone();
+                                move |_| {
+                                    if bulk_saving() || bulk_disabled {
+                                        return;
+                                    }
+                                    bulk_saving.set(true);
+                                    bulk_progress.set(None);
+                                    bulk_error.set(None);
                                     let services = services.clone();
-                                    let items = bulk_items.clone();
-                                    let batch = download_batch.clone();
-                                    move |_| {
-                                        if bulk_saving() || bulk_disabled {
-                                            return;
-                                        }
-                                        bulk_saving.set(true);
-                                        bulk_progress.set(None);
-                                        bulk_error.set(None);
-                                        let services = services.clone();
-                                        let items = items.clone();
-                                        let batch = batch.clone();
-                                        spawn(async move {
-                                            let dest_dir = pick_save_folder("Salvar todas as mídias como")
-                                                .await
-                                                .map(|path| path.to_string_lossy().to_string());
-                                            if dest_dir.is_none() {
-                                                bulk_progress.set(None);
-                                                bulk_saving.set(false);
-                                                return;
-                                            }
-                                            match save_media_batch(
-                                                &services,
-                                                ui,
-                                                chat_id,
-                                                &items,
-                                                Some(&batch),
-                                                bulk_progress,
-                                                dest_dir,
-                                            )
+                                    let items = items.clone();
+                                    let batch = batch.clone();
+                                    spawn(async move {
+                                        let dest_dir = pick_save_folder("Salvar todas as mídias como")
                                             .await
-                                            {
-                                                Ok(()) => {}
-                                                Err(error) => bulk_error.set(Some(error.to_string())),
-                                            }
+                                            .map(|path| path.to_string_lossy().to_string());
+                                        if dest_dir.is_none() {
                                             bulk_progress.set(None);
                                             bulk_saving.set(false);
-                                        });
-                                    }
-                                },
-                                Icon { name: IconName::Download, size: 16, class: "icon" }
-                                if bulk_saving() {
-                                    if let Some((done, total)) = bulk_progress() {
-                                        span { class: "hint", "{done}/{total}" }
-                                    }
+                                            return;
+                                        }
+                                        match save_media_batch(
+                                            &services,
+                                            ui,
+                                            chat_id,
+                                            &items,
+                                            Some(&batch),
+                                            bulk_progress,
+                                            dest_dir,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {}
+                                            Err(error) => bulk_error.set(Some(error.to_string())),
+                                        }
+                                        bulk_progress.set(None);
+                                        bulk_saving.set(false);
+                                    });
                                 }
-                            }
-                        }
-                        button {
-                            class: "btn small ghost",
-                            onclick: move |_| on_close.call(()),
-                            "Fechar"
-                        }
-                    }
-                }
-                if let Some(error) = error {
-                    p { class: "error-banner", "{error}" }
-                }
-                if let Some(error) = bulk_error_message {
-                    p { class: "error-banner", "{error}" }
-                }
-                if loading {
-                    div { class: "shared-scroll",
-                        div { class: "shared-grid",
-                            for index in 0..9 {
-                                div {
-                                    key: "skeleton-{index}",
-                                    class: "shared-item shared-skeleton",
-                                    div { class: "skeleton-thumb" }
-                                    div { class: "shared-meta",
-                                        div { class: "skeleton-line" }
-                                        div { class: "skeleton-line short" }
-                                    }
+                            },
+                            Icon { name: IconName::Download, size: 15, class: "icon" }
+                            if bulk_saving() {
+                                if let Some((done, total)) = bulk_progress() {
+                                    span { "{done}/{total}" }
+                                } else {
+                                    span { "Salvando…" }
                                 }
+                            } else {
+                                span { "Baixar" }
                             }
                         }
                     }
-                } else if items.is_empty() {
-                    div { class: "empty-state",
-                        div { class: "empty-card",
-                            div { class: "empty-icon", "▣" }
-                            h2 { "{empty_title}" }
-                            p { "{empty_message}" }
+                }
+            }
+            if let Some(error) = error {
+                p { class: "error-banner", "{error}" }
+            }
+            if let Some(error) = bulk_error_message {
+                p { class: "error-banner", "{error}" }
+            }
+            if loading {
+                div { class: "media-panel-scroll",
+                    div { class: "shared-grid",
+                        for index in 0..9 {
+                            div {
+                                key: "skeleton-{index}",
+                                class: "shared-item shared-skeleton",
+                                div { class: "thumb-skeleton" }
+                            }
                         }
                     }
-                } else {
-                    div { class: "shared-scroll",
-                        if group_albums {
-                            for (index, group) in groups.iter().enumerate() {
-                                if let Some(album_id) =
-                                    group.album_id.as_ref().filter(|_| group.items.len() > 1)
-                                {
-                                    section {
-                                        key: "album-{album_id}",
-                                        class: "shared-album",
-                                        header { class: "shared-album-header",
-                                            div {
-                                                strong { "Álbum" }
-                                                span { class: "hint",
-                                                    "{group.items.len()} mídias · {format_timestamp(group.items[0].date)}"
-                                                }
+                }
+            } else if items.is_empty() {
+                div { class: "empty-state",
+                    div { class: "empty-card",
+                        div { class: "empty-icon",
+                            Icon { name: IconName::Media, size: 22, class: "icon" }
+                        }
+                        h2 { "{empty_title}" }
+                        p { "{empty_message}" }
+                    }
+                }
+            } else {
+                div { class: "media-panel-scroll",
+                    if group_albums {
+                        for (index, group) in groups.iter().enumerate() {
+                            if let Some(album_id) =
+                                group.album_id.as_ref().filter(|_| group.items.len() > 1)
+                            {
+                                section {
+                                    key: "album-{album_id}",
+                                    class: "shared-album-section",
+                                    header { class: "shared-album-header",
+                                        div {
+                                            strong { "Álbum · {group.items.len()}" }
+                                            span { class: "hint",
+                                                " · {format_timestamp(group.items[0].date)}"
                                             }
-                                            button {
-                                                class: "icon-button",
-                                                title: if bulk_disabled {
-                                                    "Aguarde o carregamento das mídias"
-                                                } else {
-                                                    "Baixar álbum"
-                                                },
-                                                aria_label: "Baixar álbum",
-                                                disabled: bulk_disabled
-                                                    || saving_album().is_some()
-                                                    || bulk_saving(),
-                                                onclick: {
-                                                    let album_id = album_id.clone();
-                                                    let group_items = group.items.clone();
+                                        }
+                                        button {
+                                            class: "icon-button small",
+                                            title: if bulk_disabled {
+                                                "Aguarde o carregamento das mídias"
+                                            } else {
+                                                "Baixar álbum"
+                                            },
+                                            aria_label: "Baixar álbum",
+                                            disabled: bulk_disabled
+                                                || saving_album().is_some()
+                                                || bulk_saving(),
+                                            onclick: {
+                                                let album_id = album_id.clone();
+                                                let group_items = group.items.clone();
+                                                let services = services.clone();
+                                                let album_batch = TelegramSaveBatch {
+                                                    id: format!(
+                                                        "{}-album-{album_id}",
+                                                        download_batch.id
+                                                    ),
+                                                    title: format!(
+                                                        "{} · álbum",
+                                                        download_batch.title
+                                                    ),
+                                                    total: group_items.len(),
+                                                };
+                                                move |_| {
+                                                    if bulk_disabled
+                                                        || saving_album().is_some()
+                                                        || bulk_saving()
+                                                    {
+                                                        return;
+                                                    }
+                                                    saving_album.set(Some(album_id.clone()));
+                                                    bulk_progress.set(None);
+                                                    bulk_error.set(None);
                                                     let services = services.clone();
-                                                    let album_batch = TelegramSaveBatch {
-                                                        id: format!(
-                                                            "{}-album-{album_id}",
-                                                            download_batch.id
-                                                        ),
-                                                        title: format!(
-                                                            "{} · álbum",
-                                                            download_batch.title
-                                                        ),
-                                                        total: group_items.len(),
-                                                    };
-                                                    move |_| {
-                                                        if bulk_disabled
-                                                            || saving_album().is_some()
-                                                            || bulk_saving()
-                                                        {
-                                                            return;
-                                                        }
-                                                        saving_album.set(Some(album_id.clone()));
-                                                        bulk_progress.set(None);
-                                                        bulk_error.set(None);
-                                                        let services = services.clone();
-                                                        let group_items = group_items.clone();
-                                                        let album_batch = album_batch.clone();
-                                                        spawn(async move {
-                                                            let dest_dir =
-                                                                pick_save_folder("Salvar álbum como")
-                                                                    .await
-                                                                    .map(|path| {
-                                                                        path.to_string_lossy()
-                                                                            .to_string()
-                                                                    });
-                                                            if dest_dir.is_none() {
-                                                                bulk_progress.set(None);
-                                                                saving_album.set(None);
-                                                                return;
-                                                            }
-                                                            match save_media_batch(
-                                                                &services,
-                                                                ui,
-                                                                chat_id,
-                                                                &group_items,
-                                                                Some(&album_batch),
-                                                                bulk_progress,
-                                                                dest_dir,
-                                                            )
-                                                            .await
-                                                            {
-                                                                Ok(()) => {}
-                                                                Err(error) => bulk_error.set(Some(error.to_string())),
-                                                            }
+                                                    let group_items = group_items.clone();
+                                                    let album_batch = album_batch.clone();
+                                                    spawn(async move {
+                                                        let dest_dir =
+                                                            pick_save_folder("Salvar álbum como")
+                                                                .await
+                                                                .map(|path| {
+                                                                    path.to_string_lossy()
+                                                                        .to_string()
+                                                                });
+                                                        if dest_dir.is_none() {
                                                             bulk_progress.set(None);
                                                             saving_album.set(None);
-                                                        });
-                                                    }
-                                                },
-                                                Icon { name: IconName::Download, size: 15, class: "icon" }
-                                            }
-                                        }
-                                        div { class: "shared-grid",
-                                            for item in group.items.iter().cloned() {
-                                                {
-                                                    let album = lightbox_album_for(&item, &album_groups);
-                                                    rsx! {
-                                                        SharedMediaCard {
-                                                            key: "{item.id}",
-                                                            chat_id,
-                                                            item,
-                                                            album,
-                                                            on_open,
+                                                            return;
                                                         }
-                                                    }
+                                                        match save_media_batch(
+                                                            &services,
+                                                            ui,
+                                                            chat_id,
+                                                            &group_items,
+                                                            Some(&album_batch),
+                                                            bulk_progress,
+                                                            dest_dir,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(()) => {}
+                                                            Err(error) => bulk_error.set(Some(error.to_string())),
+                                                        }
+                                                        bulk_progress.set(None);
+                                                        saving_album.set(None);
+                                                    });
                                                 }
-                                            }
+                                            },
+                                            Icon { name: IconName::Download, size: 15, class: "icon" }
                                         }
                                     }
-                                } else {
-                                    div { key: "singles-{index}", class: "shared-grid",
+                                    div { class: "shared-grid",
                                         for item in group.items.iter().cloned() {
                                             {
                                                 let album = lightbox_album_for(&item, &album_groups);
@@ -467,30 +423,47 @@ pub(super) fn MediaPanel(
                                         }
                                     }
                                 }
-                            }
-                        } else {
-                            div { class: "shared-grid",
-                                for item in items.iter().cloned() {
-                                    {
-                                        let album = lightbox_album_for(&item, &album_groups);
-                                        rsx! {
-                                            SharedMediaCard {
-                                                key: "{item.id}",
-                                                chat_id,
-                                                item,
-                                                album,
-                                                on_open,
+                            } else {
+                                div { key: "singles-{index}", class: "shared-grid",
+                                    for item in group.items.iter().cloned() {
+                                        {
+                                            let album = lightbox_album_for(&item, &album_groups);
+                                            rsx! {
+                                                SharedMediaCard {
+                                                    key: "{item.id}",
+                                                    chat_id,
+                                                    item,
+                                                    album,
+                                                    on_open,
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        if bulk_disabled {
-                            div { class: "shared-loading-more",
-                                div { class: "spinner" }
-                                span { "Carregando mais mídias..." }
+                    } else {
+                        div { class: "shared-grid",
+                            for item in items.iter().cloned() {
+                                {
+                                    let album = lightbox_album_for(&item, &album_groups);
+                                    rsx! {
+                                        SharedMediaCard {
+                                            key: "{item.id}",
+                                            chat_id,
+                                            item,
+                                            album,
+                                            on_open,
+                                        }
+                                    }
+                                }
                             }
+                        }
+                    }
+                    if bulk_disabled {
+                        div { class: "timeline-loading",
+                            div { class: "spinner" }
+                            span { "Carregando mais mídias…" }
                         }
                     }
                 }
@@ -504,6 +477,7 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
     let save_services = services.clone();
+    let progress_events = services.events.clone();
     let resource_state = state.clone();
     let resource = use_resource(move || {
         let services = services.clone();
@@ -552,6 +526,30 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
     let mut saving = use_signal(|| false);
     let mut saving_album = use_signal(|| false);
     let mut save_error = use_signal(|| None::<String>);
+    let mut download = use_signal(|| None::<LightboxDownload>);
+    let progress_chat = state.chat_id;
+    let progress_message = state.message_id;
+    use_hook(move || {
+        spawn(async move {
+            let mut receiver = progress_events.subscribe();
+            loop {
+                match receiver.recv().await {
+                    Ok(plasma_core::AppEvent::MediaProgress {
+                        chat_id,
+                        message_id,
+                        downloaded_bytes,
+                        total_bytes,
+                        ..
+                    }) if chat_id == progress_chat && message_id == progress_message => {
+                        download.set(Some(lightbox_download(downloaded_bytes, total_bytes)));
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    });
 
     let (source, mime_type, total_bytes, load_error) = match &*resource.read_unchecked() {
         Some(Ok(playback)) if playback.success => (
@@ -576,6 +574,7 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
     let has_album = state.album.len() > 1;
     let subtitle = lightbox_subtitle(&state);
     let meta_parts = lightbox_meta_parts(&state, mime_type.as_deref(), total_bytes);
+    let preview = lightbox_preview(state.is_photo, state.is_video, mime_type.as_deref());
     let previous_album = state.previous_album();
     let next_album = state.next_album();
     let frame_class = if has_album {
@@ -583,13 +582,26 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
     } else {
         "lightbox-frame"
     };
-    let stage_class = if state.is_video {
-        "lightbox-stage is-video"
-    } else if state.is_photo {
-        "lightbox-stage is-photo"
-    } else {
-        "lightbox-stage"
+    let stage_class = match preview {
+        LightboxPreview::Video => "lightbox-stage is-video",
+        LightboxPreview::Photo => "lightbox-stage is-photo",
+        LightboxPreview::File => "lightbox-stage",
     };
+    let playback = download();
+    let download_bar = playback.as_ref().and_then(|item| {
+        item.known
+            .then(|| format!("inline-size: {:.1}%;", item.percent))
+    });
+    let download_label = playback.as_ref().map(|item| {
+        if item.known {
+            format!("{:.0}%", item.percent)
+        } else {
+            String::new()
+        }
+    });
+    let download_value = playback
+        .as_ref()
+        .and_then(|item| item.known.then(|| format!("{:.0}", item.percent)));
 
     rsx! {
         div { class: "lightbox-backdrop", onclick: move |_| on_close.call(()),
@@ -753,7 +765,7 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
                     if let Some(error) = load_error {
                         p { class: "error-banner", "{error}" }
                     } else if let Some(url) = source {
-                        if state.is_photo {
+                        if preview == LightboxPreview::Photo {
                             img {
                                 class: "lightbox-ambient",
                                 src: "{url}",
@@ -764,15 +776,16 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
                         div {
                             class: "lightbox-media-shell",
                             onclick: move |event| event.stop_propagation(),
-                            if state.is_video {
+                            if preview == LightboxPreview::Video {
                                 video {
                                     class: "lightbox-media",
                                     src: "{url}",
                                     controls: true,
                                     autoplay: true,
                                     playsinline: true,
+                                    preload: "auto",
                                 }
-                            } else if state.is_photo {
+                            } else if preview == LightboxPreview::Photo {
                                 img { class: "lightbox-media", src: "{url}", alt: "" }
                             } else {
                                 div { class: "lightbox-file",
@@ -785,8 +798,29 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
                         div {
                             class: "timeline-loading lightbox-loading",
                             onclick: move |event| event.stop_propagation(),
-                            div { class: "spinner" }
-                            span { "Preparando mídia..." }
+                            if let Some(label) = download_label {
+                                div {
+                                    class: "lightbox-download",
+                                    role: "progressbar",
+                                    aria_label: "Progresso do download",
+                                    aria_valuemin: "0",
+                                    aria_valuemax: "100",
+                                    aria_valuenow: download_value,
+                                    div { class: "lightbox-download-track",
+                                        if let Some(style) = download_bar {
+                                            div { class: "lightbox-download-bar", style: "{style}" }
+                                        } else {
+                                            div { class: "lightbox-download-bar is-indeterminate" }
+                                        }
+                                    }
+                                    if !label.is_empty() {
+                                        span { class: "lightbox-download-label", "{label}" }
+                                    }
+                                }
+                            } else {
+                                div { class: "spinner" }
+                                span { "Preparando mídia..." }
+                            }
                         }
                     }
                     if let Some(error) = save_error_message {
@@ -879,6 +913,59 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LightboxPreview {
+    Photo,
+    Video,
+    File,
+}
+
+/// Chooses the player from the message flags and, once the file is ready, from
+/// its mime type. Photos sent as documents are not flagged as photos by TDLib.
+fn lightbox_preview(is_photo: bool, is_video: bool, mime_type: Option<&str>) -> LightboxPreview {
+    let mime = mime_type
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if is_video || mime.starts_with("video/") {
+        LightboxPreview::Video
+    } else if is_photo
+        || matches!(
+            mime.as_str(),
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        )
+    {
+        LightboxPreview::Photo
+    } else {
+        LightboxPreview::File
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LightboxDownload {
+    percent: f64,
+    known: bool,
+}
+
+fn lightbox_download(downloaded: u64, total: u64) -> LightboxDownload {
+    if total == 0 {
+        return LightboxDownload {
+            percent: 0.0,
+            known: false,
+        };
+    }
+    LightboxDownload {
+        percent: ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0),
+        known: true,
+    }
+}
+
 fn lightbox_subtitle(state: &LightboxState) -> String {
     let mut parts = Vec::new();
     let date = format_timestamp(state.date);
@@ -936,6 +1023,17 @@ pub(super) fn format_bytes(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lightbox_download_uses_bytes_when_the_size_is_known() {
+        let known = lightbox_download(25, 100);
+        assert!(known.known);
+        assert!((known.percent - 25.0).abs() < f64::EPSILON);
+        let unknown = lightbox_download(0, 0);
+        assert!(!unknown.known);
+        let capped = lightbox_download(150, 100);
+        assert!((capped.percent - 100.0).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn formats_media_sizes_for_shared_media() {

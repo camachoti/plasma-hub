@@ -1,8 +1,12 @@
-//! Conversation list for the signed-in Telegram view.
+//! Unified Messenger Sidebar: search capsule, instant scope pills, virtualized
+//! conversations (Telegram + X galleries) and quick section bar.
 
 use super::conversation::bump_epoch;
 use super::PendingSearchJump;
-use crate::state::{set_if_changed, AppServices, UiState};
+use crate::icons::{Icon, IconName};
+use crate::state::{
+    open_drawer_tab, set_if_changed, AppServices, ChatScope, DrawerTab, Tab, UiState,
+};
 use crate::views::chat_list::{self, ChatRow};
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibChatInfo, TdlibGlobalSearchMessage};
@@ -90,6 +94,22 @@ fn chat_window(scroll_top: f64, viewport: f64, row_h: f64, count: usize) -> (usi
     (start.min(end), end)
 }
 
+fn matches_scope(
+    chat: &TdlibChatInfo,
+    scope: ChatScope,
+    badges: &std::collections::HashMap<String, usize>,
+) -> bool {
+    let is_twitter = crate::twitter_fake::is_twitter_fake_chat_id(&chat.id);
+    match scope {
+        ChatScope::All => true,
+        ChatScope::Unread => {
+            chat.unread_count > 0 || (is_twitter && badges.get(&chat.id).copied().unwrap_or(0) > 0)
+        }
+        ChatScope::Forums => chat.has_topics && !is_twitter,
+        ChatScope::Twitter => is_twitter,
+    }
+}
+
 #[component]
 pub(super) fn ChatListColumn(
     mut chat_filter: Signal<String>,
@@ -104,11 +124,16 @@ pub(super) fn ChatListColumn(
 ) -> Element {
     let mut ui = use_context::<UiState>();
     let services = use_context::<AppServices>();
+    let mut scope = use_signal(|| ChatScope::All);
+
     let filter = chat_filter().trim().to_lowercase();
+    let current_scope = scope();
+    let badges = ui.conversation.twitter_gallery_badges();
     let chats: Vec<TdlibChatInfo> = ui
         .conversation
         .chats()
         .into_iter()
+        .filter(|chat| matches_scope(chat, current_scope, &badges))
         .filter(|chat| {
             filter.is_empty()
                 || chat.title.to_lowercase().contains(&filter)
@@ -133,6 +158,7 @@ pub(super) fn ChatListColumn(
     } else {
         Vec::new()
     };
+
     let visible_chats = use_signal(HashSet::<String>::new);
     use_effect(move || {
         spawn(async move {
@@ -150,97 +176,218 @@ pub(super) fn ChatListColumn(
         });
     });
 
+    let active_tab = ui.shell.tab();
+    let downloads = ui.transfers.downloads();
+    let active_downloads = downloads.iter().filter(|item| item.is_active()).count();
+    let failed_downloads = downloads.iter().any(|item| item.status == "failed");
+    let sidebar_class = if ui.shell.sidebar_open() {
+        "sidebar-pane"
+    } else {
+        "sidebar-pane collapsed"
+    };
+
     rsx! {
-            aside { class: "chat-list-panel",
-                header { class: "chat-list-header",
-                    div { class: "chat-list-title-row",
-                        h2 { "Conversas" }
-                        if ui.conversation.chats_loading() {
-                            span { class: "pill", "carregando" }
-                        }
-                    }
-                    div { class: "chat-search-row",
+        aside {
+            class: "{sidebar_class}",
+            aria_label: "Conversas e fontes",
+            div { class: "sidebar-top",
+                div { class: "sidebar-search-bar",
+                    div { class: "pill-search",
+                        Icon { name: IconName::Search, size: 16, class: "icon" }
                         input {
-                            class: "chat-search-input",
                             r#type: "search",
-                            placeholder: "Filtrar conversas",
+                            placeholder: "Buscar conversas…",
+                            aria_label: "Buscar conversas",
                             value: "{chat_filter}",
-                            oninput: move |event| chat_filter.set(event.value()),
-                        }
-                        button {
-                            class: "btn small ghost",
-                            title: "Atualizar conversas",
-                            onclick: move |_| {
-                                chats_full_refresh.set(true);
-                                let next = ui.conversation.telegram_tick().wrapping_add(1);
-                                ui.conversation.telegram_tick.set(next);
+                            oninput: move |event| {
+                                chat_filter.set(event.value());
+                                scroll_top.set(0.0);
                             },
-                            "↻"
+                        }
+                        if ui.conversation.chats_loading() {
+                            span { class: "spinner tiny" }
                         }
                     }
-                    if let Some(error) = ui.conversation.chats_error() {
-                        p { class: "error-banner", "{error}" }
+                    button {
+                        class: "icon-button",
+                        title: "Atualizar conversas",
+                        aria_label: "Atualizar conversas",
+                        onclick: move |_| {
+                            chats_full_refresh.set(true);
+                            let next = ui.conversation.telegram_tick().wrapping_add(1);
+                            ui.conversation.telegram_tick.set(next);
+                        },
+                        Icon { name: IconName::Refresh, size: 17, class: "icon" }
+                    }
+                    button {
+                        class: "icon-button accent",
+                        title: "Importar link ou abrir X/Twitter",
+                        aria_label: "Importar link ou abrir X/Twitter",
+                        onclick: move |_| {
+                            ui.shell.tab.set(Tab::Downloads);
+                            ui.conversation.mobile_show_list.set(false);
+                        },
+                        Icon { name: IconName::Plus, size: 17, class: "icon" }
                     }
                 }
-                div {
-                    class: "chat-list",
-                    onscroll: move |event| {
-                        scroll_top.set(event.scroll_top());
-                        let height = event.client_height() as f64;
-                        if height > 1.0 {
-                            set_if_changed(viewport_h, height);
+
+                div { class: "sidebar-scopes", role: "tablist", aria_label: "Filtro de conversas",
+                    for option in ChatScope::ALL {
+                        button {
+                            key: "{option.label()}",
+                            role: "tab",
+                            aria_selected: "{current_scope == option}",
+                            class: if current_scope == option { "scope-pill active" } else { "scope-pill" },
+                            onclick: move |_| {
+                                scope.set(option);
+                                scroll_top.set(0.0);
+                            },
+                            "{option.label()}"
                         }
-                    },
-                    if chats.is_empty() {
-                        div { class: "chat-list-empty",
-                            p { class: "hint",
-                                if ui.conversation.chats_loading() {
-                                    "Carregando conversas do Telegram..."
-                                } else {
-                                    "Nenhuma conversa encontrada."
-                                }
+                    }
+                }
+
+                if let Some(error) = ui.conversation.chats_error() {
+                    p { class: "error-banner", "{error}" }
+                }
+            }
+
+            div {
+                class: "chat-list",
+                onscroll: move |event| {
+                    scroll_top.set(event.scroll_top());
+                    let height = event.client_height() as f64;
+                    if height > 1.0 {
+                        set_if_changed(viewport_h, height);
+                    }
+                },
+                if chats.is_empty() {
+                    div { class: "chat-list-empty",
+                        p { class: "hint",
+                            if ui.conversation.chats_loading() {
+                                "Carregando suas conversas…"
+                            } else {
+                                "Nenhuma conversa neste filtro."
                             }
                         }
-                    } else {
-                        div {
-                            class: "chat-list-canvas",
-                            style: "height: {total_h}px;",
-                            for (top, chat) in visible_rows {
-                                div {
-                                    key: "{chat.id}",
-                                    class: "chat-list-slot",
-                                    style: "top: {top}px; height: {row_h}px;",
-                                    ChatRow {
-                                        chat: chat.clone(),
-                                        active: selected_id.as_deref() == Some(chat.id.as_str()),
-                                        visible_chats,
-                                        on_open: {
-                                            let services = services.clone();
-                                            move |selected: TdlibChatInfo| {
-                                                bump_epoch(search_epoch);
-                                                search_active.set(false);
-                                                message_query.set(String::new());
-                                                ui.conversation.search_loading.set(false);
-                                                ui.conversation.search_error.set(None);
-                                                global_results.set(Vec::new());
-                                                global_offset.set(String::new());
-                                                global_loading_more.set(false);
-                                                pending_search_jump.set(None);
-                                                chat_list::open_chat(services.clone(), ui, selected);
-                                            }
-                                        },
-                                        on_context: {
-                                            move |(selected, x, y)| {
-                                                chat_list::open_chat_menu(ui, selected, x, y);
-                                            }
-                                        },
-                                    }
+                    }
+                } else {
+                    div {
+                        class: "chat-list-canvas",
+                        style: "height: {total_h}px;",
+                        for (top, chat) in visible_rows {
+                            div {
+                                key: "{chat.id}",
+                                class: "chat-list-slot",
+                                style: "top: {top}px; height: {row_h}px;",
+                                ChatRow {
+                                    chat: chat.clone(),
+                                    active: active_tab == Tab::Telegram
+                                        && selected_id.as_deref() == Some(chat.id.as_str()),
+                                    visible_chats,
+                                    on_open: {
+                                        let services = services.clone();
+                                        move |selected: TdlibChatInfo| {
+                                            bump_epoch(search_epoch);
+                                            search_active.set(false);
+                                            message_query.set(String::new());
+                                            ui.conversation.search_loading.set(false);
+                                            ui.conversation.search_error.set(None);
+                                            global_results.set(Vec::new());
+                                            global_offset.set(String::new());
+                                            global_loading_more.set(false);
+                                            pending_search_jump.set(None);
+                                            chat_list::open_chat(services.clone(), ui, selected);
+                                        }
+                                    },
+                                    on_context: {
+                                        move |(selected, x, y)| {
+                                            chat_list::open_chat_menu(ui, selected, x, y);
+                                        }
+                                    },
                                 }
                             }
                         }
                     }
                 }
             }
+
+            SidebarFooterBar {
+                active_downloads,
+                failed_downloads,
+                on_open_queue: {
+                    let services = services.clone();
+                    move |_| open_drawer_tab(&services, ui, DrawerTab::Queue)
+                },
+            }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn SidebarFooterBar(
+    active_downloads: usize,
+    failed_downloads: bool,
+    on_open_queue: EventHandler<()>,
+) -> Element {
+    let mut ui = use_context::<UiState>();
+    let tab = ui.shell.tab();
+    let in_downloads = matches!(tab, Tab::Downloads | Tab::Twitter);
+    let mut dl_class = String::from("sidebar-nav-btn");
+    if in_downloads {
+        dl_class.push_str(" active");
+    }
+    if failed_downloads {
+        dl_class.push_str(" failed");
+    }
+
+    rsx! {
+        nav { class: "sidebar-footer", aria_label: "Seções do aplicativo",
+            button {
+                class: if tab == Tab::Telegram { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                title: "Conversas",
+                onclick: move |_| ui.shell.tab.set(Tab::Telegram),
+                Icon { name: IconName::BrandTelegram, size: 17, class: "icon" }
+                span { "Chats" }
+            }
+            button {
+                class: "{dl_class}",
+                title: "Downloads, Links & X/Twitter (clique direito abre fila rápida)",
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Downloads);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                oncontextmenu: move |event: Event<MouseData>| {
+                    event.prevent_default();
+                    on_open_queue.call(());
+                },
+                Icon { name: IconName::ProgressDown, size: 17, class: "icon" }
+                span {
+                    if active_downloads > 0 {
+                        "Downloads ({active_downloads})"
+                    } else {
+                        "Downloads"
+                    }
+                }
+                if active_downloads > 0 || failed_downloads {
+                    span { class: "sidebar-nav-dot" }
+                }
+            }
+            button {
+                class: if tab == Tab::Settings {
+                    "icon-button sidebar-settings-btn active"
+                } else {
+                    "icon-button sidebar-settings-btn"
+                },
+                title: "Ajustes e Estilos (Ctrl+K para comandos)",
+                aria_label: "Ajustes",
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Settings);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                Icon { name: IconName::Settings, size: 18, class: "icon" }
+            }
+        }
     }
 }
 

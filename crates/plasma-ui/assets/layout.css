@@ -1,0 +1,321 @@
+/* ==========================================================================
+   Plasma Hub — 3-Pane Desktop Workspace & Responsive Fallback
+   ========================================================================== */
+
+.workspace-shell {
+  display: flex;
+  inline-size: 100%;
+  block-size: 100%;
+  min-block-size: 0;
+  padding: var(--shell-pad);
+  gap: var(--shell-gap);
+  background: var(--bg-frame);
+}
+
+.sidebar-pane {
+  flex: 0 0 var(--sidebar-w);
+  inline-size: var(--sidebar-w);
+  min-inline-size: 0;
+  min-block-size: 0;
+  background: var(--bg-side);
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+  z-index: 20;
+}
+
+.sidebar-pane.collapsed {
+  display: none;
+}
+
+.stage-pane {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  min-block-size: 0;
+  background: var(--bg-stage);
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+  position: relative;
+}
+
+.drawer-pane {
+  flex: 0 0 var(--drawer-w);
+  inline-size: var(--drawer-w);
+  min-inline-size: 0;
+  min-block-size: 0;
+  background: var(--bg-insp);
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+  z-index: 18;
+}
+
+/* Continuous vs Floating Island geometry */
+[data-style="native"] .sidebar-pane,
+[data-style="community"] .sidebar-pane {
+  border-inline-end: var(--pane-border);
+}
+
+[data-style="native"] .drawer-pane,
+[data-style="community"] .drawer-pane {
+  border-inline-start: var(--pane-border);
+}
+
+[data-style="tonal"] :is(.sidebar-pane, .stage-pane, .drawer-pane),
+[data-style="warm"] :is(.sidebar-pane, .stage-pane, .drawer-pane) {
+  border: var(--pane-border);
+  border-radius: var(--pane-radius);
+  box-shadow: var(--pane-shadow);
+}
+
+/* --------------------------------------------------------------------------
+   Sidebar Chrome (Top Search, Filter Scopes, Footer Bar)
+   -------------------------------------------------------------------------- */
+.sidebar-top {
+  padding: 12px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.sidebar-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-scopes {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sidebar-scopes::-webkit-scrollbar {
+  display: none;
+}
+
+.scope-pill {
+  padding: 5px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.scope-pill:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.scope-pill.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.sidebar-preview-banner {
+  margin: 0 12px 8px;
+  padding: 8px 11px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  color: var(--text-0);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sidebar-footer {
+  padding: 8px 10px;
+  border-block-start: 1px solid var(--line-soft);
+  background: var(--bg-side);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-nav-btn {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  min-block-size: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-control);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: nowrap;
+  position: relative;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.sidebar-nav-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-settings-btn {
+  flex: 0 0 36px;
+  inline-size: 36px;
+  block-size: 36px;
+  min-inline-size: 36px;
+  min-block-size: 36px;
+  border-radius: var(--radius-control);
+}
+
+.sidebar-nav-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.sidebar-nav-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sidebar-nav-btn.failed {
+  color: var(--danger);
+}
+
+.sidebar-nav-dot {
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.sidebar-nav-btn.failed .sidebar-nav-dot {
+  background: var(--danger);
+}
+
+/* --------------------------------------------------------------------------
+   Right Context Drawer Chrome
+   -------------------------------------------------------------------------- */
+.drawer-header {
+  padding: 10px 10px 10px 12px;
+  border-block-end: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--bg-insp);
+}
+
+.drawer-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-input);
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.drawer-tab {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+  white-space: nowrap;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.drawer-tab:hover:not(.active) {
+  color: var(--text-0);
+}
+
+.drawer-tab.active {
+  background: var(--bg-elevated);
+  color: var(--text-0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+
+.drawer-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Mobile / Narrow Responsive Fallback (keeps Android compatible) */
+.mobile-nav-back {
+  display: none;
+}
+
+.mobile-bottom-bar {
+  display: none;
+}
+
+@media (max-width: 920px) {
+  .workspace-shell {
+    padding: 0;
+    gap: 0;
+    flex-direction: column;
+  }
+
+  [data-style="tonal"] :is(.sidebar-pane, .stage-pane, .drawer-pane),
+  [data-style="warm"] :is(.sidebar-pane, .stage-pane, .drawer-pane) {
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .sidebar-pane {
+    flex: 1 1 auto;
+    inline-size: 100%;
+    border-inline-end: 0 !important;
+  }
+
+  .sidebar-footer {
+    display: none;
+  }
+
+  .workspace-shell.mobile-show-stage .sidebar-pane {
+    display: none;
+  }
+
+  .workspace-shell.mobile-show-list .stage-pane {
+    display: none;
+  }
+
+  .drawer-pane {
+    position: fixed;
+    inset: 0;
+    inline-size: 100%;
+    z-index: 95;
+    border-inline-start: 0 !important;
+  }
+
+  .mobile-nav-back {
+    display: inline-grid;
+  }
+
+  .mobile-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    block-size: 56px;
+    flex-shrink: 0;
+    background: var(--bg-side);
+    border-block-start: 1px solid var(--line);
+    padding: 0 8px;
+    z-index: 30;
+  }
+}

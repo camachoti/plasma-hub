@@ -8,8 +8,8 @@
 use crate::downloads::{save_telegram_media, DownloadRecord, TelegramSaveBatch};
 use crate::icons::IconName;
 use crate::state::{
-    push_toast, toggle_topic_hidden, AppServices, DuplicateSearchMedia, LightboxMedia,
-    LightboxState, ReactionPickerState, ToastKind, UiState, UserMediaState,
+    open_drawer_tab, push_toast, toggle_topic_hidden, AppServices, DrawerTab, DuplicateSearchMedia,
+    LightboxMedia, LightboxState, ReactionPickerState, Tab, ToastKind, UiState, UserMediaState,
 };
 use dioxus::prelude::*;
 use plasma_telegram::{TdlibForumTopicInfo, TdlibMessageInfo};
@@ -363,6 +363,8 @@ pub fn handle_context_action(
                 .into_iter()
                 .find(|chat| chat.id == *chat_id)
             {
+                ui.shell.tab.set(Tab::Telegram);
+                ui.conversation.mobile_show_list.set(false);
                 ui.conversation.selected_chat.set(Some(chat));
                 ui.conversation.messages.set(Vec::new());
                 ui.conversation.messages_key.set(None);
@@ -415,8 +417,26 @@ pub fn handle_context_action(
                 }
             });
         }
-        (ContextTarget::Chat { .. }, "chat.mass") => {
+        (ContextTarget::Chat { id: chat_id }, "chat.mass") => {
+            let different = ui
+                .conversation
+                .selected_chat()
+                .is_none_or(|selected| selected.id != *chat_id);
+            if different {
+                if let Some(chat) = ui
+                    .conversation
+                    .chats()
+                    .into_iter()
+                    .find(|chat| chat.id == *chat_id)
+                {
+                    ui.shell.tab.set(Tab::Telegram);
+                    ui.conversation.mobile_show_list.set(false);
+                    ui.conversation.selected_chat.set(Some(chat));
+                }
+            }
+            ui.transfers.mass_download_topic.set(None);
             ui.transfers.mass_download_open.set(true);
+            open_drawer_tab(&services, ui, DrawerTab::MassDownload);
         }
         (ContextTarget::Chat { id: chat_id }, "chat.remove_twitter") => {
             if !crate::twitter_fake::is_twitter_fake_chat_id(chat_id) {
@@ -464,9 +484,17 @@ pub fn handle_context_action(
             };
             push_toast(ui.shell.toasts, message, ToastKind::Info);
         }
+        (ContextTarget::Topic { topic, .. }, "topic.mass") => {
+            ui.transfers
+                .mass_download_topic
+                .set(Some(topic.as_ref().clone()));
+            ui.transfers.mass_download_open.set(true);
+            open_drawer_tab(&services, ui, DrawerTab::MassDownload);
+        }
         (ContextTarget::Topic { .. }, "topic.browse")
         | (ContextTarget::Topics { .. }, "topic.browse") => {
             ui.conversation.topic_browser_open.set(true);
+            open_drawer_tab(&services, ui, DrawerTab::Topics);
         }
         (ContextTarget::Message { message, .. }, "message.reply") => {
             ui.panels.reply_to.set(Some(message.as_ref().clone()));
@@ -647,6 +675,7 @@ pub fn handle_context_action(
                 sender_id: sender_id.clone(),
                 sender_name: sender_name.clone(),
             }));
+            open_drawer_tab(&services, ui, DrawerTab::Media);
         }
         (ContextTarget::Download { record }, "download.open") => {
             if let Some(path) = record.file_path.clone() {

@@ -6,9 +6,13 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use time::OffsetDateTime;
 
-const ALBUM_CELL_HEIGHT: f64 = 104.0;
 const OVERSCAN: usize = 4;
 const ALBUM_GAP: f64 = 4.0;
+/// Typical album width inside a bubble, used only to estimate the row height.
+const ALBUM_CONTENT_WIDTH: f64 = 320.0;
+/// Width / height used when Telegram did not report a size. Matches the old
+/// short tile so existing conversations do not jump.
+const ALBUM_FALLBACK_ASPECT: f64 = 1.52;
 
 /// A row of the timeline: a single message or a grouped album.
 #[derive(Clone, Debug, PartialEq)]
@@ -171,13 +175,69 @@ pub(super) struct RowMeasurements {
     pub(super) at_bottom: bool,
 }
 
-/// Number of grid rows used by an album grid.
-pub(super) fn album_rows(count: usize) -> usize {
-    if count <= 2 {
-        1
-    } else {
-        count.div_ceil(2)
+fn item_aspect(message: &TdlibMessageInfo) -> Option<f64> {
+    let width = message.media_width?;
+    let height = message.media_height?;
+    (width > 0 && height > 0).then_some(width as f64 / height as f64)
+}
+
+/// Shared width/height for each cell. A row follows its tallest item, so a
+/// portrait pair stays portrait instead of being cropped into a square.
+fn row_aspect(messages: &[TdlibMessageInfo], full_width: bool) -> f64 {
+    let Some(tallest) = messages.iter().filter_map(item_aspect).reduce(f64::min) else {
+        return ALBUM_FALLBACK_ASPECT;
+    };
+    let min_aspect = if full_width { 1.05 } else { 0.68 };
+    tallest.clamp(min_aspect, 1.9)
+}
+
+/// One CSS aspect-ratio (width / height) per album cell, in album order.
+pub(super) fn album_cell_aspects(messages: &[TdlibMessageInfo]) -> Vec<f64> {
+    let count = messages.len();
+    let mut aspects = Vec::with_capacity(count);
+    let mut index = 0;
+    while index < count {
+        let remaining = count - index;
+        let full_width = count > 2 && remaining == 1;
+        let take = if full_width {
+            1
+        } else {
+            remaining.min(if count == 1 { 1 } else { 2 })
+        };
+        let aspect = row_aspect(&messages[index..index + take], full_width);
+        for _ in 0..take {
+            aspects.push(aspect);
+        }
+        index += take;
     }
+    aspects
+}
+
+pub(super) fn album_grid_height(messages: &[TdlibMessageInfo]) -> f64 {
+    let aspects = album_cell_aspects(messages);
+    let count = aspects.len();
+    if count == 0 {
+        return 0.0;
+    }
+    let mut height = 0.0;
+    let mut rows: usize = 0;
+    let mut index = 0;
+    while index < count {
+        let remaining = count - index;
+        let full_width = count > 2 && remaining == 1;
+        let take = if full_width {
+            1
+        } else {
+            remaining.min(if count == 1 { 1 } else { 2 })
+        };
+        let columns = if full_width || count == 1 { 1 } else { 2 };
+        let gaps = if columns > 1 { ALBUM_GAP } else { 0.0 };
+        let cell_width = (ALBUM_CONTENT_WIDTH - gaps) / columns as f64;
+        height += cell_width / aspects[index];
+        rows += 1;
+        index += take;
+    }
+    height + (rows.saturating_sub(1)) as f64 * ALBUM_GAP
 }
 
 pub(super) fn estimate_item_height(item: &TimelineItem) -> f64 {
@@ -194,9 +254,7 @@ pub(super) fn estimate_item_height(item: &TimelineItem) -> f64 {
             } else {
                 ((characters as f64) / 74.0).ceil()
             };
-            let rows = album_rows(messages.len());
-            let grid =
-                rows as f64 * ALBUM_CELL_HEIGHT + (rows.saturating_sub(1)) as f64 * ALBUM_GAP;
+            let grid = album_grid_height(messages);
             64.0 + lines * 19.0 + 8.0 + grid
         }
     }

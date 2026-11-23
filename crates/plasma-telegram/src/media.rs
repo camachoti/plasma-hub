@@ -82,6 +82,39 @@ pub(crate) fn document_is_video(mime_type: &str, file_name: &str) -> bool {
         })
 }
 
+/// Whether a document is an image WebKitGTK can paint in the lightbox.
+///
+/// Telegram often sends photos as documents. HEIC and HEIF stay out: the
+/// shell has no decoder for them, so those keep the file fallback.
+pub(crate) fn document_is_image(mime_type: &str, file_name: &str) -> bool {
+    let mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        mime_type.as_str(),
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+    ) {
+        return true;
+    }
+    if mime_type.starts_with("image/") {
+        return false;
+    }
+    if !mime_type.is_empty() && mime_type != "application/octet-stream" {
+        return false;
+    }
+
+    Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif")
+        })
+}
+
 pub(crate) fn playback_extension(mime_type: Option<&str>, file_name: Option<&str>) -> String {
     let mime_extension = mime_type
         .map(|value| mime_extension(value, ""))
@@ -792,6 +825,18 @@ mod tests {
         assert!(!document_is_video("application/pdf", "document.pdf"));
         assert!(!document_is_video("audio/webm", "clip.webm"));
         assert!(!document_is_video("application/octet-stream", "notes.txt"));
+    }
+
+    #[test]
+    fn image_documents_are_detected_as_photos() {
+        assert!(document_is_image("image/jpeg", "foto.jpg"));
+        assert!(document_is_image("image/png; charset=binary", "foto.png"));
+        assert!(document_is_image("application/octet-stream", "foto.JPEG"));
+        assert!(document_is_image("", "foto.webp"));
+        assert!(!document_is_image("image/heic", "foto.heic"));
+        assert!(!document_is_image("application/pdf", "foto.jpg"));
+        assert!(!document_is_image("video/mp4", "clip.mp4"));
+        assert!(!document_is_image("application/octet-stream", "notes.txt"));
     }
 
     #[test]

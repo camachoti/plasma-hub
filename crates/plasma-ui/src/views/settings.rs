@@ -1,7 +1,12 @@
-//! Settings view for the Rust shell (appearance, session, cache, migration).
+//! Settings view featuring the interactive 4-Style visual gallery, color mode,
+//! density, session controls, native media cache and diagnostics.
 
-use crate::state::{apply_density, apply_palette, push_toast, AppServices, ToastKind, UiState};
-use crate::theme::{Density, Palette};
+use crate::icons::{Icon, IconName};
+use crate::state::{
+    apply_color_mode, apply_density, apply_style, push_toast, set_drawer_open, AppServices,
+    ToastKind, UiState,
+};
+use crate::theme::{ColorMode, Density, UiStyle};
 use crate::views::select::{Select, SelectOption};
 use dioxus::prelude::*;
 use plasma_store::SettingKey;
@@ -31,6 +36,46 @@ const LEGACY_KEYS: &[&str] = &[
     "plasma_debug_logs",
 ];
 
+/// Miniature preview palette for a style card in the gallery.
+fn style_preview_colors(
+    style: UiStyle,
+    mode: ColorMode,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    match (style, mode) {
+        (UiStyle::Native, ColorMode::Dark) => {
+            ("#0f131a", "#161b24", "#0f131a", "#1c2330", "#206191", "0px")
+        }
+        (UiStyle::Native, ColorMode::Light) => {
+            ("#e9eef5", "#ffffff", "#eef3f8", "#ffffff", "#0088cc", "0px")
+        }
+        (UiStyle::Tonal, ColorMode::Dark) => {
+            ("#0c0e15", "#161925", "#131620", "#1f2334", "#7c8cff", "7px")
+        }
+        (UiStyle::Tonal, ColorMode::Light) => {
+            ("#e4e8f4", "#f8f9fd", "#ffffff", "#e4e8f7", "#4f5ee8", "7px")
+        }
+        (UiStyle::Community, ColorMode::Dark) => {
+            ("#18191c", "#1e1f23", "#26282d", "#32353c", "#5865f2", "0px")
+        }
+        (UiStyle::Community, ColorMode::Light) => {
+            ("#ebedef", "#f2f3f5", "#ffffff", "#e6e8ec", "#4752c4", "0px")
+        }
+        (UiStyle::Warm, ColorMode::Dark) => {
+            ("#121110", "#1b1917", "#161413", "#262320", "#e07a5f", "6px")
+        }
+        (UiStyle::Warm, ColorMode::Light) => {
+            ("#ebe6de", "#f7f4ef", "#fcfbf9", "#ebe5dc", "#c85a3b", "6px")
+        }
+    }
+}
+
 #[component]
 pub fn SettingsView() -> Element {
     let services = use_context::<AppServices>();
@@ -41,8 +86,17 @@ pub fn SettingsView() -> Element {
             .get_bool(SettingKey::SKIP_LOGIN)
             .unwrap_or(false)
     });
-    let palette = ui.shell.palette();
+    let mut clear_twitter_on_cache = use_signal(|| {
+        services
+            .settings
+            .get_bool(SettingKey::CLEAR_TWITTER_GROUPS_ON_CLEAR_CACHE)
+            .unwrap_or(false)
+    });
+
+    let active_style = ui.shell.style();
+    let active_mode = ui.shell.color_mode();
     let density = ui.shell.density();
+    let drawer_open = ui.shell.drawer_open();
 
     let mut cache_stats = use_signal(|| None::<NativeMediaCacheStats>);
     let mut cache_limit = use_signal(|| {
@@ -57,7 +111,6 @@ pub fn SettingsView() -> Element {
     let mut clearing_cache = use_signal(|| false);
     let mut confirm_clear = use_signal(|| false);
 
-    // The cache stats are read once when the screen opens.
     let stats_services = services.clone();
     use_effect(move || {
         let services = stats_services.clone();
@@ -93,39 +146,125 @@ pub fn SettingsView() -> Element {
         section { class: "settings-view",
             div { class: "settings-inner",
                 header { class: "settings-heading",
-                    h1 { "Ajustes" }
-                    p { class: "muted",
-                        "Esta tela lê e grava no mesmo SQLite usado pelo aplicativo. \
-                         As chaves continuam compatíveis com as versões anteriores."
+                    div { class: "page-title-row",
+                        if !ui.shell.sidebar_open() {
+                            button {
+                                class: "icon-button",
+                                title: "Mostrar lista de conversas (Ctrl+B)",
+                                aria_label: "Mostrar lista de conversas",
+                                onclick: move |_| ui.shell.sidebar_open.set(true),
+                                Icon { name: IconName::LayoutSidebar, size: 18, class: "icon" }
+                            }
+                        }
+                        div {
+                            h1 { "Ajustes" }
+                            p { class: "muted",
+                                "Personalize o estilo do mensageiro ao vivo, gerencie o cache nativo \
+                                 e controle sua sessão."
+                            }
+                        }
+                    }
+                    div { class: "downloads-heading-actions",
+                        button {
+                            class: if drawer_open { "btn small active" } else { "btn small ghost" },
+                            onclick: {
+                                let services = services.clone();
+                                move |_| set_drawer_open(&services, ui, !drawer_open)
+                            },
+                            Icon { name: IconName::LayoutSidebarRight, size: 15, class: "icon" }
+                            if drawer_open { "Ocultar gaveta" } else { "Mostrar gaveta" }
+                        }
                     }
                 }
 
                 section { class: "settings-card",
-                    h2 { "Aparência" }
-                    div { class: "setting-row",
-                        div { class: "setting-row-copy",
-                            strong { "Paleta" }
-                            span { "Seis paletas, aplicadas via tokens CSS." }
+                    div { class: "drawer-section-header",
+                        div {
+                            h2 { "Estilo do Mensageiro" }
+                            p { class: "hint",
+                                "Todos os 4 estilos usam um único motor CSS sem custo extra de performance."
+                            }
                         }
-                        div { class: "palette-row",
-                            for option in Palette::ALL {
+                        div { class: "segmented",
+                            for option in ColorMode::ALL {
                                 button {
                                     key: "{option.as_str()}",
-                                    class: if palette == option { "palette-chip active" } else { "palette-chip" },
-                                    style: "--swatch: {option.swatch()};",
+                                    class: if active_mode == option { "active" } else { "" },
                                     onclick: {
                                         let services = services.clone();
-                                        move |_| apply_palette(&services, ui, option)
+                                        move |_| apply_color_mode(&services, ui, option)
                                     },
                                     "{option.label()}"
                                 }
                             }
                         }
                     }
+
+                    div { class: "style-gallery",
+                        for option in UiStyle::ALL {
+                            {
+                                let (frame_bg, side_bg, stage_bg, bub_in, bub_out, island_r) =
+                                    style_preview_colors(option, active_mode);
+                                let is_community = option == UiStyle::Community;
+                                rsx! {
+                                    button {
+                                        key: "{option.as_str()}",
+                                        class: if active_style == option { "style-card active" } else { "style-card" },
+                                        onclick: {
+                                            let services = services.clone();
+                                            move |_| apply_style(&services, ui, option)
+                                        },
+                                        div {
+                                            class: "style-preview-box",
+                                            style: "background: {frame_bg};",
+                                            div {
+                                                class: "style-preview-side",
+                                                style: "background: {side_bg}; border-radius: {island_r};",
+                                                div {
+                                                    style: "height: 8px; width: 75%; border-radius: 99px; background: {bub_out}; opacity: 0.85;",
+                                                }
+                                                div {
+                                                    style: "height: 7px; width: 90%; border-radius: 99px; background: {bub_in};",
+                                                }
+                                                div {
+                                                    style: "height: 7px; width: 65%; border-radius: 99px; background: {bub_in};",
+                                                }
+                                            }
+                                            div {
+                                                class: "style-preview-main",
+                                                style: "background: {stage_bg}; border-radius: {island_r};",
+                                                div {
+                                                    class: "style-preview-bubble-in",
+                                                    style: "background: {bub_in};",
+                                                }
+                                                div {
+                                                    class: "style-preview-bubble-out",
+                                                    style: if is_community {
+                                                        format!("align-self: flex-start; width: 82%; background: {bub_in}; border-left: 3px solid {bub_out};")
+                                                    } else {
+                                                        format!("background: {bub_out};")
+                                                    },
+                                                }
+                                            }
+                                        }
+                                        div { class: "style-card-title",
+                                            strong { "{option.label()}" }
+                                            span {
+                                                class: "style-swatch-dot",
+                                                style: "background: {option.swatch()};",
+                                            }
+                                        }
+                                        p { class: "hint", "{option.description()}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Densidade" }
-                            span { "Altura das linhas de chat e espaçamento." }
+                            strong { "Densidade das listas e mensagens" }
+                            span { "Ajusta a altura das conversas e o respiro entre mensagens." }
                         }
                         div { class: "segmented",
                             for option in Density::ALL {
@@ -144,11 +283,20 @@ pub fn SettingsView() -> Element {
                 }
 
                 section { class: "settings-card",
-                    h2 { "Sessão" }
+                    h2 { "Conta & Sessão" }
+                    if let Some(user) = ui.session.auth_user() {
+                        div { class: "setting-row",
+                            div { class: "setting-row-copy",
+                                strong { "Conectado como {user}" }
+                                span { "Sessão TDLib ativa neste dispositivo." }
+                            }
+                            span { class: "pill good", "Online" }
+                        }
+                    }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Pular login" }
-                            span { "Quando ativo, o shell abre direto no dashboard." }
+                            strong { "Pular tela de login na inicialização" }
+                            span { "Abre direto nas conversas ou modo prévia ao iniciar o app." }
                         }
                         button {
                             class: if skip_login() { "btn small primary" } else { "btn small ghost" },
@@ -160,7 +308,11 @@ pub fn SettingsView() -> Element {
                                     match services.settings.set_bool(SettingKey::SKIP_LOGIN, next) {
                                         Ok(()) => push_toast(
                                             ui.shell.toasts,
-                                            if next { "Login será pulado no próximo start." } else { "Login volta a ser solicitado." },
+                                            if next {
+                                                "Login será pulado na próxima abertura."
+                                            } else {
+                                                "Login voltará a ser exibido ao iniciar."
+                                            },
                                             ToastKind::Info,
                                         ),
                                         Err(error) => push_toast(
@@ -176,56 +328,63 @@ pub fn SettingsView() -> Element {
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Encerrar sessão Telegram" }
-                            span { "Faz logout no TDLib e volta para a tela de login." }
+                            strong { "Sessão do Telegram" }
+                            span { "Voltar para a tela de login ou encerrar a conta no TDLib." }
                         }
-                        button {
-                            class: "btn small ghost",
-                            onclick: {
-                                let services = services.clone();
-                                move |_| {
+                        div { class: "settings-inline-actions",
+                            button {
+                                class: "btn small ghost",
+                                onclick: move |_| ui.shell.logged_in.set(false),
+                                "Tela de Login"
+                            }
+                            button {
+                                class: "btn small danger",
+                                onclick: {
                                     let services = services.clone();
-                                    spawn(async move {
-                                        match services.telegram.log_out().await {
-                                            Ok(_) => {
-                                                ui.shell.logged_in.set(false);
-                                                ui.session.preview_mode.set(false);
-                                                ui.session.auth_user.set(None);
-                                                ui.conversation.chats.set(Vec::new());
-                                                ui.conversation.selected_chat.set(None);
-                                                push_toast(
+                                    move |_| {
+                                        let services = services.clone();
+                                        spawn(async move {
+                                            match services.telegram.log_out().await {
+                                                Ok(_) => {
+                                                    ui.shell.logged_in.set(false);
+                                                    ui.session.preview_mode.set(false);
+                                                    ui.session.auth_user.set(None);
+                                                    ui.conversation.chats.set(Vec::new());
+                                                    ui.conversation.selected_chat.set(None);
+                                                    push_toast(
+                                                        ui.shell.toasts,
+                                                        "Sessão Telegram encerrada.",
+                                                        ToastKind::Success,
+                                                    );
+                                                }
+                                                Err(error) => push_toast(
                                                     ui.shell.toasts,
-                                                    "Sessão Telegram encerrada.",
-                                                    ToastKind::Success,
-                                                );
+                                                    format!("Falha ao sair: {error}"),
+                                                    ToastKind::Error,
+                                                ),
                                             }
-                                            Err(error) => push_toast(
-                                                ui.shell.toasts,
-                                                format!("Falha ao sair: {error}"),
-                                                ToastKind::Error,
-                                            ),
-                                        }
-                                    });
-                                }
-                            },
-                            "Sair"
+                                        });
+                                    }
+                                },
+                                "Encerrar sessão"
+                            }
                         }
                     }
                 }
 
                 section { class: "settings-card",
-                    h2 { "Cache de mídia" }
+                    h2 { "Cache de Mídia" }
                     p { class: "hint",
-                        "Mídias baixadas do Telegram ficam em um cache local. O limite é aplicado \
-                         apagando os arquivos mais antigos quando o espaço é atingido."
+                        "Fotos e vídeos visualizados ficam em cache local para abertura instantânea. \
+                         O limite remove automaticamente os itens mais antigos."
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Cache nativo" }
+                            strong { "Espaço em uso" }
                             span {
                                 match &cache_stats() {
                                     Some(stats) if stats.success => format!(
-                                        "{} em {} mídias",
+                                        "{} distribuídos em {} mídias",
                                         format_bytes(stats.total_size),
                                         stats.media_count
                                     ),
@@ -233,12 +392,12 @@ pub fn SettingsView() -> Element {
                                         .error
                                         .clone()
                                         .unwrap_or_else(|| "Indisponível".to_string()),
-                                    None => "Calculando...".to_string(),
+                                    None => "Calculando uso do cache…".to_string(),
                                 }
                             }
                         }
                         button {
-                            class: if confirm_clear() { "btn small danger" } else { "btn small ghost" },
+                            class: if confirm_clear() { "btn small danger" } else { "btn small soft" },
                             disabled: clearing_cache(),
                             onclick: {
                                 let services = services.clone();
@@ -267,7 +426,7 @@ pub fn SettingsView() -> Element {
                                                         push_toast(
                                                             ui.shell.toasts,
                                                             format!(
-                                                                "Cache limpo, mas as galerias Twitter falharam: {error}"
+                                                                "Cache limpo, mas galerias X falharam: {error}"
                                                             ),
                                                             ToastKind::Error,
                                                         );
@@ -293,7 +452,7 @@ pub fn SettingsView() -> Element {
                                                         }
                                                         push_toast(
                                                             ui.shell.toasts,
-                                                            "Cache de mídia e galerias Twitter limpos.",
+                                                            "Cache de mídia e galerias X limpos.",
                                                             ToastKind::Success,
                                                         );
                                                     }
@@ -316,7 +475,7 @@ pub fn SettingsView() -> Element {
                                 }
                             },
                             if clearing_cache() {
-                                "Limpando..."
+                                "Limpando…"
                             } else if confirm_clear() {
                                 "Confirmar limpeza"
                             } else {
@@ -326,8 +485,8 @@ pub fn SettingsView() -> Element {
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Limite do cache" }
-                            span { "Espaço máximo usado pelas mídias baixadas." }
+                            strong { "Limite máximo do cache" }
+                            span { "Arquivos mais antigos são removidos quando o teto é atingido." }
                         }
                         div { class: "setting-row-control",
                             Select {
@@ -371,54 +530,69 @@ pub fn SettingsView() -> Element {
                             }
                         }
                     }
+                    div { class: "setting-row",
+                        div { class: "setting-row-copy",
+                            strong { "Remover galerias X ao limpar o cache" }
+                            span { "Quando ativo, limpar o cache também remove perfis X seguidos." }
+                        }
+                        button {
+                            class: if clear_twitter_on_cache() { "btn small primary" } else { "btn small ghost" },
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    let next = !clear_twitter_on_cache();
+                                    clear_twitter_on_cache.set(next);
+                                    let _ = services.settings.set_bool(
+                                        SettingKey::CLEAR_TWITTER_GROUPS_ON_CLEAR_CACHE,
+                                        next,
+                                    );
+                                }
+                            },
+                            if clear_twitter_on_cache() { "Sim" } else { "Não" }
+                        }
+                    }
                 }
 
                 section { class: "settings-card",
-                    h2 { "Migração do app antigo" }
-                    p { class: "hint",
-                        "Importa chaves antigas que ainda existam no localStorage desta WebView. \
-                         Valores já gravados no SQLite não são sobrescritos."
-                    }
+                    h2 { "Importação & Dados" }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Importar preferências" }
-                            span { "Valores já gravados no SQLite não são sobrescritos." }
+                            strong { "Importar preferências legadas" }
+                            span { "Resgata chaves antigas do localStorage sem sobrescrever o SQLite." }
                         }
                         button {
-                            class: "btn small",
+                            class: "btn small soft",
                             onclick: {
                                 let services = services.clone();
                                 move |_| import_legacy(services.clone(), ui)
                             },
-                            "Importar do localStorage"
+                            "Importar dados antigos"
                         }
                     }
                 }
 
                 section { class: "settings-card",
-                    h2 { "Diagnóstico" }
+                    h2 { "Sobre & Diagnóstico" }
                     dl { class: "kv",
                         dt { "Versão" }
                         dd { "v{app_version}" }
-                        dt { "Sistema" }
+                        dt { "Plataforma" }
                         dd { "{platform}" }
-                        dt { "Banco" }
+                        dt { "Banco SQLite" }
                         dd { "{database_path}" }
-                        dt { "Dados" }
+                        dt { "Diretório" }
                         dd { "{data_dir}" }
                         dt { "Cache" }
                         dd { "{cache_dir}" }
-                        dt { "Log de falhas" }
+                        dt { "Crash Log" }
                         dd { "{crash_log}" }
                         dt { "Schema" }
                         dd { "v{plasma_store::db::SCHEMA_VERSION}" }
-                        dt { "Janela" }
-                        dd { "Dioxus 0.7.10 / WebView" }
                     }
                     div { class: "setting-row",
                         div { class: "setting-row-copy",
-                            strong { "Pastas e logs" }
-                            span { "Abra o diretório de dados ou o log de falhas para anexar a um relato." }
+                            strong { "Acesso rápido aos diretórios" }
+                            span { "Abra a pasta local do aplicativo ou inspecione o registro de falhas." }
                         }
                         div { class: "settings-inline-actions",
                             button {
@@ -428,7 +602,8 @@ pub fn SettingsView() -> Element {
                                         push_toast(ui.shell.toasts, error, ToastKind::Error);
                                     }
                                 },
-                                "Abrir dados"
+                                Icon { name: IconName::Folder, size: 15, class: "icon" }
+                                "Abrir pasta de dados"
                             }
                             button {
                                 class: "btn small ghost",
@@ -479,9 +654,7 @@ fn import_legacy(services: AppServices, mut ui: UiState) {
                     try {{
                         const value = window.localStorage.getItem(key);
                         if (value !== null) entries.push([key, value]);
-                    }} catch (_) {{
-                        // localStorage can be unavailable; keep the values we have.
-                    }}
+                    }} catch (_) {{}}
                 }}
                 dioxus.send(entries);
             }})()
@@ -492,7 +665,7 @@ fn import_legacy(services: AppServices, mut ui: UiState) {
         match eval.recv::<Vec<(String, String)>>().await {
             Ok(entries) if entries.is_empty() => push_toast(
                 ui.shell.toasts,
-                "Nenhuma preferência encontrada nesta WebView.",
+                "Nenhuma preferência antiga encontrada nesta WebView.",
                 ToastKind::Info,
             ),
             Ok(entries) => {
