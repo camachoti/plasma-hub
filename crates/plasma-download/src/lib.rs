@@ -172,7 +172,7 @@ impl DownloadError {
     }
 
     fn keeps_partial(&self) -> bool {
-        self.is_retryable() || matches!(self, Self::Cancelled)
+        !matches!(self, Self::InvalidUrl | Self::InsecureUrl)
     }
 }
 
@@ -290,7 +290,22 @@ pub async fn download_url_to_file(
     file_path: &str,
     headers: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
+    download_url_to_file_with_identity(app, id, url, file_path, headers, None).await
+}
+
+/// Same streamed download, but the partial file belongs to `identity` rather
+/// than to the current URL. A renewed CDN link can then continue the bytes
+/// already saved for that post and format.
+pub async fn download_url_to_file_with_identity(
+    app: &AppEnv,
+    id: &str,
+    url: &str,
+    file_path: &str,
+    headers: Option<HashMap<String, String>>,
+    identity: Option<&str>,
+) -> Result<(), String> {
     validate_download_url(url).map_err(|error| error.to_string())?;
+    let identity = identity.unwrap_or(url).to_string();
     let destination = Path::new(file_path);
     let partial = partial_path(file_path)?;
     let partial_meta = partial_meta_path(&partial);
@@ -303,6 +318,7 @@ pub async fn download_url_to_file(
         app,
         id,
         url,
+        &identity,
         destination,
         &partial,
         &partial_meta,
@@ -326,6 +342,7 @@ async fn download_with_retries(
     app: &AppEnv,
     id: &str,
     url: &str,
+    identity: &str,
     destination: &Path,
     partial: &Path,
     partial_meta: &Path,
@@ -339,6 +356,7 @@ async fn download_with_retries(
             app,
             id,
             url,
+            identity,
             destination,
             partial,
             partial_meta,
@@ -370,6 +388,7 @@ async fn download_once(
     app: &AppEnv,
     id: &str,
     url: &str,
+    identity: &str,
     destination: &Path,
     partial: &Path,
     partial_meta: &Path,
@@ -392,7 +411,7 @@ async fn download_once(
     let stored_meta = std::fs::read(partial_meta)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<PartialDownloadMeta>(&bytes).ok())
-        .filter(|meta| meta.source_key == source_key(url));
+        .filter(|meta| meta.source_key == source_key(identity));
     let resume_from = if stored_meta.is_some() {
         std::fs::metadata(partial)
             .map(|metadata| metadata.len())
@@ -442,7 +461,7 @@ async fn download_once(
         .filter(|value| !value.starts_with("W/"));
     if let Some(etag) = etag {
         let meta = PartialDownloadMeta {
-            source_key: source_key(url),
+            source_key: source_key(identity),
             etag: etag.to_string(),
         };
         std::fs::write(partial_meta, serde_json::to_vec(&meta)?)?;

@@ -17,7 +17,7 @@ The repository is a single Cargo workspace.
 - `crates/plasma-telegram`: TDLib integration and the local media HTTP server.
 - `crates/plasma-twitter`, `plasma-tiktok`, `plasma-youtube`: native extractors/downloaders.
 - `crates/plasma-duplicates`: duplicate media search.
-- `crates/plasma-instagram`, `plasma-reddit`: migration placeholders.
+- `crates/plasma-instagram`, `plasma-reddit`: Instagram and Reddit extractors and downloads.
 - `crates/plasma-ui`: Dioxus views, theme, virtualized timeline, shared controls and CSS; renderer-independent.
 - `apps/plasma`: desktop/Android composition root and Dioxus renderer (package `plasma`, member of the root workspace).
 - `reference/react-frontend`: old React/TypeScript/Vite frontend kept as reference. It is not compiled, tested or packaged.

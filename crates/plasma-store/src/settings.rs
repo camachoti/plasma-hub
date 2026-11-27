@@ -37,6 +37,18 @@ impl SettingKey {
     pub const TWITTER_FAKE_PENDING_CHAT: Self = Self("plasma_twitter_pending_fake_chat");
     /// Maximum size in bytes of the native Telegram media cache (`0` = unlimited).
     pub const MEDIA_CACHE_LIMIT: Self = Self("plasma_media_cache_limit");
+    /// Interest ids that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_INTERESTS: Self = Self("plasma_reels_interests");
+    /// Subreddits that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_SUBREDDITS: Self = Self("plasma_reels_subreddits");
+    /// Public Instagram usernames that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_INSTAGRAM: Self = Self("plasma_reels_instagram");
+    /// Public X / Twitter usernames that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_TWITTER: Self = Self("plasma_reels_twitter");
+    /// Public YouTube channels or Shorts topics that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_YOUTUBE: Self = Self("plasma_reels_youtube");
+    /// Public TikTok profiles or topics that fill the Reels queue, stored as a JSON string array.
+    pub const REELS_TIKTOK: Self = Self("plasma_reels_tiktok");
 
     pub const fn from_static(key: &'static str) -> Self {
         Self(key)

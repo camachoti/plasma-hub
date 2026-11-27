@@ -246,6 +246,43 @@ pub async fn pick_media_file() -> Option<PathBuf> {
     receiver.await.ok().flatten()
 }
 
+/// Opens an http(s) URL in the system handler.
+pub fn open_url(url: &str) -> Result<(), String> {
+    with_env(|env, activity| {
+        let action = env
+            .new_string("android.intent.action.VIEW")
+            .map_err(|error| format!("Falha ao preparar o link: {error}"))?;
+        let parsed = env
+            .new_string(url)
+            .map_err(|error| format!("Falha ao preparar o link: {error}"))?;
+        let uri = env
+            .call_static_method(
+                "android/net/Uri",
+                "parse",
+                "(Ljava/lang/String;)Landroid/net/Uri;",
+                &[JValue::Object(&parsed)],
+            )
+            .map_err(|error| format!("Falha ao preparar o link: {error}"))?
+            .l()
+            .map_err(|error| format!("Falha ao preparar o link: {error}"))?;
+        let intent = env
+            .new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;Landroid/net/Uri;)V",
+                &[JValue::Object(&action), JValue::Object(&uri)],
+            )
+            .map_err(|error| format!("Falha ao preparar o link: {error}"))?;
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Falha ao abrir o link: {error}"))
+    })
+}
+
 /// Opens a file with an Android viewer.
 pub fn open_path(path: &str) -> Result<(), String> {
     call_path_method(path, "openPath", "Falha ao abrir arquivo")

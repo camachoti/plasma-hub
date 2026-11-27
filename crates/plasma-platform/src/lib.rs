@@ -47,6 +47,46 @@ pub fn ensure_dir(path: &str) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|error| error.to_string())
 }
 
+/// Opens an http(s) URL with the platform handler.
+pub fn open_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Link inválido.".to_string());
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        android::open_url(url)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Opens a file with the platform handler.
 pub fn open_path(path: &str) -> Result<(), String> {
     let target = Path::new(path);

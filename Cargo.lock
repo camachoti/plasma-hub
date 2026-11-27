@@ -3743,6 +3743,8 @@ version = "0.1.0"
 dependencies = [
  "plasma-core",
  "plasma-download",
+ "plasma-instagram",
+ "plasma-reddit",
  "plasma-tiktok",
  "plasma-twitter",
  "plasma-youtube",
@@ -3757,6 +3759,9 @@ name = "plasma-instagram"
 version = "0.1.0"
 dependencies = [
  "plasma-core",
+ "regex",
+ "reqwest",
+ "serde_json",
 ]
 
 [[package]]
@@ -3785,7 +3790,13 @@ dependencies = [
 name = "plasma-reddit"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "plasma-core",
+ "plasma-download",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3809,6 +3820,7 @@ dependencies = [
  "plasma-media",
  "plasma-store",
  "rand 0.9.5",
+ "reqwest",
  "serde",
  "serde_json",
  "tdlib-rs",

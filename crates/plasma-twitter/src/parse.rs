@@ -1171,3 +1171,268 @@ pub(crate) fn format_duration(seconds: u64) -> String {
         format!("{}:{:02}", minutes, secs)
     }
 }
+
+pub(crate) async fn fetch_syndication_timeline_videos(
+    client: &reqwest::Client,
+    username: &str,
+) -> Result<Vec<PublicTimelineVideo>, String> {
+    let url =
+        format!("https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}");
+    let response = client
+        .get(&url)
+        .header("accept", "text/html,application/xhtml+xml")
+        .send()
+        .await
+        .map_err(|e| format!("X syndication indisponível: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("X syndication HTTP {}", response.status()));
+    }
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Falha ao ler timeline pública do X: {e}"))?;
+    Ok(parse_syndication_timeline_videos(&html, username))
+}
+
+pub(crate) async fn fetch_syndication_timeline_profile(
+    client: &reqwest::Client,
+    username: &str,
+    original_url: &str,
+) -> Result<NativeProfileInfo, String> {
+    let videos = fetch_syndication_timeline_videos(client, username).await?;
+    let thumbnail_url = videos.first().and_then(|v| v.thumbnail_url.clone());
+    let media_items: Vec<NativeProfileMediaItem> = videos
+        .into_iter()
+        .map(|v| NativeProfileMediaItem {
+            url: v.video_url,
+            thumbnail_url: v.thumbnail_url,
+            is_video: true,
+        })
+        .collect();
+    let media_urls = media_items.iter().map(|i| i.url.clone()).collect();
+    Ok(NativeProfileInfo {
+        platform: "twitter".to_string(),
+        username: username.to_string(),
+        display_name: None,
+        avatar_url: None,
+        thumbnail_url,
+        media_count: media_items.len(),
+        media_urls,
+        media_items,
+        original_url: original_url.to_string(),
+    })
+}
+
+pub(crate) fn parse_syndication_timeline_videos(
+    html: &str,
+    fallback_username: &str,
+) -> Vec<PublicTimelineVideo> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Some(next_data) = extract_next_data_json(html) {
+        if let Some(entries) = next_data
+            .pointer("/props/pageProps/timeline/entries")
+            .and_then(Value::as_array)
+        {
+            for entry in entries {
+                let Some(tweet) = entry.pointer("/content/tweet") else {
+                    continue;
+                };
+                if let Some(video) = video_from_syndication_entry(tweet, fallback_username) {
+                    if seen.insert(video.video_url.clone()) {
+                        out.push(video);
+                    }
+                }
+                if out.len() >= 12 {
+                    break;
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        for (idx, url) in extract_video_urls_from_text(html)
+            .into_iter()
+            .take(8)
+            .enumerate()
+        {
+            if seen.insert(url.clone()) {
+                out.push(PublicTimelineVideo {
+                    id: format!("{fallback_username}-embed-{idx}"),
+                    title: format!("@{fallback_username}"),
+                    author: format!("@{fallback_username}"),
+                    page_url: format!("https://x.com/{fallback_username}"),
+                    video_url: url,
+                    thumbnail_url: None,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+fn extract_next_data_json(html: &str) -> Option<Value> {
+    let marker = r#"<script id="__NEXT_DATA__" type="application/json">"#;
+    let start = html.find(marker)? + marker.len();
+    let rest = &html[start..];
+    let end = rest.find("</script>")?;
+    serde_json::from_str(&rest[..end]).ok()
+}
+
+fn video_from_syndication_entry(
+    tweet: &Value,
+    fallback_username: &str,
+) -> Option<PublicTimelineVideo> {
+    let id = tweet
+        .get("id_str")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let screen_name = tweet
+        .pointer("/user/screen_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_username);
+    let raw_text = tweet
+        .get("full_text")
+        .or_else(|| tweet.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let cleaned = strip_tco_links(raw_text);
+    let title = if cleaned.is_empty() {
+        format!("@{screen_name}")
+    } else {
+        cleaned.chars().take(180).collect()
+    };
+
+    let media_list = tweet
+        .pointer("/extended_entities/media")
+        .or_else(|| tweet.pointer("/entities/media"))
+        .and_then(Value::as_array)?;
+
+    for media in media_list {
+        let variants = media
+            .pointer("/video_info/variants")
+            .and_then(Value::as_array);
+        let Some(variants) = variants else {
+            continue;
+        };
+        let best_mp4 = variants
+            .iter()
+            .filter_map(|variant| {
+                let ctype = variant.get("content_type")?.as_str()?;
+                if ctype != "video/mp4" {
+                    return None;
+                }
+                let url = variant.get("url")?.as_str()?;
+                if !url.starts_with("https://") {
+                    return None;
+                }
+                let bitrate = variant.get("bitrate").and_then(Value::as_u64).unwrap_or(0);
+                Some((bitrate, url.to_string()))
+            })
+            .max_by_key(|(bitrate, _)| *bitrate)
+            .map(|(_, url)| url);
+
+        if let Some(video_url) = best_mp4 {
+            let thumbnail_url = media
+                .get("media_url_https")
+                .and_then(Value::as_str)
+                .filter(|u| u.starts_with("https://"))
+                .map(str::to_string);
+            return Some(PublicTimelineVideo {
+                id,
+                title,
+                author: format!("@{screen_name}"),
+                page_url: format!(
+                    "https://x.com/{screen_name}/status/{}",
+                    tweet.get("id_str").and_then(Value::as_str).unwrap_or("")
+                ),
+                video_url,
+                thumbnail_url,
+            });
+        }
+    }
+    None
+}
+
+pub(crate) async fn analyze_twitter_tweet_fx(
+    client: &reqwest::Client,
+    tweet_id: &str,
+    original_url: &str,
+) -> Result<NativeMediaInfo, String> {
+    let response = client
+        .get(format!("https://api.fxtwitter.com/status/{tweet_id}"))
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("FxTwitter HTTP {}", response.status()));
+    }
+    let data: Value = response.json().await.map_err(|e| e.to_string())?;
+    let tweet = data
+        .get("tweet")
+        .ok_or_else(|| "FxTwitter sem dados de tweet".to_string())?;
+    let screen_name = tweet
+        .pointer("/author/screen_name")
+        .and_then(Value::as_str)
+        .unwrap_or("x");
+    let author_name = tweet
+        .pointer("/author/name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let text = tweet
+        .get("text")
+        .and_then(Value::as_str)
+        .map(strip_tco_links)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("@{screen_name}"));
+    let videos = tweet
+        .pointer("/media/videos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Tweet público sem vídeo direto".to_string())?;
+    let first = videos
+        .first()
+        .ok_or_else(|| "Tweet público sem vídeo".to_string())?;
+    let video_url = first
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("https://"))
+        .ok_or_else(|| "URL de vídeo ausente".to_string())?;
+    let thumbnail_url = first
+        .get("thumbnail_url")
+        .and_then(Value::as_str)
+        .filter(|u| u.starts_with("https://"))
+        .map(str::to_string);
+    let duration = first
+        .get("duration")
+        .and_then(Value::as_f64)
+        .map(|d| format_duration(d.round() as u64))
+        .unwrap_or_else(|| "—".to_string());
+
+    Ok(NativeMediaInfo {
+        platform: "twitter".to_string(),
+        title: text,
+        author: format!("@{screen_name}"),
+        author_full: author_name,
+        duration,
+        thumb_hue: 205,
+        thumb_hue2: 225,
+        thumbnail_url,
+        original_url: original_url.to_string(),
+        formats: NativeFormats {
+            video: vec![NativeFormatOption {
+                id: "twitter-hd".to_string(),
+                label: "HD".to_string(),
+                sub: "MP4 · X/Twitter".to_string(),
+                size: "—".to_string(),
+                best: Some(true),
+                url: Some(video_url.to_string()),
+            }],
+            audio: Vec::new(),
+        },
+    })
+}

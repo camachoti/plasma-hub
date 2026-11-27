@@ -6,7 +6,7 @@ use regex::Regex;
 #[cfg(not(target_os = "android"))]
 use serde_json::Value;
 #[cfg(not(target_os = "android"))]
-use std::{fs, io::Write, path::Path, process::Stdio};
+use std::{fs, path::Path, process::Stdio};
 #[cfg(not(target_os = "android"))]
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -222,22 +222,6 @@ pub async fn analyze_tiktok_with_tikwm(url: &str) -> Result<TikTokMediaInfo, Str
 }
 
 #[cfg(not(target_os = "android"))]
-async fn request_tiktok_media(
-    client: &reqwest::Client,
-    media_url: &str,
-    cancellation: &DownloadCancellation,
-) -> Result<reqwest::Response, String> {
-    tokio::select! {
-        response = client
-            .get(media_url)
-            .header("accept", "video/mp4,audio/mpeg,video/*;q=0.9,audio/*;q=0.9,*/*;q=0.8")
-            .header("referer", "https://www.tiktok.com/")
-            .send() => response.map_err(|error| error.to_string()),
-        _ = cancellation.wait() => Err(DOWNLOAD_CANCELED_ERROR.to_string()),
-    }
-}
-
-#[cfg(not(target_os = "android"))]
 async fn download_tiktok_direct(
     app_handle: &AppEnv,
     id: &str,
@@ -247,76 +231,62 @@ async fn download_tiktok_direct(
     output_path: &Path,
     cancellation: &DownloadCancellation,
 ) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36",
-        )
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut response = request_tiktok_media(&client, media_url, cancellation).await?;
-
-    if response.status() == reqwest::StatusCode::FORBIDDEN {
-        tracing::debug!("TikTok direct URL expired; refreshing with TikWM");
-        let refreshed = analyze_tiktok_with_tikwm(source_url).await?;
-        let refreshed_url = if format_id.contains("audio") {
-            refreshed
-                .formats
-                .audio
-                .first()
-                .and_then(|format| format.url.as_deref())
-        } else {
-            refreshed
-                .formats
-                .video
-                .first()
-                .and_then(|format| format.url.as_deref())
-        }
-        .ok_or_else(|| "TikWM não retornou uma URL renovada.".to_string())?;
-        response = request_tiktok_media(&client, refreshed_url, cancellation).await?;
-    }
-
-    if !response.status().is_success() {
-        return Err(format!("TikTok CDN HTTP {}", response.status()));
-    }
-
-    let total = response.content_length().unwrap_or(0);
-    let partial_path = format!("{}.part", output_path.to_string_lossy());
-    let result = async {
-        let mut file = fs::File::create(&partial_path).map_err(|error| error.to_string())?;
-        let mut received = 0_u64;
-        loop {
-            let chunk = tokio::select! {
-                chunk = response.chunk() => chunk.map_err(|error| error.to_string())?,
-                _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
-            };
-            let Some(chunk) = chunk else { break };
-            file.write_all(&chunk).map_err(|error| error.to_string())?;
-            received += chunk.len() as u64;
-            let progress = if total > 0 {
-                ((received as f64 / total as f64) * 100.0).min(99.0)
+    let _ = cancellation;
+    let destination = output_path.to_string_lossy().to_string();
+    let headers = tiktok_download_headers();
+    let identity = format!("tiktok|{source_url}|{format_id}");
+    match plasma_download::download_url_to_file_with_identity(
+        app_handle,
+        id,
+        media_url,
+        &destination,
+        Some(headers.clone()),
+        Some(&identity),
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.contains("403") => {
+            tracing::debug!("TikTok direct URL expired; continuing the same file");
+            let refreshed = analyze_tiktok_with_tikwm(source_url).await?;
+            let refreshed_url = if format_id.contains("audio") {
+                refreshed
+                    .formats
+                    .audio
+                    .first()
+                    .and_then(|format| format.url.clone())
             } else {
-                50.0
-            };
-            app_handle.emit(
-                "tiktok-download-progress",
-                TikTokDownloadProgressEvent {
-                    id: id.to_string(),
-                    progress,
-                },
-            );
+                refreshed
+                    .formats
+                    .video
+                    .first()
+                    .and_then(|format| format.url.clone())
+            }
+            .ok_or_else(|| "TikWM não retornou uma URL renovada.".to_string())?;
+            plasma_download::download_url_to_file_with_identity(
+                app_handle,
+                id,
+                &refreshed_url,
+                &destination,
+                Some(headers),
+                Some(&identity),
+            )
+            .await
         }
-        drop(file);
-        let _ = fs::remove_file(output_path);
-        fs::rename(&partial_path, output_path).map_err(|error| error.to_string())?;
-        Ok(())
+        Err(error) => Err(error),
     }
-    .await;
+}
 
-    if result.is_err() {
-        let _ = fs::remove_file(&partial_path);
-    }
-    result
+#[cfg(not(target_os = "android"))]
+fn tiktok_download_headers() -> std::collections::HashMap<String, String> {
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("referer".to_string(), "https://www.tiktok.com/".to_string());
+    headers.insert(
+        "user-agent".to_string(),
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36"
+            .to_string(),
+    );
+    headers
 }
 
 #[cfg(not(target_os = "android"))]
@@ -500,11 +470,35 @@ pub async fn download_tiktok_native(
     }
 
     let binary_path = ensure_ytdlp(app_handle).await?;
+    let info_path = output_path.with_extension("plasma-info.json");
+    if !info_path.is_file() {
+        let dumped = Command::new(&binary_path)
+            .arg("--no-playlist")
+            .arg("-J")
+            .arg("-f")
+            .arg(if format_id == "bestaudio" {
+                "bestaudio/best"
+            } else {
+                "best[vcodec^=avc1]/best[vcodec=h264]/best"
+            })
+            .arg(&url)
+            .output()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !dumped.status.success() {
+            let error = String::from_utf8_lossy(&dumped.stderr);
+            return Err(format!("yt-dlp falhou: {error}"));
+        }
+        fs::write(&info_path, dumped.stdout).map_err(|error| error.to_string())?;
+    }
 
-    let mut command = Command::new(binary_path);
+    let mut command = Command::new(&binary_path);
     command
+        .arg("--load-info-json")
+        .arg(&info_path)
+        .arg("--no-clean-info-json")
         .arg("--no-playlist")
-        .arg("--no-part")
+        .arg("--continue")
         .arg("--newline");
     if format_id == "bestaudio" {
         command
@@ -521,7 +515,6 @@ pub async fn download_tiktok_native(
     let mut child = command
         .arg("-o")
         .arg(&output_path)
-        .arg(&url)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -555,7 +548,6 @@ pub async fn download_tiktok_native(
         status = child.wait() => status.map_err(|error| error.to_string())?,
         _ = cancellation.wait() => {
             let _ = child.kill().await;
-            let _ = fs::remove_file(&output_path);
             return Err(DOWNLOAD_CANCELED_ERROR.to_string());
         }
     };
@@ -589,4 +581,194 @@ pub async fn download_tiktok_native(
     _direct_url: Option<String>,
 ) -> Result<(), String> {
     Err("Download TikTok nativo indisponível no Android.".to_string())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListedTikTokVideo {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    pub page_url: String,
+    pub media_url: String,
+    pub thumbnail_url: Option<String>,
+}
+
+pub async fn list_tiktok_videos(
+    sources: &[String],
+    interests: &[String],
+) -> Result<Vec<ListedTikTokVideo>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        )
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut targets: Vec<(bool, String)> = Vec::new();
+    for raw in sources {
+        let item = raw.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let stripped = item
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("www.")
+            .trim_start_matches("tiktok.com/");
+        if let Some(handle) = stripped.strip_prefix('@') {
+            let clean = handle.split(['/', '?', '#']).next().unwrap_or("").trim();
+            if !clean.is_empty() {
+                targets.push((true, clean.to_string()));
+                continue;
+            }
+        }
+        targets.push((false, item.to_string()));
+    }
+
+    if targets.is_empty() {
+        for interest in interests.iter().take(2) {
+            let kw = match interest.as_str() {
+                "humor" => "comedy funny",
+                "jogos" => "gaming clips",
+                "esportes" => "sports highlights",
+                "animais" => "cute animals",
+                "ciencia" => "science facts",
+                "comida" => "cooking recipe",
+                _ => "oddly satisfying",
+            };
+            targets.push((false, kw.to_string()));
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (is_user, target) in targets.into_iter().take(3) {
+        let req = if is_user {
+            client
+                .get("https://www.tikwm.com/api/user/posts")
+                .query(&[("unique_id", target.as_str()), ("count", "8")])
+        } else {
+            client
+                .get("https://www.tikwm.com/api/feed/search")
+                .query(&[("keywords", target.as_str()), ("count", "8")])
+        };
+        let Ok(resp) = req.send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(json_val) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        for item in parse_tikwm_feed_videos(&json_val) {
+            if seen.insert(item.id.clone()) {
+                out.push(item);
+            }
+            if out.len() >= 12 {
+                return Ok(out);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn parse_tikwm_feed_videos(root: &serde_json::Value) -> Vec<ListedTikTokVideo> {
+    if root.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
+        return Vec::new();
+    }
+    let Some(videos) = root
+        .pointer("/data/videos")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    videos
+        .iter()
+        .filter_map(|v| {
+            let id = v
+                .get("video_id")
+                .or_else(|| v.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            let raw_play = v.get("play").and_then(serde_json::Value::as_str)?;
+            let media_url = normalize_tikwm_url(raw_play)?;
+            let unique_id = v
+                .pointer("/author/unique_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("tiktok");
+            let author = format!("@{unique_id}");
+            let title = v
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(160).collect())
+                .unwrap_or_else(|| author.clone());
+            let thumbnail_url = v
+                .get("cover")
+                .or_else(|| v.get("origin_cover"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(normalize_tikwm_url);
+            Some(ListedTikTokVideo {
+                page_url: format!("https://www.tiktok.com/@{unique_id}/video/{id}"),
+                id,
+                title,
+                author,
+                media_url,
+                thumbnail_url,
+            })
+        })
+        .collect()
+}
+
+fn normalize_tikwm_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("https://") {
+        Some(trimmed.to_string())
+    } else if trimmed.starts_with('/') {
+        Some(format!("https://www.tikwm.com{trimmed}"))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tikwm_feed_response() {
+        let sample = serde_json::json!({
+            "code": 0,
+            "data": {
+                "videos": [
+                    {
+                        "video_id": "73999112233",
+                        "title": "Cool Trick",
+                        "play": "/video/media/play/73999112233.mp4",
+                        "cover": "https://p16-sign.tiktokcdn-us.com/cover.jpg",
+                        "author": { "unique_id": "skater", "nickname": "Skater" }
+                    }
+                ]
+            }
+        });
+        let list = parse_tikwm_feed_videos(&sample);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "73999112233");
+        assert_eq!(list[0].author, "@skater");
+        assert_eq!(
+            list[0].media_url,
+            "https://www.tikwm.com/video/media/play/73999112233.mp4"
+        );
+        assert_eq!(
+            list[0].page_url,
+            "https://www.tiktok.com/@skater/video/73999112233"
+        );
+    }
 }

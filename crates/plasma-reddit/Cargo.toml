@@ -4,10 +4,16 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Reddit extraction (migration pending)"
+description = "Reddit post extraction and downloads"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+plasma-download = { path = "../plasma-download" }
+base64 = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

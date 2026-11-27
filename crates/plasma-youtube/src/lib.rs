@@ -408,7 +408,8 @@ pub async fn get_youtube_stream_url(
     url: String,
     format_id: String,
 ) -> Result<String, String> {
-    let binary_path = ensure_ytdlp(app_handle).await?;
+    let cache_dir = app_handle.paths().cache_dir().join("ytdlp");
+    let _ = fs::create_dir_all(&cache_dir);
 
     let format_arg = if format_id == "video" || format_id == "audio" {
         "best"
@@ -416,35 +417,85 @@ pub async fn get_youtube_stream_url(
         &format_id
     };
 
-    let output = std::process::Command::new(&binary_path)
-        .arg("-g")
-        .arg("-f")
-        .arg(format_arg)
-        .arg(&url)
-        .output()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let fast_runner: Option<(std::path::PathBuf, std::path::PathBuf)> =
+        ensure_ytdlp_zipapp(app_handle).await.ok();
+    #[cfg(not(target_os = "linux"))]
+    let fast_runner: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
-    if !output.status.success() {
-        let fallback = std::process::Command::new(&binary_path)
+    let binary_path = if fast_runner.is_none() {
+        Some(ensure_ytdlp(app_handle).await?)
+    } else {
+        None
+    };
+
+    let build_cmd = |fmt: &str| {
+        let mut cmd = if let Some((ref py, ref script)) = fast_runner {
+            let mut c = Command::new(py);
+            c.arg(script);
+            c
+        } else {
+            Command::new(binary_path.as_ref().expect("binary_path"))
+        };
+        cmd.arg("--no-playlist")
+            .arg("--no-warnings")
+            .arg("--cache-dir")
+            .arg(&cache_dir)
+            .arg("--socket-timeout")
+            .arg("6")
             .arg("-g")
-            .arg(&url)
-            .output()
-            .map_err(|e| e.to_string())?;
+            .arg("-f")
+            .arg(fmt)
+            .arg(&url);
+        cmd
+    };
 
-        if !fallback.status.success() {
-            let err = String::from_utf8_lossy(&fallback.stderr);
-            return Err(format!("yt-dlp falhou: {}", err));
+    let primary = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        build_cmd(format_arg).output(),
+    )
+    .await
+    .map_err(|_| "Tempo esgotado ao resolver stream no yt-dlp.".to_string())?
+    .map_err(|e| e.to_string())?;
+
+    if primary.status.success() {
+        let url_str = String::from_utf8_lossy(&primary.stdout).trim().to_string();
+        if url_str.lines().any(|l| l.starts_with("https://")) {
+            return Ok(url_str);
         }
-
-        let url_str = String::from_utf8_lossy(&fallback.stdout).trim().to_string();
-        let first_url = url_str.lines().next().unwrap_or("").to_string();
-        return Ok(first_url);
     }
 
-    let url_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let first_url = url_str.lines().next().unwrap_or("").to_string();
+    let err = String::from_utf8_lossy(&primary.stderr);
+    Err(format!("yt-dlp falhou: {}", err))
+}
 
-    Ok(first_url)
+#[cfg(target_os = "linux")]
+async fn ensure_ytdlp_zipapp(
+    app_handle: &AppEnv,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let py = std::path::PathBuf::from("/usr/bin/python3");
+    if !py.exists() {
+        return Err("python3 indisponível".to_string());
+    }
+    let app_dir = app_handle.paths().local_data_dir().to_path_buf();
+    let _ = fs::create_dir_all(&app_dir);
+    let zip_path = app_dir.join("yt-dlp_zip");
+    if !zip_path.exists() {
+        let resp = reqwest::get("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp")
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        fs::write(&zip_path, bytes).map_err(|e| e.to_string())?;
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(&zip_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(&zip_path, perms);
+        }
+    }
+    Ok((py, zip_path))
 }
 
 #[cfg(target_os = "android")]
@@ -468,22 +519,26 @@ pub async fn download_youtube_native(
     let binary_path = ensure_ytdlp(app_handle).await?;
 
     let format_arg = if format_id == "video" || format_id == "audio" {
-        "best"
+        "best".to_string()
     } else {
-        &format_id
+        format_id
     };
 
     let download_dir = app_handle.paths().download_dir()?;
     let output_path = download_dir.join(&filename);
+    let info_path = output_path.with_extension("plasma-info.json");
+    prepare_youtube_info(&binary_path, &url, &format_arg, &info_path).await?;
 
     let mut child = Command::new(&binary_path)
+        .arg("--load-info-json")
+        .arg(&info_path)
         .arg("-f")
-        .arg(format_arg)
+        .arg(&format_arg)
         .arg("-o")
         .arg(&output_path)
-        .arg("--no-part")
+        .arg("--continue")
+        .arg("--no-clean-info-json")
         .arg("--newline")
-        .arg(&url)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -513,7 +568,6 @@ pub async fn download_youtube_native(
 
     if cancellation.is_canceled() {
         let _ = child.kill().await;
-        let _ = fs::remove_file(&output_path);
         return Err(DOWNLOAD_CANCELED_ERROR.to_string());
     }
 
@@ -521,7 +575,6 @@ pub async fn download_youtube_native(
         status = child.wait() => status.map_err(|e| e.to_string())?,
         _ = cancellation.wait() => {
             let _ = child.kill().await;
-            let _ = fs::remove_file(&output_path);
             return Err(DOWNLOAD_CANCELED_ERROR.to_string());
         }
     };
@@ -544,6 +597,41 @@ pub async fn download_youtube_native(
     }
 }
 
+/// Saves the chosen format once. A later retry loads this file and continues
+/// the same `.part` instead of opening the watch page again.
+#[cfg(not(target_os = "android"))]
+async fn prepare_youtube_info(
+    binary: &std::path::Path,
+    url: &str,
+    format: &str,
+    info_path: &std::path::Path,
+) -> Result<(), String> {
+    if info_path.is_file() {
+        if let Ok(metadata) = fs::metadata(info_path) {
+            if metadata.len() > 2 {
+                return Ok(());
+            }
+        }
+    }
+    let output = Command::new(binary)
+        .arg("--no-playlist")
+        .arg("-J")
+        .arg("-f")
+        .arg(format)
+        .arg(url)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("yt-dlp falhou: {error}"));
+    }
+    if let Some(parent) = info_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(info_path, &output.stdout).map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "android")]
 pub async fn download_youtube_native(
     app_handle: &AppEnv,
@@ -558,51 +646,27 @@ pub async fn download_youtube_native(
             result = get_youtube_direct_stream_url(&url, &format_id) => result?,
             _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
         };
+        drop(cancellation);
         let download_dir = youtube_download_dir(app_handle)?;
-        fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
         let output_path = download_dir.join(filename);
-
-        let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
-            .build()
-            .map_err(|e| e.to_string())?;
-        let mut response = tokio::select! {
-            result = client
-                .get(direct_url)
-                .header("referer", "https://www.youtube.com/")
-                .send() => result.map_err(|e| e.to_string())?,
-            _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
-        };
-
-        if !response.status().is_success() {
-            return Err(format!("YouTube stream HTTP {}", response.status()));
-        }
-
-        let total = response.content_length().unwrap_or(0);
-        let mut received = 0_u64;
-        let mut file = fs::File::create(&output_path).map_err(|e| e.to_string())?;
-
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-            if cancellation.is_canceled() {
-                drop(file);
-                let _ = fs::remove_file(&output_path);
-                return Err(DOWNLOAD_CANCELED_ERROR.to_string());
-            }
-            file.write_all(&chunk).map_err(|e| e.to_string())?;
-            received += chunk.len() as u64;
-            let progress = if total > 0 {
-                ((received as f64 / total as f64) * 100.0).min(99.0)
-            } else {
-                50.0
-            };
-            app_handle.emit(
-                "youtube-download-progress",
-                DownloadProgressEvent {
-                    id: id.clone(),
-                    progress,
-                },
-            );
-        }
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "referer".to_string(),
+            "https://www.youtube.com/".to_string(),
+        );
+        headers.insert(
+            "user-agent".to_string(),
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+                .to_string(),
+        );
+        plasma_download::download_url_to_file(
+            app_handle,
+            &id,
+            &direct_url,
+            &output_path.to_string_lossy(),
+            Some(headers),
+        )
+        .await?;
 
         app_handle.emit(
             "youtube-download-done",

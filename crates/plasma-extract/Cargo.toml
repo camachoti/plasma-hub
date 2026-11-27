@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 plasma-core = { path = "../plasma-core" }
 plasma-download = { path = "../plasma-download" }
+plasma-instagram = { path = "../plasma-instagram" }
+plasma-reddit = { path = "../plasma-reddit" }
 plasma-tiktok = { path = "../plasma-tiktok" }
 plasma-twitter = { path = "../plasma-twitter" }
 plasma-youtube = { path = "../plasma-youtube" }

@@ -144,45 +144,30 @@ async fn download_twitter_native_inner(
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
     let output_path = download_dir.join(filename);
 
+    if cancellation.is_canceled() {
+        return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+    }
     let cookie_header = normalize_cookie_input(cookies.as_deref())?;
     if cookie_header.is_some() {
         tracing::debug!("using Twitter cookies for media download");
     }
-    let client = build_twitter_client(cookie_header.as_deref())?;
-    let mut response = tokio::select! {
-        result = client.get(url).send() => result.map_err(|e| e.to_string())?,
-        _ = cancellation.wait() => return Err(DOWNLOAD_CANCELED_ERROR.to_string()),
-    };
-
-    if !response.status().is_success() {
-        return Err(format!("Twitter media HTTP {}", response.status()));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("referer".to_string(), "https://x.com/".to_string());
+    headers.insert(
+        "user-agent".to_string(),
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36".to_string(),
+    );
+    if let Some(cookie_header) = cookie_header {
+        headers.insert("cookie".to_string(), cookie_header);
     }
-
-    let total = response.content_length().unwrap_or(0);
-    let mut received = 0_u64;
-    let mut file = fs::File::create(&output_path).map_err(|e| e.to_string())?;
-
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        if cancellation.is_canceled() {
-            drop(file);
-            let _ = fs::remove_file(&output_path);
-            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
-        }
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        received += chunk.len() as u64;
-        let progress = if total > 0 {
-            ((received as f64 / total as f64) * 100.0).min(99.0)
-        } else {
-            50.0
-        };
-        app_handle.emit(
-            "twitter-download-progress",
-            TwitterDownloadProgressEvent {
-                id: id.to_string(),
-                progress,
-            },
-        );
-    }
+    plasma_download::download_url_to_file(
+        app_handle,
+        id,
+        url,
+        &output_path.to_string_lossy(),
+        Some(headers),
+    )
+    .await?;
 
     app_handle.emit(
         "twitter-download-done",

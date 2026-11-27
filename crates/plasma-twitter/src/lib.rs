@@ -77,6 +77,17 @@ pub struct NativeProfileMediaItem {
     pub is_video: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicTimelineVideo {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    pub page_url: String,
+    pub video_url: String,
+    pub thumbnail_url: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct ProfileMediaCollection {
     items: Vec<NativeProfileMediaItem>,
@@ -156,6 +167,47 @@ struct TwitterDownloadDoneEvent {
     id: String,
 }
 
+pub async fn list_public_profile_videos(
+    username: &str,
+    cookies: Option<String>,
+) -> Result<Vec<PublicTimelineVideo>, String> {
+    let resolved_handle = extract_twitter_profile_username(username)?;
+    let cookie_header = normalize_cookie_input(cookies.as_deref())?;
+    let client = build_twitter_client(cookie_header.as_deref())?;
+
+    if cookie_header.is_none() {
+        return fetch_syndication_timeline_videos(&client, &resolved_handle).await;
+    }
+
+    if let Ok(profile) = analyze_twitter_profile_native(resolved_handle.clone(), cookies).await {
+        let author = format!("@{}", profile.username);
+        let fallback_title = profile
+            .display_name
+            .clone()
+            .unwrap_or_else(|| author.clone());
+        let videos: Vec<PublicTimelineVideo> = profile
+            .media_items
+            .into_iter()
+            .filter(|item| item.is_video && item.url.starts_with("https://"))
+            .take(12)
+            .enumerate()
+            .map(|(idx, item)| PublicTimelineVideo {
+                id: format!("{}-{idx}", profile.username),
+                title: fallback_title.clone(),
+                author: author.clone(),
+                page_url: format!("https://x.com/{}", profile.username),
+                video_url: item.url,
+                thumbnail_url: item.thumbnail_url.or_else(|| profile.thumbnail_url.clone()),
+            })
+            .collect();
+        if !videos.is_empty() {
+            return Ok(videos);
+        }
+    }
+
+    fetch_syndication_timeline_videos(&client, &resolved_handle).await
+}
+
 pub async fn analyze_twitter_profile_native(
     url: String,
     cookies: Option<String>,
@@ -167,7 +219,26 @@ pub async fn analyze_twitter_profile_native(
         tracing::debug!("using Twitter cookies for profile analyzer");
     }
     let client = build_twitter_client(cookie_header.as_deref())?;
-    let profile = fetch_twitter_profile_graphql(&client, &username).await?;
+
+    if cookie_header.is_none() {
+        if let Ok(public) = fetch_syndication_timeline_profile(&client, &username, &url).await {
+            if !public.media_items.is_empty() {
+                return Ok(public);
+            }
+        }
+    }
+
+    let profile = match fetch_twitter_profile_graphql(&client, &username).await {
+        Ok(profile) => profile,
+        Err(graphql_err) => {
+            if let Ok(public) = fetch_syndication_timeline_profile(&client, &username, &url).await {
+                if !public.media_items.is_empty() {
+                    return Ok(public);
+                }
+            }
+            return Err(graphql_err);
+        }
+    };
     if let Some(reason) = first_string_for_key(&profile, "unavailable_reason") {
         return Err(format!("Perfil indisponivel no GraphQL: {}", reason));
     }
@@ -249,19 +320,18 @@ pub async fn analyze_twitter_tweet_native(
                 error = %v1_error,
                 "v1 analyzer failed; trying syndication"
             );
-            analyze_twitter_tweet_syndication(&client, &tweet_id, &url)
-                .await
-                .map_err(|syndication_error| {
-                    tracing::debug!(
-                        tweet_id = %tweet_id,
-                        error = %syndication_error,
-                        "syndication analyzer failed"
-                    );
-                    format!(
+            match analyze_twitter_tweet_syndication(&client, &tweet_id, &url).await {
+                Ok(info) => Ok(info),
+                Err(syndication_error) => {
+                    if let Ok(info) = analyze_twitter_tweet_fx(&client, &tweet_id, &url).await {
+                        return Ok(info);
+                    }
+                    Err(format!(
                         "Twitter API falhou: {}. Syndication falhou: {}",
                         v1_error, syndication_error
-                    )
-                })
+                    ))
+                }
+            }
         }
     }
 }
@@ -402,5 +472,17 @@ mod tests {
             .thumbnail_url
             .as_deref()
             .is_some_and(|url| url.contains("pbs.twimg.com/media/photo.jpg")));
+    }
+
+    #[test]
+    fn parses_public_syndication_timeline_without_cookies() {
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"timeline":{"entries":[{"content":{"tweet":{"id_str":"999","full_text":"Rocket launch https://t.co/abc","user":{"screen_name":"NASA"},"extended_entities":{"media":[{"media_url_https":"https://pbs.twimg.com/media/thumb.jpg","video_info":{"variants":[{"content_type":"video/mp4","bitrate":800000,"url":"https://video.twimg.com/ext_tw_video/999/pu/vid/720x1280/clip.mp4"},{"content_type":"video/mp4","bitrate":250000,"url":"https://video.twimg.com/ext_tw_video/999/pu/vid/320x568/low.mp4"}]}}]}}}}]}}}}</script></body></html>"#;
+        let videos = parse_syndication_timeline_videos(html, "NASA");
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, "999");
+        assert_eq!(videos[0].author, "@NASA");
+        assert_eq!(videos[0].title, "Rocket launch");
+        assert!(videos[0].video_url.contains("720x1280"));
+        assert_eq!(videos[0].page_url, "https://x.com/NASA/status/999");
     }
 }

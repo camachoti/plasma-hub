@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Instagram extraction (migration pending)"
+description = "Instagram post extraction"
 
 [dependencies]
 plasma-core = { path = "../plasma-core" }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
