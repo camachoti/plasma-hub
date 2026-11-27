@@ -10,7 +10,7 @@ use plasma_store::SettingsStore;
 use plasma_ui::state::{AppServices, TelegramCredentials, TelegramHandle};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     init_logging();
@@ -61,15 +61,19 @@ fn run() -> Result<(), String> {
     let events = EventBus::default();
     let emitter: Arc<dyn EventEmitter> = Arc::new(BusEmitter {
         bus: events.clone(),
+        last_event: Mutex::new(String::new()),
+        last_event_path: paths.local_data_dir().join("last-event"),
     });
+    #[cfg(target_os = "linux")]
+    let session_dir = paths.local_data_dir().to_path_buf();
     let env = AppEnv::new(paths, emitter);
     install_panic_logger(&env);
 
     // WebKitGTK keeps its disk cache in `$XDG_CACHE_HOME/<app-name>`. A cache
     // left behind by an interrupted run can leave the web process spinning
-    // without ever painting the page, which shows up as an empty window. The
-    // shell serves embedded assets and does not need a persistent web cache,
-    // so isolate it in the app cache and start every launch from a clean one.
+    // without ever painting the page. A launch that stays up clears its own
+    // marker, so the next start keeps the cache. `PLASMA_RESET_WEBVIEW=1`
+    // forces a wipe.
     #[cfg(target_os = "linux")]
     prepare_webview_cache(&env)?;
 
@@ -102,7 +106,14 @@ fn run() -> Result<(), String> {
         let Some(credentials) = services.credentials.clone() else {
             return Err("credenciais do Telegram ausentes".to_string());
         };
-        return run_telegram_smoke(&services, &credentials, &runtime);
+        #[cfg(target_os = "linux")]
+        note_session_start(&session_dir);
+        let result = run_telegram_smoke(&services, &credentials, &runtime);
+        #[cfg(target_os = "linux")]
+        if result.is_ok() {
+            note_session_end(&session_dir);
+        }
+        return result;
     }
 
     plasma_telegram::start_plasma_media_http_server(env)
@@ -135,6 +146,8 @@ fn run() -> Result<(), String> {
         // DMA-BUF stays off so WebKit does not come up blank.
         #[cfg(target_os = "linux")]
         prefer_native_wayland();
+        #[cfg(target_os = "linux")]
+        note_session_start(&session_dir);
         let config = Config::new()
             .with_window(window)
             .with_menu(None)
@@ -144,6 +157,8 @@ fn run() -> Result<(), String> {
             .with_context(services)
             .with_cfg(config)
             .launch(plasma_ui::App);
+        #[cfg(target_os = "linux")]
+        note_session_end(&session_dir);
     }
 
     #[cfg(target_os = "android")]
@@ -165,14 +180,17 @@ fn run() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn prepare_webview_cache(env: &AppEnv) -> Result<(), String> {
     let root = env.paths().cache_dir().join("webview");
+    let marker = root.join(".incomplete");
+    let reset = std::env::var("PLASMA_RESET_WEBVIEW").ok().as_deref() == Some("1");
 
-    if root.exists() {
+    if (reset || marker.exists()) && root.exists() {
         std::fs::remove_dir_all(&root).map_err(|error| {
             format!(
                 "não foi possível limpar o cache do WebView em {}: {error}",
                 root.display()
             )
         })?;
+        tracing::info!("webview cache reset");
     }
 
     std::fs::create_dir_all(&root).map_err(|error| {
@@ -181,9 +199,19 @@ fn prepare_webview_cache(env: &AppEnv) -> Result<(), String> {
             root.display()
         )
     })?;
+    std::fs::write(&marker, b"starting").map_err(|error| {
+        format!(
+            "não foi possível marcar o cache do WebView em {}: {error}",
+            marker.display()
+        )
+    })?;
 
     // Must be set before WebKitGTK is initialized by Dioxus.
     std::env::set_var("XDG_CACHE_HOME", &root);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        let _ = std::fs::remove_file(marker);
+    });
     Ok(())
 }
 
@@ -199,11 +227,92 @@ fn prefer_native_wayland() {
     }
     if std::path::Path::new("/dev/dri").exists() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        std::env::set_var("WEBKIT_GST_DMABUF_SINK_DISABLED", "1");
     }
     if std::env::var_os("GDK_BACKEND").is_some() {
         std::env::remove_var("GDK_BACKEND");
     }
-    tracing::info!("WebView staying on native Wayland");
+    // A paint callback in the Rust tree cannot see a blank WebKit process.
+    // On NVIDIA, compositing is the usual reason the window stays empty
+    // after DMA-BUF is already off. Also disable hardware/Wayland GStreamer
+    // video sinks/decoders so <video> playback never submits DMA-BUF or
+    // subsurface buffers that make Mutter drop the Wayland client.
+    let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists()
+        || std::path::Path::new("/dev/nvidia0").exists();
+    if nvidia {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
+            std::env::set_var(
+                "GST_PLUGIN_FEATURE_RANK",
+                "webkitdmabufvideosink:NONE,waylandsink:NONE,glimagesink:NONE,gtkglsink:NONE,nvh264dec:NONE,nvh265dec:NONE,nvvp9dec:NONE,nvav1dec:NONE,nvautogpucombodec:NONE,vah264dec:NONE,vah265dec:NONE,vavp9dec:NONE,vaav1dec:NONE,vaapih264dec:NONE,vaapih265dec:NONE,vaapivp9dec:NONE,vaapiav1dec:NONE",
+            );
+        }
+        tracing::info!("WebView staying on native Wayland with compositing and HW video sinks off");
+    } else {
+        tracing::info!("WebView staying on native Wayland");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn session_context() -> String {
+    format!(
+        "session={} display={} wayland={} gdk={} dmabuf_off={} compositing_off={}",
+        std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
+        std::env::var("DISPLAY").unwrap_or_default(),
+        std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+        std::env::var("GDK_BACKEND").unwrap_or_else(|_| "unset".to_string()),
+        std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").unwrap_or_default(),
+        std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").unwrap_or_default(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn append_session(local_dir: &std::path::Path, line: &str) {
+    let path = local_dir.join("session.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    use std::io::Write;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "[{timestamp}] {line}");
+}
+
+#[cfg(target_os = "linux")]
+fn note_session_start(local_dir: &std::path::Path) {
+    let state_path = local_dir.join("session.state");
+    if let Ok(previous) = std::fs::read_to_string(&state_path) {
+        if previous.lines().next() == Some("running") {
+            let last = std::fs::read_to_string(local_dir.join("last-event")).unwrap_or_default();
+            append_session(
+                local_dir,
+                &format!(
+                    "previous session ended without a clean shutdown; last event: {last}; {previous}"
+                ),
+            );
+        }
+    }
+    if let Some(parent) = state_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let context = session_context();
+    let _ = std::fs::write(&state_path, format!("running\n{context}\n"));
+    append_session(local_dir, &format!("session started; {context}"));
+}
+
+#[cfg(target_os = "linux")]
+fn note_session_end(local_dir: &std::path::Path) {
+    let _ = std::fs::write(local_dir.join("session.state"), "clean\n");
+    append_session(local_dir, "session ended cleanly");
 }
 
 fn run_telegram_smoke(
@@ -247,6 +356,7 @@ fn run_telegram_smoke(
 /// the app is launched from a desktop menu or from an APK.
 fn install_panic_logger(env: &AppEnv) {
     let path = env.paths().local_data_dir().join("crash.log");
+    let session_log = env.paths().local_data_dir().join("session.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -262,6 +372,13 @@ fn install_panic_logger(env: &AppEnv) {
             .open(&path)
         {
             let _ = writeln!(file, "[{timestamp}] {info}");
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&session_log)
+        {
+            let _ = writeln!(file, "[{timestamp}] panic: {info}");
         }
         if tracing::dispatcher::has_been_set() {
             tracing::error!(panic = %info, "panic");
@@ -346,10 +463,26 @@ fn telegram_credentials() -> Option<TelegramCredentials> {
 /// UI-agnostic [`EventBus`]. The Tauri bridge keeps using its own emitter.
 struct BusEmitter {
     bus: EventBus,
+    last_event: Mutex<String>,
+    last_event_path: PathBuf,
+}
+
+impl BusEmitter {
+    fn remember(&self, event: &str) {
+        let Ok(mut last) = self.last_event.lock() else {
+            return;
+        };
+        if *last == event {
+            return;
+        }
+        *last = event.to_string();
+        let _ = std::fs::write(&self.last_event_path, event);
+    }
 }
 
 impl EventEmitter for BusEmitter {
     fn emit_json(&self, event: &str, payload: Value) {
+        self.remember(event);
         match event {
             "tdlib-auth-state" => {
                 if let Some(state) = payload.as_str() {

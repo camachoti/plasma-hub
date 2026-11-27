@@ -151,19 +151,25 @@ fn handle_stream(app: AppEnv, mut stream: TcpStream) {
     };
     // Bound request headers before parsing; a local client must not allocate
     // arbitrarily large buffers while waiting for the access token check.
-    let mut reader = BufReader::new(cloned.take(16 * 1024));
+    let mut reader = BufReader::new(cloned.take(64 * 1024));
     let mut first_line = String::new();
     if reader.read_line(&mut first_line).is_err() || first_line.trim().is_empty() {
         return;
     }
 
-    let mut method = "";
-    let mut path = "";
+    let mut method = String::new();
+    let mut path = String::new();
+    let mut target = String::new();
     let mut authorized = false;
     let mut first_parts = first_line.split_whitespace();
     if let (Some(request_method), Some(request_path)) = (first_parts.next(), first_parts.next()) {
-        method = request_method;
-        path = request_path.split('?').next().unwrap_or(request_path);
+        method = request_method.to_string();
+        target = request_path.to_string();
+        path = request_path
+            .split('?')
+            .next()
+            .unwrap_or(request_path)
+            .to_string();
         authorized = PLASMA_MEDIA_HTTP_TOKEN
             .get()
             .is_some_and(|expected| request_has_token(request_path, expected));
@@ -191,7 +197,14 @@ fn handle_stream(app: AppEnv, mut stream: TcpStream) {
         return;
     }
 
-    if let Err(error) = write_response(&app, &mut stream, method, path, range_header.as_deref()) {
+    if let Err(error) = write_response(
+        &app,
+        &mut stream,
+        &method,
+        &path,
+        &target,
+        range_header.as_deref(),
+    ) {
         tracing::debug!(%error, "media server write failed");
     }
 }
@@ -287,6 +300,301 @@ fn copy_file_range(
     Ok(sent)
 }
 
+/// Loopback URL that plays an allowlisted HTTPS media address.
+///
+/// The session token stays on the query. The webview never talks to the CDN
+/// directly, so the proxy can attach the Referer each network expects.
+pub fn remote_media_url(upstream: &str) -> Option<String> {
+    validate_remote_url(upstream).ok()?;
+    let port = PLASMA_MEDIA_HTTP_PORT.get()?;
+    let token = PLASMA_MEDIA_HTTP_TOKEN.get()?;
+    let mut url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/remote")).ok()?;
+    url.query_pairs_mut()
+        .append_pair("token", token)
+        .append_pair("url", upstream);
+    Some(url.to_string())
+}
+
+fn remote_upstream(target: &str) -> Result<String, String> {
+    let query = target
+        .split_once('?')
+        .map(|(_, query)| query)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| "URL ausente".to_string())?;
+    let parsed = reqwest::Url::parse(&format!("http://127.0.0.1/remote?{query}"))
+        .map_err(|_| "URL inválida".to_string())?;
+    let upstream = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "url")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "URL ausente".to_string())?;
+    validate_remote_url(&upstream)?;
+    Ok(upstream)
+}
+
+fn validate_remote_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "URL inválida".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("Só vídeos HTTPS entram no player.".to_string());
+    }
+    if !parsed.username().is_empty() {
+        return Err("URL de vídeo inválida.".to_string());
+    }
+    if parsed.port().is_some_and(|port| port != 443) {
+        return Err("URL de vídeo inválida.".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL de vídeo inválida.".to_string())?;
+    if !host_allowed(host) {
+        return Err("Este endereço não pode ser reproduzido.".to_string());
+    }
+    Ok(())
+}
+
+fn host_allowed(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    const SUFFIXES: &[&str] = &[
+        "redd.it",
+        "redditmedia.com",
+        "reddit.com",
+        "cdninstagram.com",
+        "fbcdn.net",
+        "instagram.com",
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokcdn-eu.com",
+        "tiktokv.com",
+        "muscdn.com",
+        "byteoversea.com",
+        "ibytedtos.com",
+        "tikwm.com",
+        "tikwmcdn.com",
+        "twimg.com",
+        "googlevideo.com",
+        "youtube.com",
+    ];
+    SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+fn referer_for(url: &str) -> &'static str {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    if host.contains("instagram") || host.ends_with("fbcdn.net") {
+        "https://www.instagram.com/"
+    } else if host.contains("tikwm") {
+        "https://www.tikwm.com/"
+    } else if host.contains("tiktok")
+        || host.ends_with("muscdn.com")
+        || host.ends_with("byteoversea.com")
+        || host.ends_with("ibytedtos.com")
+    {
+        "https://www.tiktok.com/"
+    } else if host.ends_with("twimg.com") {
+        "https://x.com/"
+    } else if host.ends_with("googlevideo.com") || host.contains("youtube") {
+        "https://www.youtube.com/"
+    } else {
+        "https://www.reddit.com/"
+    }
+}
+
+fn upstream_client_identity(url: &str) -> (&'static str, bool) {
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host.ends_with("googlevideo.com") {
+            let client_param = parsed
+                .query_pairs()
+                .find(|(k, _)| k == "c")
+                .map(|(_, v)| v.to_ascii_uppercase());
+            match client_param.as_deref() {
+                Some("ANDROID_VR") => {
+                    return (
+                        "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                        false,
+                    );
+                }
+                Some("ANDROID_TESTSUITE") => {
+                    return (
+                        "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                        false,
+                    );
+                }
+                Some("IOS") => {
+                    return (
+                        "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                        false,
+                    );
+                }
+                Some("ANDROID") => {
+                    return (
+                        "com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip",
+                        false,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        true,
+    )
+}
+
+fn acceptable_media_type(value: &str) -> bool {
+    let value = value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase();
+    value.starts_with("video/")
+        || value.starts_with("audio/")
+        || value == "application/octet-stream"
+        || value == "application/mp4"
+        || value == "binary/octet-stream"
+}
+
+fn proxy_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("plasma-reel-proxy")
+            .build()
+            .expect("reel proxy runtime")
+    })
+}
+
+fn write_remote_response(
+    stream: &mut TcpStream,
+    method: &str,
+    target: &str,
+    range_header: Option<&str>,
+) -> std::io::Result<()> {
+    let upstream = match remote_upstream(target) {
+        Ok(url) => url,
+        Err(message) => return write_text_response(stream, 400, message),
+    };
+    let referer = referer_for(&upstream).to_string();
+    let range = range_header.map(str::to_string);
+    let head = method.eq_ignore_ascii_case("HEAD");
+    let result = proxy_runtime().block_on(stream_remote(stream, upstream, referer, range, head));
+    match result {
+        Ok(()) => Ok(()),
+        Err(RemoteStreamError::BeforeHeaders(message)) => write_text_response(stream, 502, message),
+        Err(RemoteStreamError::Streaming) => Ok(()),
+    }
+}
+
+enum RemoteStreamError {
+    BeforeHeaders(String),
+    Streaming,
+}
+
+async fn stream_remote(
+    stream: &mut TcpStream,
+    upstream: String,
+    referer: String,
+    range: Option<String>,
+    head: bool,
+) -> Result<(), RemoteStreamError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            match validate_remote_url(attempt.url().as_str()) {
+                Ok(()) => attempt.follow(),
+                Err(_) => attempt.stop(),
+            }
+        }))
+        .build()
+        .map_err(|error| {
+            RemoteStreamError::BeforeHeaders(format!("Falha ao abrir o vídeo: {error}"))
+        })?;
+    let mut request = if head {
+        client.head(&upstream)
+    } else {
+        client.get(&upstream)
+    };
+    let (user_agent, send_referer) = upstream_client_identity(&upstream);
+    request = request.header("user-agent", user_agent);
+    if send_referer {
+        request = request.header("referer", referer);
+    }
+    if let Some(range) = range.as_deref() {
+        request = request.header("range", range);
+    }
+    let response = request.send().await.map_err(|error| {
+        RemoteStreamError::BeforeHeaders(format!("Falha ao abrir o vídeo: {error}"))
+    })?;
+    let status = response.status().as_u16();
+    if status != 200 && status != 206 && status != 416 {
+        return Err(RemoteStreamError::BeforeHeaders(format!(
+            "A origem recusou o vídeo ({status})."
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("video/mp4")
+        .to_string();
+    if status != 416 && !acceptable_media_type(&content_type) {
+        return Err(RemoteStreamError::BeforeHeaders(
+            "A origem não devolveu um vídeo.".to_string(),
+        ));
+    }
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let mut headers = vec![
+        ("Accept-Ranges".to_string(), "bytes".to_string()),
+        ("Content-Type".to_string(), content_type),
+        ("Cache-Control".to_string(), "private, no-store".to_string()),
+    ];
+    if let Some(content_length) = content_length {
+        headers.push(("Content-Length".to_string(), content_length));
+    }
+    if let Some(content_range) = content_range {
+        headers.push(("Content-Range".to_string(), content_range));
+    }
+    write_headers(stream, status, headers).map_err(|_| RemoteStreamError::Streaming)?;
+    if head || status == 416 {
+        return Ok(());
+    }
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| RemoteStreamError::Streaming)?
+    {
+        stream
+            .write_all(&chunk)
+            .map_err(|_| RemoteStreamError::Streaming)?;
+    }
+    stream.flush().map_err(|_| RemoteStreamError::Streaming)
+}
+
 /// Serves the avatar of a chat from the local cache.
 fn write_avatar_response(
     app: &AppEnv,
@@ -341,8 +649,13 @@ fn write_response(
     stream: &mut TcpStream,
     method: &str,
     path: &str,
+    target: &str,
     range_header: Option<&str>,
 ) -> std::io::Result<()> {
+    if path == "/remote" {
+        return write_remote_response(stream, method, target, range_header);
+    }
+
     if let Some(chat_id) = parse_avatar_path(path) {
         return write_avatar_response(app, stream, method, chat_id);
     }
@@ -418,7 +731,9 @@ fn write_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{constant_time_eq, request_has_token};
+    use super::{
+        constant_time_eq, referer_for, remote_upstream, request_has_token, validate_remote_url,
+    };
 
     #[test]
     fn local_media_requires_the_session_token() {
@@ -426,6 +741,33 @@ mod tests {
         assert!(!request_has_token("/telegram/1/2", "secret"));
         assert!(!request_has_token("/telegram/1/2?token=wrong", "secret"));
         assert!(!request_has_token("/telegram/1/2?token=secret2", "secret"));
+    }
+
+    #[test]
+    fn remote_proxy_allows_reel_hosts_and_rejects_the_rest() {
+        assert!(validate_remote_url("https://v.redd.it/clip/DASH_720.mp4").is_ok());
+        assert!(validate_remote_url("https://scontent.cdninstagram.com/v/reel.mp4").is_ok());
+        assert!(validate_remote_url("https://video.twimg.com/amplify_video/clip.mp4").is_ok());
+        assert!(validate_remote_url("https://v16.tiktokcdn.com/video.mp4").is_ok());
+        assert!(validate_remote_url("http://v.redd.it/clip.mp4").is_err());
+        assert!(validate_remote_url("https://reddit.com.evil.test/clip.mp4").is_err());
+        assert!(validate_remote_url("https://evil.example/v.redd.it/clip.mp4").is_err());
+        assert!(validate_remote_url("https://127.0.0.1/clip.mp4").is_err());
+        assert_eq!(
+            remote_upstream(
+                "/remote?token=secret&url=https%3A%2F%2Fv.redd.it%2Fclip%2FDASH_720.mp4"
+            )
+            .unwrap(),
+            "https://v.redd.it/clip/DASH_720.mp4"
+        );
+        assert_eq!(
+            referer_for("https://video.twimg.com/clip.mp4"),
+            "https://x.com/"
+        );
+        assert_eq!(
+            referer_for("https://scontent.cdninstagram.com/v/reel.mp4"),
+            "https://www.instagram.com/"
+        );
     }
 
     #[test]

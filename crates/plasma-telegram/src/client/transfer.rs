@@ -558,9 +558,11 @@ pub async fn tdlib_start_mass_download(
     for message in scanned_messages {
         let sender_id = message.sender_id.clone();
         let media_album_id = message.media_album_id;
+        let mini = message_minithumbnail(&message.content).map(str::to_owned);
         let Some(media) = message_media_file(message.content, message.id) else {
             continue;
         };
+        let thumbnail_path = preview_path(app, request.chat_id, message.id, &media, mini);
         let media_file = media.file;
         let file_name = media.file_name;
 
@@ -587,7 +589,7 @@ pub async fn tdlib_start_mass_download(
             progress: 0,
             size: effective_file_size(&media_file),
             file_path: Some(destination.to_string_lossy().to_string()),
-            thumbnail_path: None,
+            thumbnail_path,
         });
         pending_downloads.push(PendingMassDownload {
             file: media_file,
@@ -634,8 +636,9 @@ pub async fn tdlib_start_mass_download(
         }
 
         items[item_index].status = "downloading".to_string();
-        items[item_index].thumbnail_path =
-            download_thumbnail_path(client_id, pending.thumbnail).await;
+        if let Some(path) = download_thumbnail_path(client_id, pending.thumbnail).await {
+            items[item_index].thumbnail_path = Some(path);
+        }
         emit_mass_progress(
             app,
             request.chat_id,
@@ -765,4 +768,25 @@ pub async fn tdlib_start_mass_download(
         error: None,
         tracking_error,
     })
+}
+
+/// Preview available before the file itself starts downloading.
+fn preview_path(
+    app: &AppEnv,
+    chat_id: i64,
+    message_id: i64,
+    media: &MessageMediaFile,
+    mini: Option<String>,
+) -> Option<String> {
+    if let Some(path) = local_thumbnail_path(media.thumbnail.clone()) {
+        return Some(path);
+    }
+    let dir = native_media_dir(app, chat_id, message_id).ok()?;
+    let existing = dir.join("thumbnail.jpg");
+    if existing.is_file() {
+        return Some(existing.to_string_lossy().to_string());
+    }
+    let data = mini?;
+    std::fs::create_dir_all(&dir).ok()?;
+    write_minithumbnail(&data, &dir)
 }

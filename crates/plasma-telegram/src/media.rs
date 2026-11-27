@@ -45,6 +45,7 @@ pub(crate) fn mime_extension(mime_type: &str, fallback: &str) -> String {
         "image/png" => ".png".to_string(),
         "image/webp" => ".webp".to_string(),
         "image/gif" => ".gif".to_string(),
+        "image/heic" | "image/heif" => ".heic".to_string(),
         "video/mp4" => ".mp4".to_string(),
         "video/webm" => ".webm".to_string(),
         "video/quicktime" => ".mov".to_string(),
@@ -82,10 +83,10 @@ pub(crate) fn document_is_video(mime_type: &str, file_name: &str) -> bool {
         })
 }
 
-/// Whether a document is an image WebKitGTK can paint in the lightbox.
+/// Whether a document should use the photo tile.
 ///
-/// Telegram often sends photos as documents. HEIC and HEIF stay out: the
-/// shell has no decoder for them, so those keep the file fallback.
+/// HEIC and HEIF count: the desktop playback path converts them to JPEG before
+/// the lightbox asks WebKit to paint.
 pub(crate) fn document_is_image(mime_type: &str, file_name: &str) -> bool {
     let mime_type = mime_type
         .split(';')
@@ -95,7 +96,7 @@ pub(crate) fn document_is_image(mime_type: &str, file_name: &str) -> bool {
         .to_ascii_lowercase();
     if matches!(
         mime_type.as_str(),
-        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/heic" | "image/heif"
     ) {
         return true;
     }
@@ -111,8 +112,34 @@ pub(crate) fn document_is_image(mime_type: &str, file_name: &str) -> bool {
         .and_then(|extension| extension.to_str())
         .map(|extension| extension.to_ascii_lowercase())
         .is_some_and(|extension| {
-            matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif")
+            matches!(
+                extension.as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "heic" | "heif"
+            )
         })
+}
+
+/// WebKitGTK cannot decode these stills. Playback swaps in a JPEG preview.
+pub(crate) fn still_needs_jpeg_preview(mime_type: Option<&str>, file_name: Option<&str>) -> bool {
+    let mime = mime_type
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if matches!(mime.as_str(), "image/heic" | "image/heif") {
+        return true;
+    }
+    let name = file_name.unwrap_or_default();
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| matches!(extension.as_str(), "heic" | "heif"))
 }
 
 pub(crate) fn playback_extension(mime_type: Option<&str>, file_name: Option<&str>) -> String {
@@ -150,6 +177,7 @@ pub(crate) fn normalize_playback_mime_type(
         ".mp3" => Some("audio/mpeg".to_string()),
         ".ogg" => Some("audio/ogg".to_string()),
         ".jpg" | ".jpeg" => Some("image/jpeg".to_string()),
+        ".heic" | ".heif" => Some("image/heic".to_string()),
         ".png" => Some("image/png".to_string()),
         ".webp" => Some("image/webp".to_string()),
         _ => Some("video/mp4".to_string()),
@@ -171,6 +199,20 @@ pub(crate) fn existing_faststart_playback_file(
     None
 }
 
+fn jpeg_still_preview(source: &Path, media_dir: &Path, thumbnail: Option<&str>) -> Option<PathBuf> {
+    let output = media_dir.join("playback.jpg");
+    if output.is_file() || plasma_media::jpeg_preview_for_still(source, &output).is_ok() {
+        return Some(output);
+    }
+    thumbnail
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let cached = media_dir.join("thumbnail.jpg");
+            cached.is_file().then_some(cached)
+        })
+}
+
 pub(crate) fn ensure_native_playback_file(
     app: &AppEnv,
     meta: &NativeMediaAssetMeta,
@@ -186,6 +228,16 @@ pub(crate) fn ensure_native_playback_file(
     let mime_type =
         normalize_playback_mime_type(meta.mime_type.as_deref(), meta.file_name.as_deref());
     let media_dir = native_media_dir(app, meta.chat_id, meta.message_id)?;
+    if still_needs_jpeg_preview(mime_type.as_deref(), meta.file_name.as_deref()) {
+        if let Some(preview) =
+            jpeg_still_preview(source, &media_dir, meta.thumbnail_path.as_deref())
+        {
+            return Ok((
+                preview.to_string_lossy().to_string(),
+                Some("image/jpeg".to_string()),
+            ));
+        }
+    }
     if let Some(faststart_path) = existing_faststart_playback_file(&media_dir, mime_type.as_deref())
     {
         return Ok((faststart_path.to_string_lossy().to_string(), mime_type));
@@ -833,7 +885,17 @@ mod tests {
         assert!(document_is_image("image/png; charset=binary", "foto.png"));
         assert!(document_is_image("application/octet-stream", "foto.JPEG"));
         assert!(document_is_image("", "foto.webp"));
-        assert!(!document_is_image("image/heic", "foto.heic"));
+        assert!(document_is_image("image/heic", "foto.heic"));
+        assert!(document_is_image("application/octet-stream", "foto.HEIF"));
+        assert!(still_needs_jpeg_preview(
+            Some("image/heic"),
+            Some("foto.heic")
+        ));
+        assert!(still_needs_jpeg_preview(None, Some("foto.HEIF")));
+        assert!(!still_needs_jpeg_preview(
+            Some("image/jpeg"),
+            Some("foto.jpg")
+        ));
         assert!(!document_is_image("application/pdf", "foto.jpg"));
         assert!(!document_is_image("video/mp4", "clip.mp4"));
         assert!(!document_is_image("application/octet-stream", "notes.txt"));

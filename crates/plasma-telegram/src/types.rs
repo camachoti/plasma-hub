@@ -289,6 +289,39 @@ pub struct TdlibForumTopicsResult {
     pub error: Option<String>,
 }
 
+/// Where a `t.me` / `tg://` link should land.
+///
+/// Previewable chats come back with `chat` set and `needs_join` when the user
+/// is still outside. Nothing here joins or sends a request on its own.
+#[derive(Clone)]
+pub struct TdlibLinkTarget {
+    pub success: bool,
+    pub chat: Option<TdlibChatInfo>,
+    pub topic_id: Option<i64>,
+    pub topic_kind: Option<String>,
+    pub topic_title: Option<String>,
+    pub message_id: Option<i64>,
+    pub needs_join: bool,
+    pub join_by_request: bool,
+    pub invite_link: Option<String>,
+    pub description: Option<String>,
+    pub member_count: Option<i32>,
+    pub photo_data_url: Option<String>,
+    pub is_channel: bool,
+    pub is_group: bool,
+    pub error: Option<String>,
+}
+
+/// Result of an explicit join or join-request started by the user.
+#[derive(Clone)]
+pub struct TdlibJoinResult {
+    pub success: bool,
+    /// The server accepted a request and the user is still not a member.
+    pub requested: bool,
+    pub chat: Option<TdlibChatInfo>,
+    pub error: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TdlibChatCapabilitiesResult {
