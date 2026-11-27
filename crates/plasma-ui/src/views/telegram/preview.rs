@@ -76,6 +76,15 @@ pub(super) fn PreviewSidebar(mut selected: Signal<usize>) -> Element {
                     }
                     button {
                         class: "icon-button accent",
+                        title: "Reels",
+                        onclick: move |_| {
+                            ui.shell.tab.set(Tab::Reels);
+                            ui.conversation.mobile_show_list.set(false);
+                        },
+                        Icon { name: IconName::Play, size: 17, class: "icon" }
+                    }
+                    button {
+                        class: "icon-button accent",
                         title: "Importar link",
                         onclick: move |_| {
                             ui.shell.tab.set(Tab::Downloads);

@@ -9,7 +9,7 @@ use crate::views::select::SelectPortal;
 use dioxus::prelude::*;
 use plasma_core::{AppEnv, Error, EventBus};
 use plasma_duplicates::SearchMatch;
-use plasma_extract::{DownloadSpec, MediaInfo, Platform};
+use plasma_extract::{DownloadSpec, MediaInfo, Platform, ReelClip, ReelPage};
 use plasma_store::SettingsStore;
 use plasma_telegram::{
     NativeMediaCacheStats, TdlibChatInfo, TdlibDownloadItem, TdlibForumTopicInfo, TdlibMessageInfo,
@@ -160,15 +160,119 @@ impl ExtractorHandle {
         self.join(handle).await?.map_err(service_error)
     }
 
-    async fn cookies_for(&self, url: &str) -> Option<String> {
-        if Platform::detect(url) != Platform::Twitter {
-            return None;
-        }
-        self.twitter
+    pub async fn save_instagram_cookies(&self, cookies: String) -> plasma_core::Result<()> {
+        let env = self.env.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_extract::save_instagram_cookies(&env, &cookies).map_err(service_error)
+        });
+        self.join(handle).await?
+    }
+
+    pub async fn list_reddit_reels(
+        &self,
+        subreddits: Vec<String>,
+        after: Option<String>,
+    ) -> plasma_core::Result<ReelPage> {
+        let handle = self.runtime.spawn(async move {
+            plasma_extract::list_reddit_reels(&subreddits, after.as_deref()).await
+        });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn list_instagram_reels(
+        &self,
+        username: String,
+    ) -> plasma_core::Result<Vec<ReelClip>> {
+        let cookies = self
+            .load_instagram_cookies()
+            .await
+            .ok()
+            .filter(|cookies| !cookies.trim().is_empty());
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::list_instagram_reels(&username, cookies).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn list_twitter_reels(&self, username: String) -> plasma_core::Result<Vec<ReelClip>> {
+        let cookies = self
+            .twitter
             .load_cookies()
             .await
             .ok()
-            .filter(|cookies| !cookies.trim().is_empty())
+            .filter(|cookies| !cookies.trim().is_empty());
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::list_twitter_reels(&username, cookies).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn list_youtube_reels(
+        &self,
+        sources: Vec<String>,
+        interests: Vec<String>,
+    ) -> plasma_core::Result<Vec<ReelClip>> {
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::list_youtube_reels(&sources, &interests).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn list_tiktok_reels(
+        &self,
+        sources: Vec<String>,
+        interests: Vec<String>,
+    ) -> plasma_core::Result<Vec<ReelClip>> {
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::list_tiktok_reels(&sources, &interests).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn resolve_clip(&self, url: String) -> plasma_core::Result<ReelClip> {
+        let cookies = self.cookies_for(&url).await;
+        let env = self.env.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::resolve_clip_from_url(&env, &url, cookies).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn resolve_reel_stream(
+        &self,
+        clip: ReelClip,
+    ) -> plasma_core::Result<plasma_extract::ResolvedReelStream> {
+        let cookies = self.cookies_for(&clip.page_url).await;
+        let env = self.env.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_extract::resolve_reel_stream(&env, &clip, cookies).await });
+        self.join(handle).await?.map_err(service_error)
+    }
+
+    pub async fn load_instagram_cookies(&self) -> plasma_core::Result<String> {
+        let env = self.env.clone();
+        let handle = self.runtime.spawn(async move {
+            plasma_extract::load_instagram_cookies(&env).map_err(service_error)
+        });
+        self.join(handle).await?
+    }
+
+    async fn cookies_for(&self, url: &str) -> Option<String> {
+        match Platform::detect(url) {
+            Platform::Twitter => self
+                .twitter
+                .load_cookies()
+                .await
+                .ok()
+                .filter(|cookies| !cookies.trim().is_empty()),
+            Platform::Instagram => self
+                .load_instagram_cookies()
+                .await
+                .ok()
+                .filter(|cookies| !cookies.trim().is_empty()),
+            _ => None,
+        }
     }
 
     async fn join<T>(&self, handle: tokio::task::JoinHandle<T>) -> Result<T, Error> {
@@ -189,14 +293,16 @@ pub fn now_millis() -> i64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Telegram,
+    Reels,
     Downloads,
     Twitter,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Telegram,
+        Self::Reels,
         Self::Downloads,
         Self::Twitter,
         Self::Settings,
@@ -205,6 +311,7 @@ impl Tab {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Telegram => "Telegram",
+            Self::Reels => "Reels",
             Self::Downloads => "Downloads",
             Self::Twitter => "Twitter/X",
             Self::Settings => "Ajustes",
@@ -214,6 +321,7 @@ impl Tab {
     pub const fn rail_icon(self) -> IconName {
         match self {
             Self::Telegram => IconName::BrandTelegram,
+            Self::Reels => IconName::Play,
             Self::Downloads => IconName::ProgressDown,
             Self::Twitter => IconName::BrandTwitter,
             Self::Settings => IconName::Settings,
@@ -241,10 +349,18 @@ impl ToastKind {
 static NEXT_TOAST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+    OpenTab(Tab),
+    RetryDownload(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
     pub id: u64,
     pub message: String,
     pub kind: ToastKind,
+    pub action_label: Option<String>,
+    pub action: Option<ToastAction>,
 }
 
 impl Toast {
@@ -253,7 +369,15 @@ impl Toast {
             id: NEXT_TOAST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             message: message.into(),
             kind,
+            action_label: None,
+            action: None,
         }
+    }
+
+    pub fn with_action(mut self, label: impl Into<String>, action: ToastAction) -> Self {
+        self.action_label = Some(label.into());
+        self.action = Some(action);
+        self
     }
 }
 
@@ -898,6 +1022,21 @@ pub fn push_toast(
 ) {
     let mut next = toasts.read().clone();
     next.push(Toast::new(message.to_string(), kind));
+    if next.len() > 4 {
+        next.remove(0);
+    }
+    toasts.set(next);
+}
+
+pub fn push_toast_with_action(
+    mut toasts: Signal<Vec<Toast>>,
+    message: impl std::fmt::Display,
+    kind: ToastKind,
+    action_label: impl Into<String>,
+    action: ToastAction,
+) {
+    let mut next = toasts.read().clone();
+    next.push(Toast::new(message.to_string(), kind).with_action(action_label, action));
     if next.len() > 4 {
         next.remove(0);
     }

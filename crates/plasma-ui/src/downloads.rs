@@ -47,6 +47,9 @@ pub struct DownloadRecord {
     pub source_format_id: Option<String>,
     #[serde(default)]
     pub thumbnail_url: Option<String>,
+    /// Local preview file. The webview cannot load this path directly.
+    #[serde(default)]
+    pub thumbnail_path: Option<String>,
     #[serde(default)]
     pub platform: Option<String>,
     #[serde(default)]
@@ -311,6 +314,12 @@ pub fn sync_telegram_downloads(
                 record.file_path = item.file_path.clone();
             }
             record.file_size = size.or(record.file_size);
+            apply_download_thumb(record, item.thumbnail_path.as_deref());
+            if item.status == "skipped" {
+                record
+                    .extra
+                    .insert("skipped".to_string(), Value::Bool(true));
+            }
             record.batch_total = Some(total as i64);
             record.batch_downloaded = Some(downloaded.max(0.0) as i64);
             record.can_cancel = Some(status == "downloading");
@@ -319,7 +328,7 @@ pub fn sync_telegram_downloads(
                 record.error = None;
             }
         } else {
-            records.push(DownloadRecord {
+            let mut record = DownloadRecord {
                 id,
                 chat_id: Some(chat_id.to_string()),
                 message_id: Some(item.message_id),
@@ -328,6 +337,8 @@ pub fn sync_telegram_downloads(
                 status: status.to_string(),
                 file_path: item.file_path.clone(),
                 file_size: size,
+                thumbnail_url: display_thumb(item.thumbnail_path.as_deref()),
+                thumbnail_path: local_thumb(item.thumbnail_path.as_deref()),
                 platform: Some("telegram".to_string()),
                 batch_id: Some(batch_id.clone()),
                 batch_title: chat_title.clone(),
@@ -338,7 +349,13 @@ pub fn sync_telegram_downloads(
                 can_cancel: Some(status == "downloading"),
                 can_retry: Some(false),
                 ..DownloadRecord::default()
-            });
+            };
+            if item.status == "skipped" {
+                record
+                    .extra
+                    .insert("skipped".to_string(), Value::Bool(true));
+            }
+            records.push(record);
             if matches!(status, "completed" | "failed" | "canceled") {
                 terminal_changed = true;
             }
@@ -548,6 +565,38 @@ async fn save_twitter_fake_media(
             skipped: false,
             error: Some(error),
         }),
+    }
+}
+
+fn is_display_thumb(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("data:")
+        || value.starts_with("plasma-media://")
+}
+
+fn display_thumb(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && is_display_thumb(value))
+        .map(str::to_string)
+}
+
+fn local_thumb(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_display_thumb(value))
+        .map(str::to_string)
+}
+
+fn apply_download_thumb(record: &mut DownloadRecord, thumb: Option<&str>) {
+    if let Some(url) = display_thumb(thumb) {
+        record.thumbnail_url = Some(url);
+        return;
+    }
+    if let Some(path) = local_thumb(thumb) {
+        record.thumbnail_path = Some(path);
     }
 }
 

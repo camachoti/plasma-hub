@@ -6,9 +6,10 @@ use plasma_store::{MessageCacheGetResult, MessageCacheMeta};
 use plasma_telegram::{
     ConversationPriorityGuard, NativeMediaAssetMeta, NativeMediaCacheStats, NativePlaybackSource,
     NativeSavedMedia, TdlibChatCapabilitiesResult, TdlibChatInfo, TdlibChatsResult,
-    TdlibForumTopicsResult, TdlibForwardResult, TdlibGlobalSearchResult, TdlibManager,
-    TdlibMassDownloadRequest, TdlibMassDownloadResult, TdlibMessageInfo, TdlibMessagesResult,
-    TdlibSearchMessagesResult, TdlibSendResult, TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
+    TdlibForumTopicsResult, TdlibForwardResult, TdlibGlobalSearchResult, TdlibJoinResult,
+    TdlibLinkTarget, TdlibManager, TdlibMassDownloadRequest, TdlibMassDownloadResult,
+    TdlibMessageInfo, TdlibMessagesResult, TdlibSearchMessagesResult, TdlibSendResult,
+    TdlibSharedMediaResult, TdlibStatus, TdlibUserInfo,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,6 +122,34 @@ impl TelegramHandle {
         let handle = self.runtime.spawn(async move {
             plasma_telegram::tdlib_get_chats(&manager, Some(limit), soft).await
         });
+        self.join(handle).await?
+    }
+
+    /// Resolves a `t.me` or `tg://` link without joining.
+    ///
+    /// `needs_join` means the viewer can still open a preview. `join_by_request`
+    /// means an administrator has to approve before the user becomes a member.
+    pub async fn resolve_link(&self, url: String) -> plasma_core::Result<TdlibLinkTarget> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_resolve_link(&manager, url).await });
+        self.join(handle).await?
+    }
+
+    pub async fn join_chat(&self, chat_id: i64) -> plasma_core::Result<TdlibJoinResult> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_join_chat(&manager, chat_id).await });
+        self.join(handle).await?
+    }
+
+    pub async fn join_invite(&self, invite_link: String) -> plasma_core::Result<TdlibJoinResult> {
+        let manager = self.manager.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { plasma_telegram::tdlib_join_invite(&manager, invite_link).await });
         self.join(handle).await?
     }
 
@@ -317,6 +346,16 @@ impl TelegramHandle {
         topic_id: Option<i64>,
         topic_kind: Option<String>,
     ) -> plasma_core::Result<TdlibSendResult> {
+        let env = self.env.clone();
+        let source = file_path;
+        let prepared = tokio::task::spawn_blocking(move || {
+            let source = PathBuf::from(source);
+            plasma_media::prepare_quicktime_for_send(env.paths().cache_dir(), &source)
+        })
+        .await
+        .map_err(|error| service_error(format!("Conversão do vídeo falhou: {error}")))?
+        .map_err(service_error)?;
+        let file_path = prepared.to_string_lossy().to_string();
         let manager = self.manager.clone();
         let handle = self.runtime.spawn(async move {
             plasma_telegram::tdlib_send_media(
@@ -440,6 +479,26 @@ impl TelegramHandle {
         read_path_data_url(PathBuf::from(path)).await.map(Some)
     }
 
+    /// Small data URL for a preview file already on disk. Large files are skipped
+    /// so a video path cannot be inlined into the download list.
+    pub async fn file_data_url(&self, path: String) -> plasma_core::Result<Option<String>> {
+        let handle = self.runtime.spawn(async move {
+            let path = PathBuf::from(path);
+            let length = tokio::task::spawn_blocking({
+                let path = path.clone();
+                move || std::fs::metadata(path).map(|metadata| metadata.len())
+            })
+            .await
+            .map_err(|error| service_error(format!("Leitura da prévia falhou: {error}")))?
+            .unwrap_or(0);
+            if length == 0 || length > 400_000 {
+                return Ok(None);
+            }
+            read_path_data_url(path).await.map(Some)
+        });
+        self.join(handle).await?
+    }
+
     /// Builds a small data URL for a media file dragged into the composer.
     /// Videos use the cached poster frame; images are capped so a huge photo
     /// does not turn the preview modal into a multi-megabyte data URL.
@@ -470,10 +529,19 @@ impl TelegramHandle {
             .and_then(|extension| extension.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        // WebKitGTK has no HEIC decoder; show the generic media tile instead of
-        // a broken image in the drop preview.
+        // WebKitGTK has no HEIC decoder. A JPEG next to the file is what the
+        // preview can paint; without heif-convert or ffmpeg the tile stays empty.
         if matches!(extension.as_str(), "heic" | "heif") {
-            return Ok(None);
+            let output = path.with_extension("preview.jpg");
+            let source = path.clone();
+            let preview = tokio::task::spawn_blocking(move || {
+                plasma_media::jpeg_preview_for_still(&source, &output).map(|()| output)
+            })
+            .await;
+            return match preview {
+                Ok(Ok(preview)) => read_path_data_url(preview).await.map(Some),
+                _ => Ok(None),
+            };
         }
         let size_path = path.clone();
         let size = tokio::task::spawn_blocking(move || {

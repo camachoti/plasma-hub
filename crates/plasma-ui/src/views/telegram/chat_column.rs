@@ -351,6 +351,16 @@ pub(crate) fn SidebarFooterBar(
                 span { "Chats" }
             }
             button {
+                class: if tab == Tab::Reels { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                title: "Reels do Reddit e do Instagram",
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Reels);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                Icon { name: IconName::Play, size: 17, class: "icon" }
+                span { "Reels" }
+            }
+            button {
                 class: "{dl_class}",
                 title: "Downloads, Links & X/Twitter (clique direito abre fila rápida)",
                 onclick: move |_| {

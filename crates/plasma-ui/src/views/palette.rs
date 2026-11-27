@@ -63,6 +63,13 @@ fn build_items(chats: &[TdlibChatInfo], query: &str) -> Vec<Item> {
             action: Action::Tab(Tab::Telegram),
         },
         Item {
+            key: "nav-reels".into(),
+            title: "Abrir Reels".into(),
+            hint: "Reddit, Instagram e links".into(),
+            icon: IconName::Play,
+            action: Action::Tab(Tab::Reels),
+        },
+        Item {
             key: "nav-downloads".into(),
             title: "Abrir Downloads (Links & X/Twitter)".into(),
             hint: "Central unificada".into(),

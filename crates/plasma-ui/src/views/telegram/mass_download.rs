@@ -1,5 +1,6 @@
 //! Mass download panel for one chat or topic.
 
+use crate::downloads::DownloadRecord;
 use crate::icons::{Icon, IconName};
 use crate::state::{AppServices, MassDownloadProgress, UiState};
 use crate::views::select::{Select, SelectOption};
@@ -16,6 +17,7 @@ use crate::state::{refresh_topics_with_new_media, topic_download_key};
 use super::composer::pick_download_folder;
 use super::conversation::parse_chat_id;
 use super::media::format_bytes;
+use crate::views::downloads::DownloadThumb;
 
 /// Shared abort flag for Twitter/X gallery mass downloads. The download loop
 /// runs on the Tokio runtime; the UI only flips this and cancels the active id.
@@ -328,12 +330,18 @@ pub(super) fn MassDownloadPanel(
                 if let Some(progress) = progress {
                     section { class: "mass-card mass-progress",
                         div { class: "mass-progress-top",
-                            span { class: "hint", "{progress.current_file}" }
+                            span { class: "hint",
+                                if progress.is_scanning {
+                                    "{progress.current_file}"
+                                } else {
+                                    "{progress.downloaded.floor()} de {progress.total} arquivos"
+                                }
+                            }
                             strong { class: "mass-progress-count tabular",
                                 if progress.is_scanning {
                                     "Escaneando…"
                                 } else {
-                                    "{progress.downloaded.floor()} / {progress.total} · {percent_label}"
+                                    "{percent_label}"
                                 }
                             }
                         }
@@ -356,19 +364,23 @@ pub(super) fn MassDownloadPanel(
                             div { class: "mass-items-log",
                                 for item in progress.items.iter().rev().take(500) {
                                     div {
-                                        key: "{item.message_id}",
+                                        key: "{item.message_id}:{item.thumbnail_path.clone().unwrap_or_default()}",
                                         class: mass_item_class(&item.status),
+                                        DownloadThumb {
+                                            item: mass_thumb_record(progress.chat_id, item),
+                                        }
                                         div { class: "download-row-title",
                                             strong { "{item.name}" }
-                                            if item.size > 0 {
-                                                span { class: "hint", "{format_bytes(item.size)}" }
+                                            span { class: "hint", "{mass_item_caption(item)}" }
+                                            if item.status == "downloading" {
+                                                div {
+                                                    class: "download-progress",
+                                                    style: "--progress: {item.progress}%;",
+                                                }
                                             }
                                         }
                                         span { class: mass_status_class(&item.status),
                                             "{mass_status_label(&item.status)}"
-                                            if item.status == "downloading" {
-                                                " {item.progress}%"
-                                            }
                                         }
                                     }
                                 }
@@ -428,6 +440,53 @@ fn mass_item_class(status: &str) -> &'static str {
         "downloading" => "mass-item-row is-active",
         "failed" => "mass-item-row is-failed",
         _ => "mass-item-row",
+    }
+}
+
+fn mass_thumb_record(chat_id: i64, item: &TdlibDownloadItem) -> DownloadRecord {
+    let mut record = DownloadRecord {
+        id: format!("{chat_id}-{}", item.message_id),
+        chat_id: Some(chat_id.to_string()),
+        message_id: Some(item.message_id),
+        file_name: item.name.clone(),
+        ..DownloadRecord::default()
+    };
+    if let Some(thumb) = item
+        .thumbnail_path
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let lower = thumb.to_ascii_lowercase();
+        if lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("data:")
+            || lower.starts_with("plasma-media://")
+        {
+            record.thumbnail_url = Some(thumb);
+        } else {
+            record.thumbnail_path = Some(thumb);
+        }
+    }
+    record
+}
+
+fn mass_item_caption(item: &TdlibDownloadItem) -> String {
+    match item.status.as_str() {
+        "downloading" if item.size > 0 => {
+            let done = (item.size as f64 * f64::from(item.progress) / 100.0).round() as i64;
+            format!(
+                "Baixando {} de {}",
+                format_bytes(done),
+                format_bytes(item.size)
+            )
+        }
+        "downloading" => format!("Baixando · {}%", item.progress),
+        "completed" if item.size > 0 => format!("Salvo · {}", format_bytes(item.size)),
+        "completed" => "Salvo".to_string(),
+        "skipped" => "Já estava na pasta".to_string(),
+        "failed" => "Falhou".to_string(),
+        "stopped" => "Interrompido".to_string(),
+        _ => "Na fila".to_string(),
     }
 }
 

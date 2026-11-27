@@ -14,6 +14,7 @@ pub(crate) fn MessageThumbnail(
     chat_id: i64,
     message_id: i64,
     is_video: bool,
+    aspect: Option<f64>,
     on_open: EventHandler<()>,
 ) -> Element {
     let services = use_context::<AppServices>();
@@ -123,10 +124,12 @@ pub(crate) fn MessageThumbnail(
     });
 
     let state = resource.read_unchecked();
+    let thumb_style = aspect.map(|value| format!("--thumb-aspect: {value:.3};"));
     rsx! {
         button {
             r#type: "button",
             class: "message-thumb",
+            style: thumb_style,
             "data-thumb-key": "{chat_id}:{message_id}",
             title: "Abrir mídia",
             onclick: move |_| on_open.call(()),

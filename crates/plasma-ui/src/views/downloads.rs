@@ -6,7 +6,9 @@ use crate::downloads::{
     DownloadRecord,
 };
 use crate::icons::{Icon, IconName};
-use crate::state::{push_toast, AppServices, Tab, ToastKind, UiState};
+use crate::state::{
+    push_toast, push_toast_with_action, AppServices, Tab, ToastAction, ToastKind, UiState,
+};
 use crate::views::select::{Select, SelectOption};
 use crate::views::twitter::{looks_like_profile, ProfileCard, TweetCard};
 use dioxus::prelude::*;
@@ -85,6 +87,7 @@ pub fn DownloadsView() -> Element {
     let mut tweet_result = use_signal(|| None::<NativeMediaInfo>);
     let mut profile_result = use_signal(|| None::<NativeProfileInfo>);
     let mut cookies = use_signal(String::new);
+    let mut instagram_cookies = use_signal(String::new);
     let mut cookies_loading = use_signal(|| true);
     let mut selected_format = use_signal(String::new);
     let mut analyzing = use_signal(|| false);
@@ -99,9 +102,34 @@ pub fn DownloadsView() -> Element {
             if let Ok(value) = cookie_services.twitter.load_cookies().await {
                 cookies.set(value);
             }
+            if let Ok(value) = cookie_services.extract.load_instagram_cookies().await {
+                instagram_cookies.set(value);
+            }
             cookies_loading.set(false);
         }
     });
+
+    let save_instagram_cookies = {
+        let services = services.clone();
+        move || {
+            let value = instagram_cookies();
+            let services = services.clone();
+            spawn(async move {
+                match services.extract.save_instagram_cookies(value).await {
+                    Ok(()) => push_toast(
+                        ui.shell.toasts,
+                        "Cookies do Instagram salvos localmente.",
+                        ToastKind::Success,
+                    ),
+                    Err(err) => push_toast(
+                        ui.shell.toasts,
+                        format!("Falha ao salvar cookies: {err}"),
+                        ToastKind::Error,
+                    ),
+                }
+            });
+        }
+    };
 
     let save_cookies = {
         let services = services.clone();
@@ -219,7 +247,8 @@ pub fn DownloadsView() -> Element {
 
     let download_dir = services.downloads.download_dir().display().to_string();
     let items = ui.transfers.downloads();
-    let active = items.iter().filter(|item| item.is_active()).count();
+    let summary = summarize_transfers(&items);
+    let active = summary.active;
     let completed = items
         .iter()
         .filter(|item| item.status == "completed")
@@ -230,14 +259,7 @@ pub fn DownloadsView() -> Element {
         .filter(|item| item.status == "canceled")
         .count();
     let issues = failed + canceled;
-    let overall = (active > 0).then(|| {
-        let sum: f64 = items
-            .iter()
-            .filter(|item| item.is_active())
-            .map(|item| item.progress)
-            .sum();
-        sum / active as f64
-    });
+    let active_progress = active_transfer(&items);
     let current_analysis = analysis();
     let current_filter = filter();
     let filtered: Vec<DownloadRecord> = items
@@ -277,6 +299,8 @@ pub fn DownloadsView() -> Element {
     let show_twitter_cookies = mode != ImportMode::Universal
         || url_lower.contains("x.com/")
         || url_lower.contains("twitter.com/");
+    let show_instagram_cookies =
+        url_lower.contains("instagram.com") || url_lower.contains("instagr.am");
 
     rsx! {
         section { class: "downloads-view",
@@ -360,10 +384,6 @@ pub fn DownloadsView() -> Element {
                 }
 
                 div { class: "downloads-stats",
-                    span {
-                        class: if active > 0 { "pill busy" } else { "pill" },
-                        "{active} ativo(s)"
-                    }
                     if issues > 0 {
                         span {
                             class: "pill failed",
@@ -375,17 +395,17 @@ pub fn DownloadsView() -> Element {
                     span { class: "pill", "{items.len()} no histórico" }
                 }
 
-                if let Some(progress) = overall {
+                if let Some(progress) = active_progress {
                     div { class: "downloads-status",
+                        div { class: "download-meter",
+                            span { class: "downloads-status-label", "{active_label(&progress)}" }
+                            strong { class: "download-percent", "{progress.percent:.0}%" }
+                        }
                         div { class: "downloads-status-track",
                             div {
                                 class: "downloads-status-fill",
-                                style: "width: {progress:.1}%",
+                                style: "width: {progress.percent:.1}%",
                             }
-                        }
-                        span {
-                            class: "downloads-status-label",
-                            "{progress:.0}% médio · {active} em andamento"
                         }
                     }
                 }
@@ -502,6 +522,28 @@ pub fn DownloadsView() -> Element {
                         p { class: "error-banner", "{message}" }
                     }
 
+                    if show_instagram_cookies {
+                        details { class: "twitter-cookies",
+                            summary { "Cookies opcionais do Instagram" }
+                            p { class: "hint",
+                                "Cole o cookie de instagram.com para posts privados e reels que a página pública não entrega."
+                            }
+                            textarea {
+                                class: "twitter-cookies-input",
+                                placeholder: "sessionid=...; csrftoken=...",
+                                value: "{instagram_cookies}",
+                                disabled: cookies_loading(),
+                                oninput: move |event| instagram_cookies.set(event.value()),
+                            }
+                            button {
+                                class: "btn small soft",
+                                disabled: cookies_loading(),
+                                onclick: move |_| save_instagram_cookies(),
+                                "Salvar cookies"
+                            }
+                        }
+                    }
+
                     if show_twitter_cookies {
                         details { class: "twitter-cookies",
                             summary { "Cookies opcionais do X / Twitter" }
@@ -573,6 +615,41 @@ pub fn DownloadsView() -> Element {
                                     }
                                 },
                                 "Tentar todos ({retryable_failed.len()})"
+                            }
+                        }
+                    }
+
+                    if summary.active > 0 {
+                        div { class: "transfer-panel-summary",
+                            div { class: "transfer-summary-head",
+                                div { class: "transfer-summary-title",
+                                    span { class: "transfer-pulse-dot", aria_hidden: "true" }
+                                    strong {
+                                        if summary.active == 1 {
+                                            "Baixando 1 arquivo"
+                                        } else {
+                                            "Baixando {summary.active} arquivos"
+                                        }
+                                    }
+                                    if summary.completed > 0 {
+                                        span { class: "hint", "· {summary.completed} concluído(s)" }
+                                    }
+                                }
+                                strong { class: "transfer-summary-percent",
+                                    if summary.indeterminate {
+                                        "Preparando…"
+                                    } else {
+                                        "{summary.overall_percent.round() as i64}%"
+                                    }
+                                }
+                            }
+                            div {
+                                class: if summary.indeterminate {
+                                    "download-progress indeterminate"
+                                } else {
+                                    "download-progress"
+                                },
+                                style: "--progress: {summary.overall_percent}%;",
                             }
                         }
                     }
@@ -787,15 +864,7 @@ fn DownloadBatchCard(
     let platform = platform_label(items.first().and_then(|item| item.platform.as_deref()));
     let total_size = items.iter().filter_map(|item| item.file_size).sum::<i64>();
     let progress = batch_progress(&items, &summary);
-    let artwork = items
-        .iter()
-        .find(|item| {
-            item.thumbnail_url
-                .as_ref()
-                .is_some_and(|url| !url.is_empty())
-        })
-        .cloned()
-        .or_else(|| items.first().cloned());
+    let artwork = preview_covers(&items);
     let cancelable: Vec<_> = items
         .iter()
         .filter(|item| item.is_active() && item.can_cancel.unwrap_or(true))
@@ -825,32 +894,43 @@ fn DownloadBatchCard(
                         expanded_batches.set(next);
                     }
                 },
-                DownloadArtwork { item: artwork, status: summary.status.clone(), group: true }
+                DownloadArtwork {
+                    items: artwork.into_iter().take(4).collect::<Vec<_>>(),
+                    status: summary.status.clone(),
+                    group: true,
+                    progress,
+                    count: items.len(),
+                }
                 div { class: "download-batch-copy",
                     div { class: "download-row-title",
                         strong { "{title}" }
                         span { class: "pill", "{platform}" }
                         span { class: "download-status {summary.status}", "{status_label(&summary.status)}" }
                     }
+                    div { class: "download-meter",
+                        span { "{batch_caption(&items, &summary)}" }
+                        if summary.running > 0 {
+                            strong { class: "download-percent", "{progress.round() as i64}%" }
+                        }
+                    }
+                    if summary.running > 0 || summary.completed + summary.failed < items.len() {
+                        div {
+                            class: if summary.running > 0 && progress < 1.0 {
+                                "download-progress indeterminate"
+                            } else {
+                                "download-progress"
+                            },
+                            style: "--progress: {progress}%;",
+                        }
+                    }
                     div { class: "download-row-meta",
-                        span { "{items.len()} itens" }
-                        span { "{summary.completed} ok" }
                         if summary.skipped > 0 {
-                            span { "{summary.skipped} existentes" }
+                            span { "{summary.skipped} já na pasta" }
                         }
                         if summary.failed > 0 {
                             span { "{summary.failed} falhas" }
                         }
-                        if summary.running > 0 {
-                            span { "{summary.running} ativos" }
-                        }
                         span { "{format_bytes(Some(total_size).filter(|value| *value > 0))}" }
-                    }
-                    if summary.running > 0 || summary.completed + summary.failed < items.len() {
-                        div {
-                            class: "download-progress",
-                            style: "--progress: {progress}%;",
-                        }
                     }
                 }
                 span { class: "download-batch-chevron", if expanded { "▾" } else { "▸" } }
@@ -961,43 +1041,42 @@ fn DownloadRow(item: DownloadRecord, compact: bool) -> Element {
             },
             div { class: "download-row-main",
                 DownloadArtwork {
-                    item: Some(item.clone()),
+                    items: vec![item.clone()],
                     status: item.status.clone(),
                     group: false,
+                    progress: item.percent(),
+                    count: 1,
                 }
                 div { class: "download-row-body",
                     div { class: "download-row-head",
                         div { class: "download-row-title",
                             strong { "{item.title()}" }
                             span { class: "pill", "{platform_label(item.platform.as_deref())}" }
-                            span { class: "download-status {item.status}", "{status_label(&item.status)}" }
+                            span { class: "download-status-pill {item.status}", "{status_label(&item.status)}" }
                         }
-                        span { class: "download-percent", "{item.percent().round() as i64}%" }
                     }
-                    if item.status != "completed" {
+                    div { class: "download-meter",
+                        span { "{transfer_caption(&item)}" }
+                        if item.is_active() {
+                            strong { class: "download-percent", "{item.percent().round() as i64}%" }
+                        }
+                    }
+                    if item.is_active() {
                         div {
-                            class: "download-progress",
+                            class: if item.percent() < 1.0 && item.file_size.unwrap_or(0) <= 0 {
+                                "download-progress indeterminate"
+                            } else {
+                                "download-progress"
+                            },
                             style: "--progress: {item.percent()}%;",
                         }
                     }
                     div { class: "download-row-meta",
-                        span { "{format_bytes(item.file_size)}" }
                         if let Some(label) = item.source_label.as_ref() {
                             span { "{label}" }
                         }
                         if let Some(title) = item.batch_title.as_ref().filter(|_| !compact) {
                             span { "{title}" }
-                        }
-                        if let Some(chat_id) = item.chat_id.as_ref().filter(|id| !id.is_empty()) {
-                            span { title: "Chat {chat_id}", "chat {chat_id}" }
-                        }
-                        if let Some(message_id) = item.message_id {
-                            span { "msg {message_id}" }
-                        }
-                        if let (Some(total), Some(done)) = (item.batch_total, item.batch_downloaded) {
-                            if compact {
-                                span { "{done}/{total}" }
-                            }
                         }
                         if let Some(source) = item.source_url.as_ref() {
                             span { class: "download-source", title: "{source}", "{source}" }
@@ -1108,32 +1187,266 @@ fn DownloadRow(item: DownloadRecord, compact: bool) -> Element {
 }
 
 #[component]
-fn DownloadArtwork(item: Option<DownloadRecord>, status: String, group: bool) -> Element {
+fn DownloadArtwork(
+    items: Vec<DownloadRecord>,
+    status: String,
+    group: bool,
+    progress: f64,
+    count: usize,
+) -> Element {
     let class = if group {
         "download-art group"
     } else {
         "download-art"
     };
-    let thumb = item
-        .as_ref()
-        .and_then(|record| record.thumbnail_url.clone())
-        .filter(|url| !url.trim().is_empty());
-    let glyph = match status.as_str() {
-        "completed" => "✓",
-        "failed" => "!",
-        "canceled" => "–",
-        "downloading" => "↓",
-        _ => "·",
-    };
+    let mosaic = group && items.len() > 1;
+    let video = !mosaic && items.first().is_some_and(looks_like_video);
+    let show_strip = status == "downloading";
 
     rsx! {
         div { class: "{class} {status}",
-            if let Some(thumb) = thumb {
-                img { src: "{thumb}", alt: "" }
+            if mosaic {
+                div { class: "download-mosaic",
+                    for item in items.iter().cloned() {
+                        DownloadThumb {
+                            key: "{thumb_key(&item)}",
+                            item,
+                        }
+                    }
+                }
+            } else if let Some(item) = items.first().cloned() {
+                DownloadThumb { key: "{thumb_key(&item)}", item }
             } else {
-                span { class: "download-art-fallback", "{glyph}" }
+                span { class: "download-art-fallback", "·" }
+            }
+            if video {
+                span { class: "download-play", aria_hidden: "true", "▶" }
+            }
+            if group && count > 1 {
+                span { class: "download-count", "{count}" }
+            }
+            if show_strip {
+                span { class: "download-art-progress", style: "--progress: {progress}%;" }
             }
         }
+    }
+}
+
+#[component]
+pub(crate) fn DownloadThumb(item: DownloadRecord) -> Element {
+    let services = use_context::<AppServices>();
+    let url = item
+        .thumbnail_url
+        .clone()
+        .filter(|value| is_display_url(value));
+    let path = item
+        .thumbnail_path
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let chat_id = item.chat_id.as_deref().and_then(|id| id.parse().ok());
+    let message_id = item.message_id;
+    let mut shown = use_signal(|| url.clone());
+    let mut settled = use_signal(|| url.is_some());
+    use_effect(move || {
+        if url.is_some() {
+            return;
+        }
+        let services = services.clone();
+        let path = path.clone();
+        spawn(async move {
+            if let Some(path) = path {
+                if let Ok(Some(data)) = services.telegram.file_data_url(path).await {
+                    shown.set(Some(data));
+                }
+                settled.set(true);
+                return;
+            }
+            if let (Some(chat_id), Some(message_id)) = (chat_id, message_id) {
+                if let Ok(Some(data)) = services
+                    .telegram
+                    .thumbnail_data_url(chat_id, message_id)
+                    .await
+                {
+                    shown.set(Some(data));
+                    settled.set(true);
+                    return;
+                }
+            }
+            settled.set(true);
+        });
+    });
+
+    rsx! {
+        span { class: "download-thumb",
+            if let Some(src) = shown() {
+                img { src: "{src}", alt: "" }
+            } else if settled() {
+                span { class: "download-art-fallback", "▣" }
+            } else {
+                span { class: "thumb-skeleton" }
+            }
+        }
+    }
+}
+
+fn thumb_key(item: &DownloadRecord) -> String {
+    format!(
+        "{}:{}:{}",
+        item.id,
+        item.thumbnail_url.as_deref().unwrap_or(""),
+        item.thumbnail_path.as_deref().unwrap_or("")
+    )
+}
+
+fn is_display_url(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("data:")
+        || value.starts_with("plasma-media://")
+}
+
+fn looks_like_video(item: &DownloadRecord) -> bool {
+    let name = item.file_name.to_ascii_lowercase();
+    [".mp4", ".mov", ".m4v", ".webm", ".mkv", ".qt"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
+}
+
+fn preview_covers(items: &[DownloadRecord]) -> Vec<DownloadRecord> {
+    let mut covers: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item.thumbnail_url
+                .as_ref()
+                .is_some_and(|url| !url.trim().is_empty())
+                || item
+                    .thumbnail_path
+                    .as_ref()
+                    .is_some_and(|path| !path.trim().is_empty())
+                || item.message_id.is_some()
+        })
+        .take(4)
+        .cloned()
+        .collect();
+    if covers.is_empty() {
+        if let Some(first) = items.first() {
+            covers.push(first.clone());
+        }
+    }
+    covers
+}
+
+fn was_skipped(item: &DownloadRecord) -> bool {
+    item.status == "skipped"
+        || item
+            .extra
+            .get("skipped")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        || item
+            .error
+            .as_deref()
+            .is_some_and(|message| message.to_ascii_lowercase().contains("já exist"))
+}
+
+fn transfer_caption(item: &DownloadRecord) -> String {
+    match item.status.as_str() {
+        "downloading" => {
+            if let Some(total) = item.file_size.filter(|size| *size > 0) {
+                let done = (total as f64 * item.percent() / 100.0).round() as i64;
+                format!(
+                    "Baixando {} de {}",
+                    format_amount(done),
+                    format_bytes(Some(total))
+                )
+            } else if item.percent() >= 1.0 {
+                format!("Baixando · {:.0}%", item.percent())
+            } else {
+                "Baixando…".to_string()
+            }
+        }
+        "completed" if was_skipped(item) => "Já estava na pasta".to_string(),
+        "completed" => match item.file_size.filter(|size| *size > 0) {
+            Some(size) => format!("Salvo · {}", format_bytes(Some(size))),
+            None => "Salvo".to_string(),
+        },
+        "failed" => "Falhou".to_string(),
+        "canceled" | "stopped" => "Cancelado".to_string(),
+        "skipped" => "Já estava na pasta".to_string(),
+        _ => "Na fila".to_string(),
+    }
+}
+
+fn batch_caption(items: &[DownloadRecord], summary: &BatchSummary) -> String {
+    let total = items.len();
+    let saved = summary.completed + summary.skipped;
+    if let Some(current) = items.iter().find(|item| item.is_active()) {
+        format!("{saved} de {total} · {}", transfer_caption(current))
+    } else if summary.failed > 0 {
+        format!("{saved} de {total} salvos · {} falhas", summary.failed)
+    } else if summary.canceled > 0 && saved == 0 {
+        "Cancelado".to_string()
+    } else {
+        format!("{total} arquivos")
+    }
+}
+
+struct ActiveTransfer {
+    count: usize,
+    done: i64,
+    total: i64,
+    percent: f64,
+}
+
+fn active_transfer(items: &[DownloadRecord]) -> Option<ActiveTransfer> {
+    let active: Vec<_> = items.iter().filter(|item| item.is_active()).collect();
+    if active.is_empty() {
+        return None;
+    }
+    let mut done = 0_i64;
+    let mut total = 0_i64;
+    for item in &active {
+        if let Some(size) = item.file_size.filter(|size| *size > 0) {
+            total += size;
+            done += (size as f64 * item.percent() / 100.0).round() as i64;
+        }
+    }
+    let percent = if total > 0 {
+        (done as f64 / total as f64) * 100.0
+    } else {
+        active.iter().map(|item| item.percent()).sum::<f64>() / active.len() as f64
+    };
+    Some(ActiveTransfer {
+        count: active.len(),
+        done,
+        total,
+        percent,
+    })
+}
+
+fn active_label(transfer: &ActiveTransfer) -> String {
+    let count = if transfer.count == 1 {
+        "1 em andamento".to_string()
+    } else {
+        format!("{} em andamento", transfer.count)
+    };
+    if transfer.total > 0 {
+        format!(
+            "{count} · {} de {}",
+            format_amount(transfer.done),
+            format_bytes(Some(transfer.total))
+        )
+    } else {
+        format!("{count} · {:.0}%", transfer.percent)
+    }
+}
+
+fn format_amount(size: i64) -> String {
+    if size <= 0 {
+        "0 B".to_string()
+    } else {
+        format_bytes(Some(size))
     }
 }
 
@@ -1370,6 +1683,10 @@ fn download_media(
     record.source_page_url = Some(info.original_url.clone());
     record.source_mode = Some(if is_audio { "audio" } else { "video" }.to_string());
     record.source_format_id = Some(option.id.clone());
+    record.extra.insert(
+        "hasAudio".to_string(),
+        serde_json::Value::Bool(option.has_audio),
+    );
     record.source_label = Some(info.author.clone());
     record.thumbnail_url = info.thumbnail_url.clone();
     let original_url = info.original_url.clone();
@@ -1442,6 +1759,17 @@ fn can_retry_record(item: &DownloadRecord) -> bool {
     }
 }
 
+pub fn retry_download_by_id(services: AppServices, ui: UiState, id: &str) {
+    let found = ui
+        .transfers
+        .downloads()
+        .into_iter()
+        .find(|item| item.id == id && can_retry_record(item));
+    if let Some(record) = found {
+        retry_record(services, ui, record);
+    }
+}
+
 fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     let Some(url) = item.source_url.clone() else {
         mark_retry_error(services, ui, &item, "Este item não tem URL de origem.");
@@ -1460,7 +1788,7 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
     let mut record = item;
     record.id = id.clone();
     record.status = "downloading".to_string();
-    record.progress = 0.0;
+    record.progress = resumed_progress(&file_path, record.file_size);
     record.error = None;
     record.can_cancel = Some(true);
     record.can_retry = Some(false);
@@ -1469,6 +1797,19 @@ fn retry_record(services: AppServices, ui: UiState, item: DownloadRecord) {
         let result = retry_download(&services, &original, &id, &file_path, &url).await;
         finish_url_download(services, ui, id, result);
     });
+}
+
+fn resumed_progress(file_path: &str, file_size: Option<i64>) -> f64 {
+    let partial = format!("{file_path}.part");
+    let bytes = std::fs::metadata(&partial)
+        .or_else(|_| std::fs::metadata(file_path))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    match file_size.filter(|size| *size > 0) {
+        Some(total) => ((bytes as f64 / total as f64) * 100.0).clamp(0.0, 99.0),
+        None if bytes > 0 => 1.0,
+        None => 0.0,
+    }
 }
 
 fn mark_retry_error(services: AppServices, ui: UiState, item: &DownloadRecord, message: &str) {
@@ -1489,9 +1830,9 @@ fn mark_retry_error(services: AppServices, ui: UiState, item: &DownloadRecord, m
     );
 }
 
-/// Retries a failed item. Native extractors re-analyze the original page when
-/// their direct media URL may have expired; direct web downloads keep using the
-/// original file destination so the partial file can be resumed.
+/// Continues a failed item in the same file. The page is not analyzed again:
+/// the saved format and direct URL are sent back to the downloader, which
+/// appends to the partial bytes when the server still accepts them.
 async fn retry_download(
     services: &AppServices,
     item: &DownloadRecord,
@@ -1500,87 +1841,72 @@ async fn retry_download(
     source_url: &str,
 ) -> plasma_core::Result<()> {
     let platform = item.platform.as_deref().unwrap_or("web");
+    if platform == "web" {
+        return services
+            .downloads
+            .download_url(
+                id.to_string(),
+                source_url.to_string(),
+                file_path.to_string(),
+                None,
+            )
+            .await;
+    }
     let file_name = Path::new(file_path)
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "Destino de download inválido.".to_string())?
         .to_string();
+    let saved = saved_download(item, source_url)?;
+    services
+        .extract
+        .download(
+            id.to_string(),
+            saved.page_url,
+            saved.format_id,
+            saved.direct_url,
+            file_name,
+            saved.has_audio,
+        )
+        .await
+}
 
-    match platform {
-        "youtube" | "twitter" | "tiktok" => {
-            let page_url = item
-                .source_page_url
-                .clone()
-                .unwrap_or_else(|| source_url.to_string());
-            let format_id = item
-                .source_format_id
-                .clone()
-                .ok_or_else(|| "Este download não tem formato salvo.".to_string())?;
-            let info = services.extract.analyze(page_url.clone()).await?;
-            let option = info
-                .formats
-                .video
-                .iter()
-                .chain(info.formats.audio.iter())
-                .find(|option| option.id == format_id)
-                .or_else(|| {
-                    info.formats
-                        .video
-                        .iter()
-                        .chain(info.formats.audio.iter())
-                        .find(|option| option.best.unwrap_or(false))
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    "O formato original não está mais disponível. Analise o link novamente."
-                        .to_string()
-                })?;
-            services
-                .extract
-                .download(
-                    id.to_string(),
-                    page_url,
-                    option.id.clone(),
-                    option.url.clone(),
-                    file_name,
-                    option.has_audio,
-                )
-                .await
-        }
-        "instagram" | "reddit" => {
-            let page_url = item
-                .source_page_url
-                .clone()
-                .unwrap_or_else(|| source_url.to_string());
-            let format_id = item
-                .source_format_id
-                .clone()
-                .unwrap_or_else(|| "best".to_string());
-            let has_audio = item.source_mode.as_deref() == Some("audio");
-            services
-                .extract
-                .download(
-                    id.to_string(),
-                    page_url,
-                    format_id,
-                    Some(source_url.to_string()),
-                    file_name,
-                    has_audio,
-                )
-                .await
-        }
-        _ => {
-            services
-                .downloads
-                .download_url(
-                    id.to_string(),
-                    source_url.to_string(),
-                    file_path.to_string(),
-                    None,
-                )
-                .await
-        }
+struct SavedDownload {
+    page_url: String,
+    format_id: String,
+    direct_url: Option<String>,
+    has_audio: bool,
+}
+
+fn saved_download(item: &DownloadRecord, source_url: &str) -> Result<SavedDownload, String> {
+    let page_url = item
+        .source_page_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| source_url.to_string());
+    if page_url.trim().is_empty() {
+        return Err("Este item não tem URL de origem.".to_string());
     }
+    let format_id = item
+        .source_format_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| "best".to_string());
+    let has_audio = item
+        .extra
+        .get("hasAudio")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let direct_url = item
+        .source_url
+        .clone()
+        .filter(|url| !url.trim().is_empty() && url != &page_url);
+    Ok(SavedDownload {
+        page_url,
+        format_id,
+        direct_url,
+        has_audio,
+    })
 }
 
 fn start_record(services: AppServices, ui: UiState, record: DownloadRecord) {
@@ -1622,17 +1948,25 @@ fn finish_url_download(
             );
         }
         Err(error) => {
+            let err_text = error.to_string();
             update_download(
                 services,
                 ui,
                 &id,
                 |item| {
                     item.status = "failed".to_string();
-                    item.error = Some(error.to_string());
+                    item.error = Some(err_text.clone());
                     item.can_cancel = Some(false);
                     item.can_retry = Some(true);
                 },
                 true,
+            );
+            push_toast_with_action(
+                ui.shell.toasts,
+                format!("Falha no download. {err_text}"),
+                ToastKind::Error,
+                "Tentar de novo",
+                ToastAction::RetryDownload(id),
             );
         }
     }
@@ -1769,7 +2103,8 @@ pub fn QuickQueueDrawer() -> Element {
     let mut quick_error = use_signal(|| None::<String>);
 
     let items = ui.transfers.downloads();
-    let active_count = items.iter().filter(|item| item.is_active()).count();
+    let summary = summarize_transfers(&items);
+    let active_count = summary.active;
     let mut recent: Vec<DownloadRecord> = items;
     recent.sort_by_key(|item| std::cmp::Reverse(item.created_at.unwrap_or_default()));
     recent.truncate(30);
@@ -1777,13 +2112,20 @@ pub fn QuickQueueDrawer() -> Element {
     let trigger_quick = {
         let services = services.clone();
         move || {
-            let raw = quick_url().trim().to_string();
-            if raw.is_empty() {
-                quick_error.set(Some("Cole uma URL HTTPS para baixar.".to_string()));
+            if quick_busy() {
                 return;
             }
-            if !raw.starts_with("https://") {
-                quick_error.set(Some("Use uma URL iniciando com https://.".to_string()));
+            let raw = quick_url().trim().to_string();
+            if raw.is_empty() {
+                return;
+            }
+            if !is_valid_quick_url(&raw) {
+                quick_error.set(None);
+                push_toast(
+                    ui.shell.toasts,
+                    "Link inválido. Use uma URL iniciando com https://.",
+                    ToastKind::Error,
+                );
                 return;
             }
             quick_busy.set(true);
@@ -1858,7 +2200,7 @@ pub fn QuickQueueDrawer() -> Element {
                 }
                 button {
                     class: "icon-button accent",
-                    disabled: quick_busy(),
+                    disabled: quick_busy() || quick_url().trim().is_empty(),
                     title: if quick_busy() { "Analisando…" } else { "Baixar melhor formato" },
                     aria_label: "Baixar link",
                     onclick: {
@@ -1873,6 +2215,38 @@ pub fn QuickQueueDrawer() -> Element {
                 p { class: "error-banner", "{err}" }
             }
 
+            if summary.active > 0 {
+                div { class: "transfer-panel-summary compact",
+                    div { class: "transfer-summary-head",
+                        div { class: "transfer-summary-title",
+                            span { class: "transfer-pulse-dot", aria_hidden: "true" }
+                            span {
+                                if summary.active == 1 {
+                                    "1 transferência ativa"
+                                } else {
+                                    "{summary.active} transferências ativas"
+                                }
+                            }
+                        }
+                        strong { class: "transfer-summary-percent",
+                            if summary.indeterminate {
+                                "…"
+                            } else {
+                                "{summary.overall_percent.round() as i64}%"
+                            }
+                        }
+                    }
+                    div {
+                        class: if summary.indeterminate {
+                            "download-progress indeterminate"
+                        } else {
+                            "download-progress"
+                        },
+                        style: "--progress: {summary.overall_percent}%;",
+                    }
+                }
+            }
+
             if recent.is_empty() {
                 div { class: "empty-state",
                     p { class: "hint", "Nenhum download recente." }
@@ -1884,12 +2258,18 @@ pub fn QuickQueueDrawer() -> Element {
                             let id = item.id.clone();
                             let completed = item.status == "completed";
                             let can_cancel = item.can_cancel.unwrap_or_else(|| item.is_active());
+                            let can_retry = can_retry_record(&item);
                             let path = item.file_path.clone();
                             let cancel_services = services.clone();
+                            let retry_services = services.clone();
+                            let retry_item = item.clone();
+                            let indeterminate = item.is_active()
+                                && item.percent() < 1.0
+                                && item.file_size.unwrap_or(0) <= 0;
                             rsx! {
                                 div {
                                     key: "{id}",
-                                    class: "drawer-item-card",
+                                    class: if item.is_active() { "drawer-item-card downloading" } else { "drawer-item-card" },
                                     oncontextmenu: {
                                         let record = item.clone();
                                         move |event: Event<MouseData>| {
@@ -1904,58 +2284,79 @@ pub fn QuickQueueDrawer() -> Element {
                                             )));
                                         }
                                     },
-                                    div { class: "drawer-item-top",
-                                        strong { title: "{item.title()}", "{item.title()}" }
-                                        span { class: "pill",
+                                    div { class: "drawer-item-main",
+                                        DownloadArtwork {
+                                            items: vec![item.clone()],
+                                            status: item.status.clone(),
+                                            group: false,
+                                            progress: item.percent(),
+                                            count: 1,
+                                        }
+                                        div { class: "drawer-item-body",
+                                            div { class: "drawer-item-top",
+                                                strong { title: "{item.title()}", "{item.title()}" }
+                                                span { class: "download-status-pill {item.status}",
+                                                    if item.is_active() {
+                                                        "{item.percent().round() as i64}%"
+                                                    } else {
+                                                        "{status_label(&item.status)}"
+                                                    }
+                                                }
+                                            }
                                             if item.is_active() {
-                                                "{item.percent().round() as i64}%"
-                                            } else {
-                                                "{status_label(&item.status)}"
+                                                div {
+                                                    class: if indeterminate {
+                                                        "download-progress indeterminate"
+                                                    } else {
+                                                        "download-progress"
+                                                    },
+                                                    style: "--progress: {item.percent()}%;",
+                                                }
                                             }
-                                        }
-                                    }
-                                    if item.is_active() {
-                                        div { class: "progress-track",
-                                            div {
-                                                class: "progress-fill",
-                                                style: "width: {item.percent()}%;",
-                                            }
-                                        }
-                                    }
-                                    div { class: "drawer-item-top",
-                                        span { class: "hint", "{platform_label(item.platform.as_deref())}" }
-                                        div { class: "download-row-actions",
-                                            if can_cancel {
-                                                button {
-                                                    class: "btn small ghost",
-                                                    onclick: {
-                                                        let id = id.clone();
-                                                        move |_| {
-                                                            if cancel_services.downloads.cancel(&id) {
-                                                                update_download(
-                                                                    cancel_services.clone(),
-                                                                    ui,
-                                                                    &id,
-                                                                    |rec| {
-                                                                        rec.status = "canceled".to_string();
-                                                                        rec.can_cancel = Some(false);
-                                                                        rec.can_retry = Some(true);
-                                                                    },
-                                                                    true,
-                                                                );
+                                            div { class: "drawer-item-meta",
+                                                span { class: "hint",
+                                                    "{platform_label(item.platform.as_deref())} · {transfer_caption(&item)}"
+                                                }
+                                                div { class: "download-row-actions",
+                                                    if can_cancel {
+                                                        button {
+                                                            class: "btn small ghost",
+                                                            onclick: {
+                                                                let id = id.clone();
+                                                                move |_| {
+                                                                    if cancel_services.downloads.cancel(&id) {
+                                                                        update_download(
+                                                                            cancel_services.clone(),
+                                                                            ui,
+                                                                            &id,
+                                                                            |rec| {
+                                                                                rec.status = "canceled".to_string();
+                                                                                rec.can_cancel = Some(false);
+                                                                                rec.can_retry = Some(true);
+                                                                            },
+                                                                            true,
+                                                                        );
+                                                                    }
+                                                                }
+                                                            },
+                                                            "Cancelar"
+                                                        }
+                                                    } else if can_retry {
+                                                        button {
+                                                            class: "btn small",
+                                                            onclick: move |_| retry_record(retry_services.clone(), ui, retry_item.clone()),
+                                                            "Retomar"
+                                                        }
+                                                    } else if completed {
+                                                        if let Some(path) = path {
+                                                            button {
+                                                                class: "btn small soft",
+                                                                onclick: move |_| {
+                                                                    let _ = plasma_platform::open_path(&path);
+                                                                },
+                                                                "Abrir"
                                                             }
                                                         }
-                                                    },
-                                                    "Cancelar"
-                                                }
-                                            } else if completed {
-                                                if let Some(path) = path {
-                                                    button {
-                                                        class: "btn small soft",
-                                                        onclick: move |_| {
-                                                            let _ = plasma_platform::open_path(&path);
-                                                        },
-                                                        "Abrir"
                                                     }
                                                 }
                                             }
@@ -1971,6 +2372,65 @@ pub fn QuickQueueDrawer() -> Element {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TransferSummary {
+    active: usize,
+    completed: usize,
+    overall_percent: f64,
+    indeterminate: bool,
+}
+
+fn summarize_transfers(items: &[DownloadRecord]) -> TransferSummary {
+    let mut active = 0usize;
+    let mut completed = 0usize;
+    let mut total_bytes = 0u64;
+    let mut downloaded_bytes = 0u64;
+    let mut percent_sum = 0.0f64;
+
+    for item in items {
+        if item.is_active() {
+            active += 1;
+            percent_sum += item.percent().clamp(0.0, 100.0);
+            if let Some(size) = item.file_size.filter(|value| *value > 0) {
+                let size_u64 = size as u64;
+                total_bytes = total_bytes.saturating_add(size_u64);
+                let done =
+                    ((item.percent().clamp(0.0, 100.0) / 100.0) * size_u64 as f64).round() as u64;
+                downloaded_bytes = downloaded_bytes.saturating_add(done.min(size_u64));
+            }
+        } else if item.status == "completed" {
+            completed += 1;
+        }
+    }
+
+    let overall_percent = if active == 0 {
+        0.0
+    } else if total_bytes > 0 {
+        (downloaded_bytes as f64 / total_bytes as f64) * 100.0
+    } else {
+        percent_sum / active as f64
+    };
+    let indeterminate = active > 0 && overall_percent < 1.0 && total_bytes == 0;
+
+    TransferSummary {
+        active,
+        completed,
+        overall_percent,
+        indeterminate,
+    }
+}
+
+fn is_valid_quick_url(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix("https://") else {
+        return false;
+    };
+    if rest.is_empty() || raw.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && host.contains('.') && !host.starts_with('.') && !host.ends_with('.')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1982,6 +2442,47 @@ mod tests {
             "video.mp4"
         );
         assert_eq!(filename_from_url("https://example.com/"), "download");
+    }
+
+    #[test]
+    fn transfer_caption_uses_bytes_when_the_size_is_known() {
+        let mut item = DownloadRecord::new_url(
+            "1".into(),
+            "clip.mp4".into(),
+            "/tmp/clip.mp4".into(),
+            "https://cdn.example.com/clip.mp4".into(),
+        );
+        item.file_size = Some(10 * 1024 * 1024);
+        item.progress = 25.0;
+        let caption = transfer_caption(&item);
+        assert!(caption.starts_with("Baixando "));
+        assert!(caption.contains(" de "));
+        item.status = "completed".into();
+        item.progress = 100.0;
+        assert!(transfer_caption(&item).starts_with("Salvo"));
+    }
+
+    #[test]
+    fn retry_keeps_the_saved_format_and_file_url() {
+        let mut item = DownloadRecord::new_url(
+            "youtube-1".into(),
+            "clip.mp4".into(),
+            "/tmp/clip.mp4".into(),
+            "https://rr.example/video.mp4".into(),
+        );
+        item.platform = Some("youtube".into());
+        item.source_page_url = Some("https://www.youtube.com/watch?v=abc".into());
+        item.source_format_id = Some("137".into());
+        item.extra
+            .insert("hasAudio".into(), serde_json::Value::Bool(false));
+        let saved = saved_download(&item, "https://rr.example/video.mp4").unwrap();
+        assert_eq!(saved.page_url, "https://www.youtube.com/watch?v=abc");
+        assert_eq!(saved.format_id, "137");
+        assert_eq!(
+            saved.direct_url.as_deref(),
+            Some("https://rr.example/video.mp4")
+        );
+        assert!(!saved.has_audio);
     }
 
     #[test]
@@ -2064,5 +2565,42 @@ mod tests {
         assert_eq!(media_extension(&option, false), "webm");
         option.url = None;
         assert_eq!(media_extension(&option, true), "m4a");
+    }
+
+    #[test]
+    fn validates_quick_queue_https_urls() {
+        assert!(is_valid_quick_url("https://youtube.com/watch?v=abc"));
+        assert!(is_valid_quick_url("https://x.com/user/status/123"));
+        assert!(!is_valid_quick_url("http://youtube.com/watch?v=abc"));
+        assert!(!is_valid_quick_url("https://"));
+        assert!(!is_valid_quick_url("https://sem-ponto"));
+        assert!(!is_valid_quick_url("https://foo bar.com"));
+        assert!(!is_valid_quick_url("texto qualquer"));
+    }
+
+    #[test]
+    fn summarizes_active_and_completed_transfers() {
+        let mut active = DownloadRecord::new_url(
+            "1".into(),
+            "a.mp4".into(),
+            "/tmp/a.mp4".into(),
+            "https://cdn.example.com/a.mp4".into(),
+        );
+        active.file_size = Some(200);
+        active.progress = Some(50.0);
+
+        let mut done = DownloadRecord::new_url(
+            "2".into(),
+            "b.mp4".into(),
+            "/tmp/b.mp4".into(),
+            "https://cdn.example.com/b.mp4".into(),
+        );
+        done.status = "completed".into();
+
+        let summary = summarize_transfers(&[active, done]);
+        assert_eq!(summary.active, 1);
+        assert_eq!(summary.completed, 1);
+        assert!((summary.overall_percent - 50.0).abs() < 0.01);
+        assert!(!summary.indeterminate);
     }
 }

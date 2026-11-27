@@ -4,10 +4,12 @@
 //! with a media grid, mirroring what the React dashboard does.
 
 mod layout;
+mod text;
 mod thumbnail;
 
 use layout::*;
 pub(crate) use layout::{format_timestamp, reply_sender, reply_snippet};
+use text::MessageText;
 pub(crate) use thumbnail::MessageThumbnail;
 
 use crate::context::{save_album, ContextMenuState, ContextTarget};
@@ -297,6 +299,8 @@ pub fn MessageTimeline(
     /// Called when the reader scrolls into the oldest loaded messages, so the
     /// caller can fetch the previous page (React parity: `startReached`).
     on_reach_start: EventHandler<()>,
+    on_open_link: EventHandler<String>,
+    on_send_command: EventHandler<String>,
 ) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
@@ -795,13 +799,18 @@ pub fn MessageTimeline(
                                                     p { class: "message-text message-deleted", "Mensagem apagada" }
                                                 } else {
                                                     if !message.text.trim().is_empty() {
-                                                        p { class: "message-text", "{message.text}" }
+                                                        MessageText {
+                                                            text: message.text.clone(),
+                                                            on_open_link,
+                                                            on_send_command,
+                                                        }
                                                     }
                                                     if message.has_media && (message.is_photo || message.is_video) {
                                                         MessageThumbnail {
                                                             chat_id,
                                                             message_id: message.id,
                                                             is_video: message.is_video,
+                                                            aspect: thumb_aspect(&message),
                                                             on_open: {
                                                                 let message = message.clone();
                                                                 move |_| on_action.call((message.clone(), MessageAction::OpenMedia))
@@ -1099,7 +1108,11 @@ pub fn MessageTimeline(
                                                 }
                                                 if let Some(caption) = caption.as_ref() {
                                                     if !caption.text.trim().is_empty() {
-                                                        p { class: "message-text", "{caption.text}" }
+                                                        MessageText {
+                                                            text: caption.text.clone(),
+                                                            on_open_link,
+                                                            on_send_command,
+                                                        }
                                                     }
                                                 }
                                                 div {
@@ -1148,6 +1161,7 @@ pub fn MessageTimeline(
                                                                         chat_id,
                                                                         message_id: media.id,
                                                                         is_video: media.is_video,
+                                                                        aspect: None,
                                                                         on_open: {
                                                                             let media = media.clone();
                                                                             let album_lightbox = album_lightbox.clone();
@@ -1466,6 +1480,21 @@ mod tests {
         let portrait_album = TimelineItem::Album(vec![portrait, second]);
         let landscape_album = TimelineItem::Album(vec![landscape, landscape_next]);
         assert!(estimate_item_height(&portrait_album) > estimate_item_height(&landscape_album));
+    }
+
+    #[test]
+    fn portrait_photos_estimate_taller_than_landscape_photos() {
+        let mut portrait = photo(1, "");
+        portrait.grouped_id = None;
+        portrait.media_width = Some(900);
+        portrait.media_height = Some(1600);
+        let mut landscape = photo(2, "");
+        landscape.grouped_id = None;
+        landscape.media_width = Some(1600);
+        landscape.media_height = Some(900);
+        let portrait_item = TimelineItem::Message(Box::new(portrait));
+        let landscape_item = TimelineItem::Message(Box::new(landscape));
+        assert!(estimate_item_height(&portrait_item) > estimate_item_height(&landscape_item));
     }
 
     #[test]

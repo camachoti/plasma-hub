@@ -9,7 +9,8 @@ use time::OffsetDateTime;
 const OVERSCAN: usize = 4;
 const ALBUM_GAP: f64 = 4.0;
 /// Typical album width inside a bubble, used only to estimate the row height.
-const ALBUM_CONTENT_WIDTH: f64 = 320.0;
+const ALBUM_CONTENT_WIDTH: f64 = 420.0;
+const SINGLE_MEDIA_WIDTH: f64 = 360.0;
 /// Width / height used when Telegram did not report a size. Matches the old
 /// short tile so existing conversations do not jump.
 const ALBUM_FALLBACK_ASPECT: f64 = 1.52;
@@ -175,6 +176,10 @@ pub(super) struct RowMeasurements {
     pub(super) at_bottom: bool,
 }
 
+pub(super) fn thumb_aspect(message: &TdlibMessageInfo) -> Option<f64> {
+    item_aspect(message).map(|aspect| aspect.clamp(0.68, 1.9))
+}
+
 fn item_aspect(message: &TdlibMessageInfo) -> Option<f64> {
     let width = message.media_width?;
     let height = message.media_height?;
@@ -269,7 +274,8 @@ pub(super) fn estimate_height(message: &TdlibMessageInfo) -> f64 {
     let mut height = 64.0 + lines * 19.0;
     if message.has_media {
         height += if message.is_photo || message.is_video {
-            136.0
+            let aspect = thumb_aspect(message).unwrap_or(ALBUM_FALLBACK_ASPECT);
+            SINGLE_MEDIA_WIDTH / aspect
         } else {
             24.0
         };

@@ -708,6 +708,127 @@ pub(super) fn jump_to_message(
     });
 }
 
+/// Opens a Telegram link in the shell.
+///
+/// A previewable chat opens without joining. A join request, or an invite that
+/// cannot be previewed, fills `join_offer` so the modal can ask first.
+pub(super) fn open_telegram_link(
+    services: AppServices,
+    mut ui: UiState,
+    url: String,
+    mut pending_search_jump: Signal<Option<super::PendingSearchJump>>,
+    mut join_offer: Signal<Option<super::join::JoinOffer>>,
+) {
+    let url = normalize_clicked_link(&url);
+    if !plasma_telegram::looks_like_telegram_link(&url) {
+        let external = if url.to_ascii_lowercase().starts_with("www.") {
+            format!("https://{url}")
+        } else {
+            url
+        };
+        if let Err(error) = plasma_platform::open_url(&external) {
+            push_toast(ui.shell.toasts, error, ToastKind::Error);
+        }
+        return;
+    }
+    spawn(async move {
+        let target = match services.telegram.resolve_link(url).await {
+            Ok(target) => target,
+            Err(error) => {
+                push_toast(ui.shell.toasts, error.to_string(), ToastKind::Error);
+                return;
+            }
+        };
+        if !target.success {
+            push_toast(
+                ui.shell.toasts,
+                target
+                    .error
+                    .unwrap_or_else(|| "Não foi possível abrir o link.".to_string()),
+                ToastKind::Error,
+            );
+            return;
+        }
+        let offer = target.needs_join.then(|| super::join::JoinOffer {
+            chat_id: target.chat.as_ref().and_then(|chat| chat.id.parse().ok()),
+            title: target
+                .chat
+                .as_ref()
+                .map(|chat| chat.title.clone())
+                .or(target.topic_title.clone())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "Chat".to_string()),
+            description: target.description.clone().unwrap_or_default(),
+            member_count: target.member_count,
+            is_channel: target.is_channel,
+            is_group: target.is_group,
+            join_by_request: target.join_by_request,
+            invite_link: target.invite_link.clone(),
+            photo_data_url: target.photo_data_url.clone(),
+            show_modal: target.chat.is_none() || target.join_by_request,
+            pending: false,
+        });
+        let Some(mut chat) = target.chat else {
+            join_offer.set(offer);
+            return;
+        };
+        if target.topic_id.is_some() {
+            chat.has_topics = true;
+        }
+        let mut chats = ui.conversation.chats();
+        if let Some(existing) = chats.iter_mut().find(|item| item.id == chat.id) {
+            *existing = chat.clone();
+        } else {
+            chats.insert(0, chat.clone());
+        }
+        set_if_changed(ui.conversation.chats, chats);
+        let topic_id = target.topic_id;
+        let topic_kind = target.topic_kind.clone();
+        chat_list::open_chat(services, ui, chat.clone());
+        if let Some(topic_id) = topic_id {
+            let kind = topic_kind.clone().unwrap_or_else(|| "forum".to_string());
+            ui.conversation
+                .selected_topic
+                .set(Some(TdlibForumTopicInfo {
+                    id: topic_id,
+                    kind,
+                    title: target
+                        .topic_title
+                        .clone()
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            search_topic_title(topic_kind.as_deref().unwrap_or("forum")).to_string()
+                        }),
+                    is_closed: false,
+                    is_pinned: false,
+                    unread_count: 0,
+                }));
+        }
+        if let Some(message_id) = target.message_id {
+            pending_search_jump.set(Some(super::PendingSearchJump {
+                chat_id: chat.id,
+                topic_id,
+                topic_kind,
+                message_id,
+            }));
+        }
+        join_offer.set(offer);
+    });
+}
+
+fn normalize_clicked_link(url: &str) -> String {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("t.me/")
+        || lower.starts_with("telegram.me/")
+        || lower.starts_with("telegram.dog/")
+    {
+        format!("https://{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub(super) fn load_older(
     services: AppServices,
     mut ui: UiState,

@@ -8,6 +8,7 @@ pub mod global_search;
 pub mod login;
 pub mod palette;
 pub mod reaction_picker;
+pub mod reels;
 pub mod select;
 pub mod settings;
 pub mod spike;

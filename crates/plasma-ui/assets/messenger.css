@@ -538,6 +538,28 @@ article.message-row.own .message-reply-sender {
   overflow-wrap: anywhere;
 }
 
+.message-link,
+.message-command {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  white-space: inherit;
+  overflow-wrap: inherit;
+}
+
+.message-link:hover,
+.message-command:hover {
+  color: var(--accent-2, var(--accent));
+}
+
 .message-deleted {
   font-style: italic;
   opacity: 0.65;
@@ -548,7 +570,8 @@ article.message-row.own .message-reply-sender {
   position: relative;
   inline-size: 100%;
   max-inline-size: 360px;
-  block-size: 210px;
+  aspect-ratio: var(--thumb-aspect, 1.52);
+  block-size: auto;
   border-radius: var(--radius-media);
   overflow: clip;
   background: var(--bg-card);
@@ -611,6 +634,7 @@ article.message-row.own .message-reply-sender {
   max-inline-size: none;
   inline-size: 100%;
   block-size: 100%;
+  aspect-ratio: auto;
   border-radius: 0;
 }
 
@@ -919,6 +943,19 @@ article.message-row:focus-within .message-actions {
 .chat-list-empty {
   padding: 36px 16px;
   text-align: center;
+}
+
+.composer-join {
+  padding: 10px 14px;
+  border-radius: var(--composer-radius);
+  background: var(--bg-side);
+  border: 1px solid var(--line-soft);
+  color: var(--text-1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
 }
 
 .composer-readonly {

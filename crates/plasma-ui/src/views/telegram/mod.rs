@@ -13,6 +13,7 @@ use crate::views::chat_list;
 use crate::views::downloads::{DownloadsView, QuickQueueDrawer};
 use crate::views::duplicate_search::DuplicateSearchDialog;
 use crate::views::global_search::GlobalSearchResults;
+use crate::views::reels::ReelsView;
 use crate::views::settings::SettingsView;
 use crate::views::spike::VirtualTimeline;
 use crate::views::timeline::{format_timestamp, MessageAction, MessageTimeline};
@@ -31,21 +32,23 @@ mod composer;
 mod conversation;
 mod conversation_header;
 mod forward;
+mod join;
 mod mass_download;
 mod media;
 mod preview;
 
 use chat_column::ChatListColumn;
 use composer::{
-    close_drop_media, collect_dropped_media, open_dropped_media_preview, ComposerInput,
-    DropMediaDialog, MessageComposer,
+    close_drop_media, collect_dropped_media, open_dropped_media_preview, send_bot_command,
+    ComposerInput, DropMediaDialog, MessageComposer,
 };
 use conversation::{
     chat_from_global_result, jump_to_message, load_conversation, load_forum_topics, load_older,
-    parse_chat_id, run_global_search_more, search_topic_title, SearchWatch,
+    open_telegram_link, parse_chat_id, run_global_search_more, search_topic_title, SearchWatch,
 };
 use conversation_header::ConversationHeader;
 use forward::ForwardDialog;
+use join::{confirm_join, JoinDialog, JoinOffer};
 use mass_download::MassDownloadPanel;
 use media::{MediaLightbox, MediaPanel};
 use preview::{PreviewSidebar, PreviewStage};
@@ -151,6 +154,7 @@ fn PreviewWorkspace() -> Element {
             main { class: "stage-pane",
                 match active_tab {
                     Tab::Telegram => rsx! { PreviewStage { selected: preview_selected } },
+                    Tab::Reels => rsx! { ReelsView {} },
                     Tab::Downloads | Tab::Twitter => rsx! { DownloadsView {} },
                     Tab::Settings => rsx! { SettingsView {} },
                 }
@@ -197,6 +201,15 @@ fn MobileBottomNav() -> Element {
                 span { "Chats" }
             }
             button {
+                class: if tab == Tab::Reels { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
+                onclick: move |_| {
+                    ui.shell.tab.set(Tab::Reels);
+                    ui.conversation.mobile_show_list.set(false);
+                },
+                Icon { name: IconName::Play, size: 18, class: "icon" }
+                span { "Reels" }
+            }
+            button {
                 class: if in_downloads { "sidebar-nav-btn active" } else { "sidebar-nav-btn" },
                 onclick: move |_| {
                     ui.shell.tab.set(Tab::Downloads);
@@ -240,6 +253,17 @@ fn RealTelegram() -> Element {
     let conversation_epoch_timeline = conversation_epoch.clone();
     let mut loading_older = use_signal(|| false);
     let jump_to = use_signal(|| None::<i64>);
+    let mut join_offer = use_signal(|| None::<JoinOffer>);
+    use_effect(move || {
+        let current = ui.conversation.selected_chat().map(|chat| chat.id);
+        let Some(offer) = join_offer() else {
+            return;
+        };
+        let offered = offer.chat_id.map(|id| id.to_string());
+        if offered.is_some() && offered != current {
+            join_offer.set(None);
+        }
+    });
     let mut avatar_chat = use_signal(|| None::<String>);
     let composer = use_signal(String::new);
     let sending = use_signal(|| false);
@@ -1053,6 +1077,7 @@ fn RealTelegram() -> Element {
 
             main { class: "stage-pane",
                 match active_tab {
+                    Tab::Reels => rsx! { ReelsView {} },
                     Tab::Downloads | Tab::Twitter => rsx! { DownloadsView {} },
                     Tab::Settings => rsx! { SettingsView {} },
                     Tab::Telegram => rsx! {
@@ -1353,6 +1378,24 @@ fn RealTelegram() -> Element {
                                                             );
                                                         }
                                                     },
+                                                    on_open_link: {
+                                                        let services = services.clone();
+                                                        move |url| {
+                                                            open_telegram_link(
+                                                                services.clone(),
+                                                                ui,
+                                                                url,
+                                                                pending_search_jump,
+                                                                join_offer,
+                                                            );
+                                                        }
+                                                    },
+                                                    on_send_command: {
+                                                        let services = services.clone();
+                                                        move |command| {
+                                                            send_bot_command(services.clone(), ui, command);
+                                                        }
+                                                    },
                                                 }
                                             }
                                         }
@@ -1399,6 +1442,7 @@ fn RealTelegram() -> Element {
                                     disabled: composer_disabled,
                                     media_disabled,
                                     topic_closed,
+                                    join_offer,
                                 }
                             } else {
                                 div { class: "empty-state",
@@ -1590,6 +1634,28 @@ fn RealTelegram() -> Element {
                     key: "{state.message_id}",
                     state,
                     on_close: move |_| ui.panels.lightbox.set(None),
+                }
+            }
+
+            if let Some(offer) = join_offer().filter(|offer| offer.show_modal) {
+                JoinDialog {
+                    offer: offer.clone(),
+                    on_cancel: move |_| {
+                        let Some(current) = join_offer() else {
+                            return;
+                        };
+                        if current.chat_id.is_none() {
+                            join_offer.set(None);
+                        } else {
+                            let mut next = current;
+                            next.show_modal = false;
+                            join_offer.set(Some(next));
+                        }
+                    },
+                    on_confirm: {
+                        let services = services.clone();
+                        move |_| confirm_join(services.clone(), ui, join_offer)
+                    },
                 }
             }
 

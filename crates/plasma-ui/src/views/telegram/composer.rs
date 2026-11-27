@@ -10,6 +10,7 @@ use plasma_telegram::TdlibMessageInfo;
 use std::path::Path;
 
 use super::conversation::parse_chat_id;
+use super::join::{confirm_join, join_bar_label, JoinOffer};
 use super::{
     DropMediaState, DroppedMediaSelection, PendingDroppedMedia, MAX_DROPPED_MEDIA_BYTES,
     MAX_DROPPED_MEDIA_FILES,
@@ -441,6 +442,75 @@ pub(super) fn apply_sent_message(
     update_chat_preview(*ui, expected_chat, &message);
 }
 
+/// Sends a bot command from a message without clearing the draft.
+pub(super) fn send_bot_command(services: AppServices, mut ui: UiState, command: String) {
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return;
+    }
+    let Some(chat) = ui.conversation.selected_chat() else {
+        push_toast(
+            ui.shell.toasts,
+            "Escolha uma conversa primeiro.",
+            ToastKind::Info,
+        );
+        return;
+    };
+    if !chat.can_send_messages {
+        push_toast(
+            ui.shell.toasts,
+            "Não é possível enviar mensagens neste chat.",
+            ToastKind::Info,
+        );
+        return;
+    }
+    let Some(chat_id) = parse_chat_id(&chat) else {
+        return;
+    };
+    let topic = ui.conversation.selected_topic();
+    let topic_id = topic.as_ref().map(|item| item.id);
+    let topic_kind = topic.as_ref().map(|item| item.kind.clone());
+    let expected_chat = chat.id.clone();
+    let expected_topic = topic.as_ref().map(|item| item.id);
+    let cache_key = message_cache_key(&chat.id, topic.as_ref());
+    spawn(async move {
+        match services
+            .telegram
+            .send_message(chat_id, command, None, topic_id, topic_kind)
+            .await
+        {
+            Ok(result) if result.success => {
+                let still_here = ui.conversation.selected_chat().map(|chat| chat.id)
+                    == Some(expected_chat.clone())
+                    && ui.conversation.selected_topic().map(|topic| topic.id) == expected_topic;
+                if let Some(message) = result.message {
+                    if still_here {
+                        let mut messages = ui.conversation.messages();
+                        merge_messages(&mut messages, [message.clone()]);
+                        ui.conversation.messages.set(messages.clone());
+                        let cache_services = services.clone();
+                        spawn(async move {
+                            let _ = cache_services
+                                .telegram
+                                .cache_messages(cache_key, messages)
+                                .await;
+                        });
+                    }
+                    update_chat_preview(ui, &expected_chat, &message);
+                }
+            }
+            Ok(result) => push_toast(
+                ui.shell.toasts,
+                result
+                    .error
+                    .unwrap_or_else(|| "Não foi possível enviar o comando.".to_string()),
+                ToastKind::Error,
+            ),
+            Err(error) => push_toast(ui.shell.toasts, error.to_string(), ToastKind::Error),
+        }
+    });
+}
+
 pub(super) fn update_chat_preview(ui: UiState, chat_id: &str, message: &TdlibMessageInfo) {
     let mut chats = ui.conversation.chats();
     if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
@@ -709,6 +779,7 @@ pub(super) fn MessageComposer(
     disabled: bool,
     media_disabled: bool,
     topic_closed: bool,
+    mut join_offer: Signal<Option<JoinOffer>>,
 ) -> Element {
     let services = use_context::<AppServices>();
     let mut ui = use_context::<UiState>();
@@ -748,13 +819,54 @@ pub(super) fn MessageComposer(
                 p { class: "error-banner composer-error", "{message}" }
             }
             if disabled {
-                div { class: "composer-readonly",
-                    Icon { name: IconName::Info, size: 15, class: "icon" }
-                    span {
-                        if topic_closed {
-                            "Este tópico está fechado."
-                        } else {
-                            "Somente leitura nesta conversa."
+                if let Some(offer) = join_offer().filter(|offer| {
+                    ui.conversation
+                        .selected_chat()
+                        .and_then(|chat| parse_chat_id(&chat))
+                        == offer.chat_id
+                        && offer.chat_id.is_some()
+                }) {
+                    div { class: "composer-join",
+                        span { "{join_bar_label(&offer)}" }
+                        button {
+                            class: "btn primary small",
+                            disabled: offer.pending,
+                            onclick: {
+                                let services = services.clone();
+                                move |_| {
+                                    let Some(current) = join_offer() else {
+                                        return;
+                                    };
+                                    if current.pending {
+                                        return;
+                                    }
+                                    if current.join_by_request {
+                                        let mut next = current;
+                                        next.show_modal = true;
+                                        join_offer.set(Some(next));
+                                    } else {
+                                        confirm_join(services.clone(), ui, join_offer);
+                                    }
+                                }
+                            },
+                            if offer.pending {
+                                "Pedido enviado"
+                            } else if offer.join_by_request {
+                                "Solicitar entrada"
+                            } else {
+                                "Entrar"
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "composer-readonly",
+                        Icon { name: IconName::Info, size: 15, class: "icon" }
+                        span {
+                            if topic_closed {
+                                "Este tópico está fechado."
+                            } else {
+                                "Somente leitura nesta conversa."
+                            }
                         }
                     }
                 }

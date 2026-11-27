@@ -111,6 +111,7 @@ pub(super) fn SharedMediaCard(
                 chat_id,
                 message_id: item.id,
                 is_video: item.is_video,
+                aspect: None,
                 on_open: {
                     let item = item.clone();
                     let album = album.clone();
@@ -882,6 +883,7 @@ pub(super) fn MediaLightbox(state: LightboxState, on_close: EventHandler<()>) ->
                                                     chat_id: state.chat_id,
                                                     message_id: item.message_id,
                                                     is_video: item.is_video,
+                                                    aspect: None,
                                                     on_open: {
                                                         let next_state = next_state.clone();
                                                         move |_| {
@@ -935,6 +937,8 @@ fn lightbox_preview(is_photo: bool, is_video: bool, mime_type: Option<&str>) -> 
         .unwrap_or_default();
     if is_video || mime.starts_with("video/") {
         LightboxPreview::Video
+    } else if matches!(mime.as_str(), "image/heic" | "image/heif") {
+        LightboxPreview::File
     } else if is_photo
         || matches!(
             mime.as_str(),
